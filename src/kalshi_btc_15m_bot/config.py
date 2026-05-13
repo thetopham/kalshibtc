@@ -113,8 +113,11 @@ def _deep_get(raw: dict[str, Any], section: str, key: str, default: Any) -> Any:
     return value.get(key, default)
 
 
-def _resolve_data_dir(value: str | Path) -> Path:
-    override = os.getenv("KALSHI_BTC15M_DATA_DIR")
+def _resolve_data_dir(value: str | Path, *, allow_env_override: bool) -> Path:
+    # Production/demo live configs intentionally set their own data_dir so live
+    # fills cannot be mixed with a stale paper .env override. Keep the env
+    # override only for configs that omit data_dir entirely.
+    override = os.getenv("KALSHI_BTC15M_DATA_DIR") if allow_env_override else None
     path = Path(override or value)
     return path.expanduser().resolve() if path.is_absolute() else (Path.cwd() / path).resolve()
 
@@ -138,7 +141,7 @@ def load_config(path: str | Path | None = None) -> BotConfig:
     cfg = BotConfig(
         trading_mode=str(raw.get("trading_mode", "paper")),
         enable_live_orders=bool(raw.get("enable_live_orders", False)),
-        data_dir=_resolve_data_dir(raw.get("data_dir", "data")),
+        data_dir=_resolve_data_dir(raw.get("data_dir", "data"), allow_env_override="data_dir" not in raw),
         kalshi=KalshiConfig(
             base_url=str(_deep_get(raw, "kalshi", "base_url", KalshiConfig.base_url)),
             series_ticker=str(_deep_get(raw, "kalshi", "series_ticker", KalshiConfig.series_ticker)),

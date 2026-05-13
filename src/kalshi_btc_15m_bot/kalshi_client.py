@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
@@ -44,10 +45,11 @@ class KalshiPublicClient:
     def get_market(self, ticker: str) -> KalshiMarket:
         payload = self._get(f"/markets/{ticker}")
         raw = payload.get("market", payload)
-        return KalshiMarket.from_api(raw)
+        return self._with_orderbook_quote(KalshiMarket.from_api(raw))
 
-    def get_orderbook(self, ticker: str) -> dict[str, Any]:
-        return self._get(f"/markets/{ticker}/orderbook")
+    def get_orderbook(self, ticker: str, *, depth: int | None = None) -> dict[str, Any]:
+        params = {"depth": depth} if depth is not None else None
+        return self._get(f"/markets/{ticker}/orderbook", params=params)
 
     def current_btc15m_market(self, series_ticker: str, status: str = "open") -> KalshiMarket:
         markets = self.list_markets(series_ticker=series_ticker, status=status, limit=50)
@@ -61,15 +63,63 @@ class KalshiPublicClient:
         now = now_utc()
         live = [m for m in markets if _is_live_window(m, now)]
         if live:
-            return min(live, key=lambda m: m.close_time or now)
+            return self._with_orderbook_quote(min(live, key=lambda m: m.close_time or now))
 
         upcoming_or_recent = [m for m in markets if m.close_time is not None]
         if upcoming_or_recent:
-            return min(upcoming_or_recent, key=lambda m: abs((m.close_time or now) - now))
-        return markets[0]
+            return self._with_orderbook_quote(
+                min(upcoming_or_recent, key=lambda m: abs((m.close_time or now) - now))
+            )
+        return self._with_orderbook_quote(markets[0])
+
+    def _with_orderbook_quote(self, market: KalshiMarket) -> KalshiMarket:
+        """Refresh top-of-book quotes from Kalshi's orderbook when available.
+
+        The /markets payload usually includes bid/ask fields, but the orderbook
+        is the source of truth for currently resting bids. Kalshi returns YES
+        bids and NO bids; asks are complements of the opposite side's best bid.
+        If the orderbook is unavailable, keep the /markets quote and fail open
+        for read-only quoting instead of breaking status/scan output.
+        """
+        try:
+            payload = self.get_orderbook(market.ticker, depth=1)
+        except requests.RequestException:
+            return market
+        orderbook = payload.get("orderbook_fp") or payload.get("orderbook") or {}
+        yes_bid = _best_bid(orderbook.get("yes_dollars") or orderbook.get("yes"))
+        no_bid = _best_bid(orderbook.get("no_dollars") or orderbook.get("no"))
+        if yes_bid is None and no_bid is None:
+            return market
+        refreshed_yes_bid = yes_bid if yes_bid is not None else market.yes_bid
+        refreshed_no_bid = no_bid if no_bid is not None else market.no_bid
+        refreshed_yes_ask = (1.0 - refreshed_no_bid) if no_bid is not None else market.yes_ask
+        refreshed_no_ask = (1.0 - refreshed_yes_bid) if yes_bid is not None else market.no_ask
+        return replace(
+            market,
+            yes_bid=round(refreshed_yes_bid, 4),
+            yes_ask=round(refreshed_yes_ask, 4),
+            no_bid=round(refreshed_no_bid, 4),
+            no_ask=round(refreshed_no_ask, 4),
+        )
 
 
 def _is_live_window(market: KalshiMarket, now: datetime) -> bool:
     if not market.open_time or not market.close_time:
         return False
     return market.open_time <= now < market.close_time
+
+
+def _best_bid(levels: Any) -> float | None:
+    best: float | None = None
+    if not isinstance(levels, list):
+        return None
+    for level in levels:
+        if not isinstance(level, list | tuple) or not level:
+            continue
+        try:
+            price = float(level[0])
+        except (TypeError, ValueError):
+            continue
+        if 0.0 < price < 1.0 and (best is None or price > best):
+            best = price
+    return best

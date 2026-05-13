@@ -303,12 +303,19 @@ class LiveLedger:
                 (error, client_order_id),
             )
 
-    def record_fills(self, fills: list[Mapping[str, Any]]) -> int:
+    def record_fills(
+        self,
+        fills: list[Mapping[str, Any]],
+        *,
+        allowed_order_ids: set[str] | None = None,
+    ) -> int:
         written = 0
         with self.connect() as conn:
             for fill in fills:
                 parsed = _parse_fill(fill)
                 if not parsed:
+                    continue
+                if allowed_order_ids is not None and str(parsed.get("order_id") or "") not in allowed_order_ids:
                     continue
                 conn.execute(
                     """
@@ -342,8 +349,28 @@ class LiveLedger:
                 ).fetchall()
             )
 
-    def latest_fills(self, limit: int = 10) -> list[sqlite3.Row]:
+    def bot_order_ids(self) -> set[str]:
         with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT order_id FROM live_orders WHERE order_id IS NOT NULL AND order_id != ''"
+            ).fetchall()
+        return {str(row["order_id"]) for row in rows if row["order_id"]}
+
+    def latest_fills(self, limit: int = 10, *, bot_owned_only: bool = False) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            if bot_owned_only:
+                return list(
+                    conn.execute(
+                        """
+                        SELECT f.*
+                        FROM live_fills f
+                        JOIN live_orders o ON o.order_id = f.order_id
+                        ORDER BY f.created_at DESC
+                        LIMIT ?
+                        """,
+                        (limit,),
+                    ).fetchall()
+                )
             return list(
                 conn.execute(
                     "SELECT * FROM live_fills ORDER BY created_at DESC LIMIT ?", (limit,)
@@ -380,28 +407,31 @@ class LiveLedger:
             ).fetchone()
         return bool(row and row["n"])
 
-    def position_summaries(self) -> list[dict[str, Any]]:
+    def position_summaries(self, *, bot_owned_only: bool = False) -> list[dict[str, Any]]:
         positions = []
-        for state in self._position_states():
+        for state in self._position_states(bot_owned_only=bot_owned_only):
             if state["count"] > 1e-9:
                 state["avg_entry_price"] = state["cost_basis"] / state["count"]
                 positions.append(state)
         return positions
 
-    def realized_pnl(self) -> float:
-        _, realized_events = self._replay_fills()
+    def realized_pnl(self, *, bot_owned_only: bool = False) -> float:
+        _, realized_events = self._replay_fills(bot_owned_only=bot_owned_only)
         return sum(pnl for _, pnl in realized_events)
 
-    def daily_realized_pnl(self, at: datetime) -> float:
+    def daily_realized_pnl(self, at: datetime, *, bot_owned_only: bool = False) -> float:
         day_prefix = at.date().isoformat()
-        _, realized_events = self._replay_fills()
+        _, realized_events = self._replay_fills(bot_owned_only=bot_owned_only)
         return sum(pnl for created_at, pnl in realized_events if created_at.startswith(day_prefix))
 
-    def _position_states(self) -> list[dict[str, Any]]:
-        states, _ = self._replay_fills()
+    def _position_states(self, *, bot_owned_only: bool = False) -> list[dict[str, Any]]:
+        states, _ = self._replay_fills(bot_owned_only=bot_owned_only)
         return list(states.values())
 
-    def _replay_fills(self) -> tuple[dict[tuple[str, str], dict[str, Any]], list[tuple[str, float]]]:
+    def _replay_fills(
+        self, *, bot_owned_only: bool = False
+    ) -> tuple[dict[tuple[str, str], dict[str, Any]], list[tuple[str, float]]]:
+        order_ids = self.bot_order_ids() if bot_owned_only else None
         with self.connect() as conn:
             rows = conn.execute(
                 "SELECT * FROM live_fills ORDER BY created_at ASC, fill_id ASC"
@@ -409,6 +439,8 @@ class LiveLedger:
         states: dict[tuple[str, str], dict[str, Any]] = {}
         realized_events: list[tuple[str, float]] = []
         for row in rows:
+            if order_ids is not None and str(row["order_id"] or "") not in order_ids:
+                continue
             key = (str(row["market_ticker"]), str(row["side"]).upper())
             state = states.setdefault(
                 key,
@@ -478,6 +510,14 @@ class LiveTrader:
         self.ledger = ledger or LiveLedger(config.ledger_path)
 
     def auth_check(self) -> dict[str, Any]:
+        snapshot = self.account_snapshot()
+        return {
+            **snapshot,
+            "orders_submitted": False,
+            "boundary": "authenticated read-only check; no orders submitted",
+        }
+
+    def account_snapshot(self) -> dict[str, Any]:
         balance = self.client.get_balance(subaccount=self.live_config.subaccount)
         positions = self.client.list_positions(
             limit=100,
@@ -491,8 +531,6 @@ class LiveTrader:
             "portfolio_value_dollars": cents_to_dollars(balance.get("portfolio_value")),
             "updated_ts": balance.get("updated_ts"),
             "nonzero_positions": len(positions),
-            "orders_submitted": False,
-            "boundary": "authenticated read-only check; no orders submitted",
         }
 
     def sync_recent_fills(self, *, ticker: str | None = None) -> int:
@@ -501,7 +539,7 @@ class LiveTrader:
             ticker=ticker,
             subaccount=self.live_config.subaccount,
         )
-        return self.ledger.record_fills(fills)
+        return self.ledger.record_fills(fills, allowed_order_ids=self.ledger.bot_order_ids())
 
     def maybe_submit_entry(self, prediction: Prediction) -> dict[str, Any]:
         now = prediction.created_at
@@ -559,7 +597,7 @@ class LiveTrader:
                 "min_cash_reserve: "
                 f"balance ${balance_dollars:.2f} - order ${max_cost:.2f} < reserve ${self.live_config.min_cash_reserve_dollars:.2f}"
             )
-        if self.ledger.daily_realized_pnl(now) <= -abs(self.live_config.max_daily_loss_dollars):
+        if self.ledger.daily_realized_pnl(now, bot_owned_only=True) <= -abs(self.live_config.max_daily_loss_dollars):
             return "max_daily_loss_reached"
         return None
 
@@ -571,13 +609,38 @@ class LiveTrader:
     ) -> list[dict[str, Any]]:
         now = now or now_utc()
         self.sync_recent_fills()
+        local_positions = self.ledger.position_summaries(bot_owned_only=True)
+        if not local_positions:
+            return []
+        try:
+            remote_keys = self._remote_position_keys(
+                self.client.list_positions(
+                    limit=100,
+                    count_filter="position",
+                    subaccount=self.live_config.subaccount,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - never submit exits if remote exposure is unknown.
+            return [
+                {
+                    **position,
+                    "submitted": False,
+                    "exit_signal": "unknown",
+                    "reason": f"remote_position_reconciliation_failed: {exc}",
+                }
+                for position in local_positions
+            ]
+
         managed: list[dict[str, Any]] = []
-        for position in self.ledger.position_summaries():
+        for position in local_positions:
             market = get_market(position["market_ticker"])
             mark = mark_live_position_to_market(position, market)
             signal = evaluate_live_exit(mark, self.live_config, now=now)
             mark["exit_signal"] = signal or "hold"
-            if signal:
+            if (str(position["market_ticker"]), str(position["side"])) not in remote_keys:
+                mark["submitted"] = False
+                mark["reason"] = "remote_position_not_open"
+            elif signal:
                 if self.ledger.recent_order_exists(
                     market_ticker=position["market_ticker"],
                     side=position["side"],
@@ -598,17 +661,23 @@ class LiveTrader:
 
     def live_status(self, *, sync_fills: bool = False) -> dict[str, Any]:
         synced = self.sync_recent_fills() if sync_fills else 0
-        positions = self.ledger.position_summaries()
+        positions = self.ledger.position_summaries(bot_owned_only=True)
         orders = [row_to_dict(row) for row in self.ledger.latest_orders(limit=10)]
-        fills = [row_to_dict(row) for row in self.ledger.latest_fills(limit=10)]
+        fills = [row_to_dict(row) for row in self.ledger.latest_fills(limit=10, bot_owned_only=True)]
+        account: dict[str, Any]
+        try:
+            account = self.account_snapshot()
+        except Exception as exc:  # noqa: BLE001 - status should still expose local audit rows.
+            account = {"error": str(exc)}
         return {
             "environment": self.live_config.environment,
             "base_url": self.live_config.base_url,
+            "account": account,
             "synced_fills": synced,
             "open_positions": positions,
             "latest_orders": orders,
             "latest_fills": fills,
-            "realized_pnl": self.ledger.realized_pnl(),
+            "realized_pnl": self.ledger.realized_pnl(bot_owned_only=True),
             "boundary": "LIVE TRADING ENABLED by config; order submission remains cap-gated and audited",
         }
 
@@ -619,7 +688,7 @@ class LiveTrader:
             return set(), f"live_fill_sync_failed: {exc}"
         keys = {
             (str(pos["market_ticker"]), str(pos["side"]))
-            for pos in self.ledger.position_summaries()
+            for pos in self.ledger.position_summaries(bot_owned_only=True)
         }
         try:
             remote_positions = self.client.list_positions(

@@ -90,6 +90,13 @@ class KalshiBTC15MBot:
         payload["paper_trade_skip_reason"] = paper_trade_skip_reason
         payload["live_order"] = live_order_result
         payload["paper_account"] = account.__dict__
+        if self.config.is_live_mode and self.live_trader is not None:
+            try:
+                payload["live_account"] = self.live_trader.account_snapshot()
+            except Exception as exc:  # noqa: BLE001 - scan output should still show fail-closed state.
+                payload["live_account"] = {"error": str(exc)}
+        else:
+            payload["live_account"] = None
         payload["position_manager"] = {
             "settled_trades": settled,
             "checked_open_positions": len(managed_positions),
@@ -190,10 +197,12 @@ class KalshiBTC15MBot:
             "environment": self.config.live.environment,
             "base_url": self.config.live.base_url,
             "synced_fills": 0,
-            "open_positions": self.live_ledger.position_summaries(),
+            "open_positions": self.live_ledger.position_summaries(bot_owned_only=True),
             "latest_orders": [row_to_dict(row) for row in self.live_ledger.latest_orders(limit=10)],
-            "latest_fills": [row_to_dict(row) for row in self.live_ledger.latest_fills(limit=10)],
-            "realized_pnl": self.live_ledger.realized_pnl(),
+            "latest_fills": [
+                row_to_dict(row) for row in self.live_ledger.latest_fills(limit=10, bot_owned_only=True)
+            ],
+            "realized_pnl": self.live_ledger.realized_pnl(bot_owned_only=True),
             "boundary": "live adapter disabled; no authenticated requests or orders",
         }
 
@@ -268,9 +277,26 @@ def format_scan(payload: dict[str, Any]) -> str:
             f"paper_trade_id: {payload.get('paper_trade_id') or 'none'}"
             + (f" skip={payload.get('paper_trade_skip_reason')}" if payload.get("paper_trade_skip_reason") else "")
         )
+    account_lines: list[str]
+    if mode == "live":
+        live_account = payload.get("live_account") or {}
+        if live_account.get("error"):
+            account_lines = [f"live_account: unavailable error={live_account['error']}"]
+        else:
+            account_lines = [
+                "live_balance: "
+                f"${float(live_account.get('balance_dollars', 0.0)):.2f} "
+                f"portfolio_value: ${float(live_account.get('portfolio_value_dollars', 0.0)):.2f} "
+                f"remote_positions: {live_account.get('nonzero_positions', 0)}"
+            ]
+        account_lines.append("paper_ledger: isolated; not used for live sizing")
+    else:
+        account_lines = [
+            f"cash: ${payload['paper_account']['cash']:.2f} open_notional: ${payload['paper_account']['open_notional']:.2f} realized_pnl: ${payload['paper_account']['realized_pnl']:.2f}"
+        ]
     lines.extend(
         [
-            f"cash: ${payload['paper_account']['cash']:.2f} open_notional: ${payload['paper_account']['open_notional']:.2f} realized_pnl: ${payload['paper_account']['realized_pnl']:.2f}",
+            *account_lines,
             f"boundary: {payload.get('safety', {}).get('boundary', 'unknown')}",
             "top reasons:",
         ]
@@ -285,17 +311,41 @@ def format_status(payload: dict[str, Any]) -> str:
     safety = payload.get("safety", {})
     trading_mode = safety.get("trading_mode", "paper")
     boundary = _boundary_from_safety(safety)
+    live = payload.get("live") or {}
+    live_account = live.get("account") or {}
     lines = [
         f"BTC 15m Kalshi {trading_mode} bot status",
         f"ledger: {payload['ledger_path']}",
-        f"cash: ${account['cash']:.2f} open_notional: ${account['open_notional']:.2f} realized_pnl: ${account['realized_pnl']:.2f}",
-        f"open_trades: {account['open_trades']} settled_trades: {account['settled_trades']}",
-        f"live mode: {boundary}" if trading_mode == "live" else f"boundary: {boundary}",
     ]
+    if trading_mode == "live":
+        if live_account.get("error"):
+            lines.append(f"live_account: unavailable error={live_account['error']}")
+        else:
+            lines.append(
+                "live_balance: "
+                f"${float(live_account.get('balance_dollars', 0.0)):.2f} "
+                f"portfolio_value: ${float(live_account.get('portfolio_value_dollars', 0.0)):.2f} "
+                f"remote_positions: {live_account.get('nonzero_positions', 0)}"
+            )
+        lines.append(
+            f"paper_ledger: cash=${account['cash']:.2f} open_notional=${account['open_notional']:.2f} "
+            f"realized_pnl=${account['realized_pnl']:.2f} open_trades={account['open_trades']} "
+            f"settled_trades={account['settled_trades']}"
+        )
+        lines.append(f"live mode: {boundary}")
+    else:
+        lines.extend(
+            [
+                f"cash: ${account['cash']:.2f} open_notional: ${account['open_notional']:.2f} realized_pnl: ${account['realized_pnl']:.2f}",
+                f"open_trades: {account['open_trades']} settled_trades: {account['settled_trades']}",
+                f"boundary: {boundary}",
+            ]
+        )
     if payload.get("performance"):
         perf = payload["performance"]
+        perf_label = "paper_equity" if trading_mode == "live" else "equity"
         lines.append(
-            f"equity: ${perf['total_equity']:.2f} open_unrealized: {_signed_money(perf['open_unrealized_pnl'])} "
+            f"{perf_label}: ${perf['total_equity']:.2f} open_unrealized: {_signed_money(perf['open_unrealized_pnl'])} "
             f"win_rate: {_pct(perf['win_rate'])} expectancy: {_signed_money(perf['expectancy_dollars'])}/trade"
         )
     live = payload.get("live") or {}
@@ -367,11 +417,13 @@ def format_status(payload: dict[str, Any]) -> str:
 def format_report(payload: dict[str, Any]) -> str:
     perf = payload["performance"]
     safety = payload.get("safety", {})
+    mode = safety.get("trading_mode", "paper")
+    equity_label = "paper_total_equity" if mode == "live" else "total_equity"
     lines = [
         "BTC 15m Kalshi operator report",
         f"ledger: {payload['ledger_path']}",
-        f"total_equity: ${perf['total_equity']:.2f}",
-        f"realized_pnl: {_signed_money(perf['realized_pnl'])} open_unrealized: {_signed_money(perf['open_unrealized_pnl'])}",
+        f"{equity_label}: ${perf['total_equity']:.2f}",
+        f"paper_realized_pnl: {_signed_money(perf['realized_pnl'])} open_unrealized: {_signed_money(perf['open_unrealized_pnl'])}",
         (
             f"trades: {perf['total_trades']} total / {perf['closed_trades']} closed / "
             f"{perf['open_trades']} open; win_rate: {_pct(perf['win_rate'])}"
@@ -382,6 +434,16 @@ def format_report(payload: dict[str, Any]) -> str:
     ]
     live = payload.get("live") or {}
     if live:
+        live_account = live.get("account") or {}
+        if live_account.get("error"):
+            lines.append(f"live_account: unavailable error={live_account['error']}")
+        elif mode == "live":
+            lines.append(
+                "live_balance: "
+                f"${float(live_account.get('balance_dollars', 0.0)):.2f} "
+                f"portfolio_value: ${float(live_account.get('portfolio_value_dollars', 0.0)):.2f} "
+                f"remote_positions: {live_account.get('nonzero_positions', 0)}"
+            )
         lines.append(
             f"live: env={live.get('environment')} open_positions={len(live.get('open_positions', []))} "
             f"realized_pnl={_signed_money(float(live.get('realized_pnl', 0.0)))} latest_orders={len(live.get('latest_orders', []))}"

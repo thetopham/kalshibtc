@@ -351,6 +351,75 @@ def test_live_trader_blocks_entry_when_cash_reserve_would_be_breached(tmp_path) 
     assert fake_client.created_orders == []
 
 
+def test_live_trader_syncs_only_fills_from_locally_recorded_orders(tmp_path) -> None:
+    fake_client = FakeLiveClient(
+        balance_cents=5_000,
+        fills=[
+            {
+                "fill_id": "manual-fill",
+                "order_id": "manual-web-order",
+                "trade_id": "trade-manual",
+                "market_ticker": "KXBTC15M-TEST-45",
+                "side": "yes",
+                "action": "buy",
+                "count_fp": "2.00",
+                "yes_price_dollars": "0.4000",
+                "fee_cost": "0.0000",
+                "created_time": "2026-01-04T00:00:01Z",
+            }
+        ],
+    )
+    ledger = LiveLedger(tmp_path / "ledger.sqlite3")
+    trader = LiveTrader(live_config(tmp_path), client=fake_client, ledger=ledger)
+
+    synced = trader.sync_recent_fills()
+
+    assert synced == 0
+    assert ledger.latest_fills() == []
+    assert ledger.position_summaries() == []
+
+
+def test_live_trader_does_not_submit_exit_when_local_position_is_not_remote_open(tmp_path) -> None:
+    fake_client = FakeLiveClient(balance_cents=5_000, positions=[])
+    ledger = LiveLedger(tmp_path / "ledger.sqlite3")
+    ledger.record_order_intent(
+        client_order_id="coid-stale",
+        prediction_id="prediction-stale",
+        market_ticker="KXBTC15M-TEST-45",
+        side="YES",
+        action="buy",
+        count=2,
+        limit_price_cents=40,
+        max_cost_cents=80,
+        time_in_force="immediate_or_cancel",
+        request={"ticker": "KXBTC15M-TEST-45"},
+    )
+    ledger.record_order_success("coid-stale", {"order": {"order_id": "ord-stale", "status": "filled"}})
+    ledger.record_fills(
+        [
+            {
+                "fill_id": "stale-fill",
+                "order_id": "ord-stale",
+                "trade_id": "trade-stale",
+                "market_ticker": "KXBTC15M-TEST-45",
+                "side": "yes",
+                "action": "buy",
+                "count_fp": "2.00",
+                "yes_price_dollars": "0.4000",
+                "fee_cost": "0.0000",
+                "created_time": "2026-01-04T00:00:01Z",
+            }
+        ]
+    )
+    trader = LiveTrader(live_config(tmp_path), client=fake_client, ledger=ledger)
+
+    managed = trader.manage_open_positions(lambda _: market(yes_bid=0.60, yes_ask=0.62))
+
+    assert managed[0]["submitted"] is False
+    assert managed[0]["reason"] == "remote_position_not_open"
+    assert fake_client.created_orders == []
+
+
 def test_live_trader_blocks_entry_when_remote_position_exists_before_local_fill_sync(tmp_path) -> None:
     fake_client = FakeLiveClient(
         balance_cents=5_000,
@@ -396,8 +465,24 @@ def test_live_trader_uses_unique_exit_client_order_ids(tmp_path) -> None:
 
 
 def test_live_trader_submits_reduce_only_exit_on_take_profit(tmp_path) -> None:
-    fake_client = FakeLiveClient(balance_cents=5_000)
+    fake_client = FakeLiveClient(
+        balance_cents=5_000,
+        positions=[{"ticker": "KXBTC15M-TEST-45", "yes_count": 2}],
+    )
     ledger = LiveLedger(tmp_path / "ledger.sqlite3")
+    ledger.record_order_intent(
+        client_order_id="coid-entry",
+        prediction_id="prediction-live-test",
+        market_ticker="KXBTC15M-TEST-45",
+        side="YES",
+        action="buy",
+        count=2,
+        limit_price_cents=40,
+        max_cost_cents=80,
+        time_in_force="immediate_or_cancel",
+        request={"ticker": "KXBTC15M-TEST-45"},
+    )
+    ledger.record_order_success("coid-entry", {"order": {"order_id": "ord-1", "status": "filled"}})
     ledger.record_fills(
         [
             {
@@ -426,3 +511,35 @@ def test_live_trader_submits_reduce_only_exit_on_take_profit(tmp_path) -> None:
     assert body["count"] == 2
     assert body["yes_price"] == 60
     assert body["reduce_only"] is True
+
+
+def test_live_trader_does_not_manage_external_account_fills(tmp_path) -> None:
+    fake_client = FakeLiveClient(
+        balance_cents=2_450,
+        fills=[
+            {
+                "fill_id": "external-fill",
+                "order_id": "external-order",
+                "trade_id": "external-trade",
+                "market_ticker": "KXBTC15M-TEST-45",
+                "side": "yes",
+                "action": "buy",
+                "count_fp": "43.30",
+                "yes_price_dollars": "0.5600",
+                "fee_cost": "0.7500",
+                "created_time": "2026-01-04T00:00:01Z",
+            }
+        ],
+    )
+    ledger = LiveLedger(tmp_path / "ledger.sqlite3")
+    trader = LiveTrader(live_config(tmp_path), client=fake_client, ledger=ledger)
+
+    status = trader.live_status(sync_fills=True)
+    managed = trader.manage_open_positions(lambda _: market(yes_bid=0.01, yes_ask=0.02))
+
+    assert status["account"]["balance_dollars"] == pytest.approx(24.50)
+    assert status["synced_fills"] == 0
+    assert status["open_positions"] == []
+    assert status["latest_fills"] == []
+    assert managed == []
+    assert fake_client.created_orders == []

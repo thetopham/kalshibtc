@@ -94,6 +94,21 @@ def test_live_config_accepts_demo_with_acknowledgement_caps_and_env(tmp_path, mo
     assert loaded.live.max_order_dollars == 5.0
 
 
+
+def test_explicit_live_data_dir_is_not_overridden_by_dotenv_paper_data_dir(tmp_path, monkeypatch) -> None:
+    cfg = tmp_path / "live-prod.toml"
+    cfg.write_text(LIVE_TOML.replace('data_dir = "data"', 'data_dir = "data-live-prod"'), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KALSHI_API_KEY_ID", "demo-key-id")
+    monkeypatch.setenv("KALSHI_PRIVATE_KEY_FILE", str(tmp_path / "kalshi.key"))
+    monkeypatch.setenv("KALSHI_BTC15M_DATA_DIR", "data")
+
+    loaded = load_config(cfg)
+
+    assert loaded.data_dir == tmp_path / "data-live-prod"
+    assert loaded.ledger_path == tmp_path / "data-live-prod" / "paper-ledger.sqlite3"
+
+
 def test_production_live_config_requires_extra_ack_and_allow_flag(tmp_path, monkeypatch) -> None:
     cfg = tmp_path / "live-prod.toml"
     prod_toml = (
