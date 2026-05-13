@@ -380,10 +380,37 @@ class LiveLedger:
         return bool(row and row["n"])
 
     def position_summaries(self) -> list[dict[str, Any]]:
+        positions = []
+        for state in self._position_states():
+            if state["count"] > 1e-9:
+                state["avg_entry_price"] = state["cost_basis"] / state["count"]
+                positions.append(state)
+        return positions
+
+    def realized_pnl(self) -> float:
+        return sum(float(state.get("realized_pnl", 0.0)) for state in self._position_states())
+
+    def daily_realized_pnl(self, at: datetime) -> float:
+        return sum(
+            float(state.get("realized_pnl", 0.0))
+            for state in self._position_states(day_prefix=at.date().isoformat())
+        )
+
+    def _position_states(self, *, day_prefix: str | None = None) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM live_fills ORDER BY created_at ASC, fill_id ASC"
-            ).fetchall()
+            if day_prefix:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM live_fills
+                    WHERE substr(created_at, 1, 10) = ?
+                    ORDER BY created_at ASC, fill_id ASC
+                    """,
+                    (day_prefix,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM live_fills ORDER BY created_at ASC, fill_id ASC"
+                ).fetchall()
         states: dict[tuple[str, str], dict[str, Any]] = {}
         for row in rows:
             key = (str(row["market_ticker"]), str(row["side"]).upper())
@@ -417,15 +444,7 @@ class LiveLedger:
                 state["realized_pnl"] += sell_count * (price - avg_cost) - fee
                 state["count"] -= sell_count
                 state["cost_basis"] -= avg_cost * sell_count
-        positions = []
-        for state in states.values():
-            if state["count"] > 1e-9:
-                state["avg_entry_price"] = state["cost_basis"] / state["count"]
-                positions.append(state)
-        return positions
-
-    def realized_pnl(self) -> float:
-        return sum(float(pos.get("realized_pnl", 0.0)) for pos in self.position_summaries())
+        return list(states.values())
 
 
 @dataclass(frozen=True)
@@ -537,7 +556,7 @@ class LiveTrader:
                 "min_cash_reserve: "
                 f"balance ${balance_dollars:.2f} - order ${max_cost:.2f} < reserve ${self.live_config.min_cash_reserve_dollars:.2f}"
             )
-        if self.ledger.realized_pnl() <= -abs(self.live_config.max_daily_loss_dollars):
+        if self.ledger.daily_realized_pnl(now) <= -abs(self.live_config.max_daily_loss_dollars):
             return "max_daily_loss_reached"
         return None
 

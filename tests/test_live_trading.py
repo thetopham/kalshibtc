@@ -228,7 +228,44 @@ def test_live_ledger_records_orders_fills_and_reconstructs_open_position(tmp_pat
     assert positions[0]["count"] == pytest.approx(1.0)
     assert positions[0]["avg_entry_price"] == pytest.approx(0.40)
     assert positions[0]["realized_pnl"] == pytest.approx(0.20)
+    assert ledger.realized_pnl() == pytest.approx(0.20)
+    assert ledger.daily_realized_pnl(datetime(2026, 1, 4, 1, 0, tzinfo=UTC)) == pytest.approx(0.20)
 
+
+def test_live_ledger_keeps_realized_pnl_after_position_is_fully_closed(tmp_path) -> None:
+    ledger = LiveLedger(tmp_path / "ledger.sqlite3")
+    ledger.record_fills(
+        [
+            {
+                "fill_id": "fill-buy",
+                "order_id": "ord-1",
+                "trade_id": "trade-1",
+                "market_ticker": "KXBTC15M-TEST-45",
+                "side": "yes",
+                "action": "buy",
+                "count_fp": "2.00",
+                "yes_price_dollars": "0.4000",
+                "fee_cost": "0.0000",
+                "created_time": "2026-01-04T00:00:01Z",
+            },
+            {
+                "fill_id": "fill-sell-all",
+                "order_id": "ord-2",
+                "trade_id": "trade-2",
+                "market_ticker": "KXBTC15M-TEST-45",
+                "side": "yes",
+                "action": "sell",
+                "count_fp": "2.00",
+                "yes_price_dollars": "0.2500",
+                "fee_cost": "0.0000",
+                "created_time": "2026-01-04T00:02:01Z",
+            },
+        ]
+    )
+
+    assert ledger.position_summaries() == []
+    assert ledger.realized_pnl() == pytest.approx(-0.30)
+    assert ledger.daily_realized_pnl(datetime(2026, 1, 4, 1, 0, tzinfo=UTC)) == pytest.approx(-0.30)
 
 def test_live_trader_submits_ioc_limit_buy_with_caps_and_balance_reserve(tmp_path) -> None:
     fake_client = FakeLiveClient(balance_cents=5_000)
