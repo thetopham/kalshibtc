@@ -5,6 +5,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -285,6 +286,7 @@ def _validate_live_config(live: LiveConfig) -> None:
     )
     if live.acknowledgement != expected_ack:
         raise ValueError(f"Live trading requires acknowledgement = {expected_ack!r}.")
+    _validate_live_base_url(live)
     if live.environment == "production" and not live.allow_production:
         raise ValueError("Production live trading requires live.allow_production=true.")
     if not live.auto_trade:
@@ -311,3 +313,23 @@ def _validate_live_config(live: LiveConfig) -> None:
         raise ValueError("Live mode requires KALSHI_API_KEY_ID in the environment or .env.")
     if not os.getenv("KALSHI_PRIVATE_KEY_FILE"):
         raise ValueError("Live mode requires KALSHI_PRIVATE_KEY_FILE in the environment or .env.")
+
+
+def _validate_live_base_url(live: LiveConfig) -> None:
+    parsed = urlparse(live.base_url)
+    expected_hosts = {
+        "demo": "external-api.demo.kalshi.co",
+        "production": "external-api.kalshi.com",
+    }
+    expected_host = expected_hosts[live.environment]
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != expected_host
+        or parsed.path.rstrip("/") != "/trade-api/v2"
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "live.base_url must be the official Kalshi "
+            f"{live.environment} HTTPS trade API endpoint: https://{expected_host}/trade-api/v2"
+        )

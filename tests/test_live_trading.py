@@ -123,8 +123,20 @@ def live_config(tmp_path: Path, **overrides: Any) -> BotConfig:
 
 
 class FakeLiveClient:
-    def __init__(self, *, balance_cents: int = 5_000) -> None:
+    def __init__(
+        self,
+        *,
+        balance_cents: int = 5_000,
+        positions: list[dict[str, Any]] | None = None,
+        fills: list[dict[str, Any]] | None = None,
+        fail_positions: bool = False,
+        fail_fills: bool = False,
+    ) -> None:
         self.balance_cents = balance_cents
+        self.positions = positions or []
+        self.fills = fills or []
+        self.fail_positions = fail_positions
+        self.fail_fills = fail_fills
         self.created_orders: list[dict[str, Any]] = []
 
     def get_balance(self, *, subaccount: int = 0) -> dict[str, Any]:
@@ -135,10 +147,14 @@ class FakeLiveClient:
         return {"order": {"order_id": f"ord-{len(self.created_orders)}", "status": "accepted", **body}}
 
     def list_fills(self, **_: Any) -> list[dict[str, Any]]:
-        return []
+        if self.fail_fills:
+            raise RuntimeError("fills unavailable")
+        return self.fills
 
     def list_positions(self, **_: Any) -> list[dict[str, Any]]:
-        return []
+        if self.fail_positions:
+            raise RuntimeError("positions unavailable")
+        return self.positions
 
 
 def test_authenticated_client_signs_full_api_path_without_query(tmp_path) -> None:
@@ -267,6 +283,43 @@ def test_live_ledger_keeps_realized_pnl_after_position_is_fully_closed(tmp_path)
     assert ledger.realized_pnl() == pytest.approx(-0.30)
     assert ledger.daily_realized_pnl(datetime(2026, 1, 4, 1, 0, tzinfo=UTC)) == pytest.approx(-0.30)
 
+
+def test_live_ledger_daily_realized_pnl_uses_full_cross_day_cost_basis(tmp_path) -> None:
+    ledger = LiveLedger(tmp_path / "ledger.sqlite3")
+    ledger.record_fills(
+        [
+            {
+                "fill_id": "fill-buy-yesterday",
+                "order_id": "ord-1",
+                "trade_id": "trade-1",
+                "market_ticker": "KXBTC15M-TEST-45",
+                "side": "yes",
+                "action": "buy",
+                "count_fp": "10.00",
+                "yes_price_dollars": "0.9000",
+                "fee_cost": "0.0000",
+                "created_time": "2026-01-03T23:59:00Z",
+            },
+            {
+                "fill_id": "fill-sell-today",
+                "order_id": "ord-2",
+                "trade_id": "trade-2",
+                "market_ticker": "KXBTC15M-TEST-45",
+                "side": "yes",
+                "action": "sell",
+                "count_fp": "10.00",
+                "yes_price_dollars": "0.1000",
+                "fee_cost": "0.0000",
+                "created_time": "2026-01-04T00:01:00Z",
+            },
+        ]
+    )
+
+    assert ledger.realized_pnl() == pytest.approx(-8.0)
+    assert ledger.daily_realized_pnl(datetime(2026, 1, 3, 12, 0, tzinfo=UTC)) == pytest.approx(0.0)
+    assert ledger.daily_realized_pnl(datetime(2026, 1, 4, 12, 0, tzinfo=UTC)) == pytest.approx(-8.0)
+
+
 def test_live_trader_submits_ioc_limit_buy_with_caps_and_balance_reserve(tmp_path) -> None:
     fake_client = FakeLiveClient(balance_cents=5_000)
     ledger = LiveLedger(tmp_path / "ledger.sqlite3")
@@ -296,6 +349,50 @@ def test_live_trader_blocks_entry_when_cash_reserve_would_be_breached(tmp_path) 
     assert result["submitted"] is False
     assert "min_cash_reserve" in result["reason"]
     assert fake_client.created_orders == []
+
+
+def test_live_trader_blocks_entry_when_remote_position_exists_before_local_fill_sync(tmp_path) -> None:
+    fake_client = FakeLiveClient(
+        balance_cents=5_000,
+        positions=[{"ticker": "KXBTC15M-TEST-45", "position": 1}],
+    )
+    trader = LiveTrader(live_config(tmp_path), client=fake_client, ledger=LiveLedger(tmp_path / "ledger.sqlite3"))
+
+    result = trader.maybe_submit_entry(prediction_for(market()))
+
+    assert result["submitted"] is False
+    assert result["reason"] == "max_open_positions: reached 1"
+    assert fake_client.created_orders == []
+
+
+def test_live_trader_fails_closed_when_remote_position_reconciliation_fails(tmp_path) -> None:
+    fake_client = FakeLiveClient(balance_cents=5_000, fail_positions=True)
+    trader = LiveTrader(live_config(tmp_path), client=fake_client, ledger=LiveLedger(tmp_path / "ledger.sqlite3"))
+
+    result = trader.maybe_submit_entry(prediction_for(market()))
+
+    assert result["submitted"] is False
+    assert result["reason"].startswith("remote_position_reconciliation_failed")
+    assert fake_client.created_orders == []
+
+
+def test_live_trader_uses_unique_exit_client_order_ids(tmp_path) -> None:
+    fake_client = FakeLiveClient(balance_cents=5_000)
+    trader = LiveTrader(live_config(tmp_path), client=fake_client, ledger=LiveLedger(tmp_path / "ledger.sqlite3"))
+    position = {
+        "market_ticker": "KXBTC15M-TEST-45",
+        "side": "YES",
+        "count": 2.0,
+        "cost_basis": 0.80,
+        "avg_entry_price": 0.40,
+    }
+
+    first = trader._exit_order_plan(position, market(yes_bid=0.60), "take_profit")
+    second = trader._exit_order_plan(position, market(yes_bid=0.60), "take_profit")
+
+    assert first.client_order_id != second.client_order_id
+    assert first.body["reduce_only"] is True
+    assert second.body["reduce_only"] is True
 
 
 def test_live_trader_submits_reduce_only_exit_on_take_profit(tmp_path) -> None:

@@ -50,6 +50,23 @@ def test_live_config_requires_literal_acknowledgement(tmp_path, monkeypatch) -> 
         load_config(cfg)
 
 
+def test_live_config_rejects_non_kalshi_base_url(tmp_path, monkeypatch) -> None:
+    cfg = tmp_path / "bad-url.toml"
+    cfg.write_text(
+        LIVE_TOML.replace(
+            'base_url = "https://external-api.demo.kalshi.co/trade-api/v2"',
+            'base_url = "https://example.com/trade-api/v2"',
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KALSHI_API_KEY_ID", "demo-key-id")
+    monkeypatch.setenv("KALSHI_PRIVATE_KEY_FILE", str(tmp_path / "kalshi.key"))
+
+    with pytest.raises(ValueError, match="official Kalshi demo HTTPS"):
+        load_config(cfg)
+
+
 def test_live_config_requires_credentials_from_environment(tmp_path, monkeypatch) -> None:
     cfg = tmp_path / "live.toml"
     cfg.write_text(LIVE_TOML, encoding="utf-8")
@@ -79,13 +96,18 @@ def test_live_config_accepts_demo_with_acknowledgement_caps_and_env(tmp_path, mo
 
 def test_production_live_config_requires_extra_ack_and_allow_flag(tmp_path, monkeypatch) -> None:
     cfg = tmp_path / "live-prod.toml"
-    cfg.write_text(
-        LIVE_TOML.replace('environment = "demo"', 'environment = "production"').replace(
+    prod_toml = (
+        LIVE_TOML.replace('environment = "demo"', 'environment = "production"')
+        .replace(
             'acknowledgement = "I_UNDERSTAND_KALSHI_DEMO_ORDERS"',
             'acknowledgement = "I_UNDERSTAND_THIS_SUBMITS_REAL_KALSHI_PRODUCTION_ORDERS"',
-        ),
-        encoding="utf-8",
+        )
+        .replace(
+            'base_url = "https://external-api.demo.kalshi.co/trade-api/v2"',
+            'base_url = "https://external-api.kalshi.com/trade-api/v2"',
+        )
     )
+    cfg.write_text(prod_toml, encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("KALSHI_API_KEY_ID", "prod-key-id")
     monkeypatch.setenv("KALSHI_PRIVATE_KEY_FILE", str(tmp_path / "kalshi.key"))

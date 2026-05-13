@@ -7,6 +7,7 @@ import os
 import sqlite3
 import stat
 import time
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -258,7 +259,7 @@ class LiveLedger:
         with self.connect() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO live_orders (
+                INSERT INTO live_orders (
                     client_order_id, prediction_id, created_at, market_ticker, side, action,
                     count, limit_price_cents, max_cost_cents, time_in_force, status,
                     request_json
@@ -388,30 +389,25 @@ class LiveLedger:
         return positions
 
     def realized_pnl(self) -> float:
-        return sum(float(state.get("realized_pnl", 0.0)) for state in self._position_states())
+        _, realized_events = self._replay_fills()
+        return sum(pnl for _, pnl in realized_events)
 
     def daily_realized_pnl(self, at: datetime) -> float:
-        return sum(
-            float(state.get("realized_pnl", 0.0))
-            for state in self._position_states(day_prefix=at.date().isoformat())
-        )
+        day_prefix = at.date().isoformat()
+        _, realized_events = self._replay_fills()
+        return sum(pnl for created_at, pnl in realized_events if created_at.startswith(day_prefix))
 
-    def _position_states(self, *, day_prefix: str | None = None) -> list[dict[str, Any]]:
+    def _position_states(self) -> list[dict[str, Any]]:
+        states, _ = self._replay_fills()
+        return list(states.values())
+
+    def _replay_fills(self) -> tuple[dict[tuple[str, str], dict[str, Any]], list[tuple[str, float]]]:
         with self.connect() as conn:
-            if day_prefix:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM live_fills
-                    WHERE substr(created_at, 1, 10) = ?
-                    ORDER BY created_at ASC, fill_id ASC
-                    """,
-                    (day_prefix,),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM live_fills ORDER BY created_at ASC, fill_id ASC"
-                ).fetchall()
+            rows = conn.execute(
+                "SELECT * FROM live_fills ORDER BY created_at ASC, fill_id ASC"
+            ).fetchall()
         states: dict[tuple[str, str], dict[str, Any]] = {}
+        realized_events: list[tuple[str, float]] = []
         for row in rows:
             key = (str(row["market_ticker"]), str(row["side"]).upper())
             state = states.setdefault(
@@ -437,14 +433,18 @@ class LiveLedger:
                 state["cost_basis"] += count * price + fee
             elif action == "sell":
                 if state["count"] <= 0:
-                    state["realized_pnl"] += count * price - fee
+                    pnl = count * price - fee
+                    state["realized_pnl"] += pnl
+                    realized_events.append((str(row["created_at"]), pnl))
                     continue
                 sell_count = min(count, state["count"])
                 avg_cost = state["cost_basis"] / state["count"] if state["count"] else 0.0
-                state["realized_pnl"] += sell_count * (price - avg_cost) - fee
+                pnl = sell_count * (price - avg_cost) - fee
+                state["realized_pnl"] += pnl
+                realized_events.append((str(row["created_at"]), pnl))
                 state["count"] -= sell_count
                 state["cost_basis"] -= avg_cost * sell_count
-        return list(states.values())
+        return states, realized_events
 
 
 @dataclass(frozen=True)
@@ -521,9 +521,12 @@ class LiveTrader:
             return "invalid_side"
         if self.ledger.daily_order_count(now) >= self.live_config.max_daily_orders:
             return f"max_daily_orders: reached {self.live_config.max_daily_orders}"
-        if len(self.ledger.position_summaries()) >= self.live_config.max_open_positions:
+        position_keys, reconcile_error = self._reconciled_open_position_keys()
+        if reconcile_error:
+            return reconcile_error
+        if len(position_keys) >= self.live_config.max_open_positions:
             return f"max_open_positions: reached {self.live_config.max_open_positions}"
-        if self._has_position(prediction.market.ticker, prediction.side):
+        if (prediction.market.ticker, prediction.side) in position_keys:
             return "position_already_open_for_market_side"
         if self.ledger.recent_order_exists(
             market_ticker=prediction.market.ticker,
@@ -609,11 +612,42 @@ class LiveTrader:
             "boundary": "LIVE TRADING ENABLED by config; order submission remains cap-gated and audited",
         }
 
-    def _has_position(self, market_ticker: str, side: str) -> bool:
-        return any(
-            pos["market_ticker"] == market_ticker and pos["side"] == side
+    def _reconciled_open_position_keys(self) -> tuple[set[tuple[str, str]], str | None]:
+        try:
+            self.sync_recent_fills()
+        except Exception as exc:  # noqa: BLE001 - entries must fail closed if fills cannot sync.
+            return set(), f"live_fill_sync_failed: {exc}"
+        keys = {
+            (str(pos["market_ticker"]), str(pos["side"]))
             for pos in self.ledger.position_summaries()
-        )
+        }
+        try:
+            remote_positions = self.client.list_positions(
+                limit=100,
+                count_filter="position",
+                subaccount=self.live_config.subaccount,
+            )
+        except Exception as exc:  # noqa: BLE001 - do not submit if remote exposure is unknown.
+            return set(), f"remote_position_reconciliation_failed: {exc}"
+        keys.update(self._remote_position_keys(remote_positions))
+        return keys, None
+
+    def _remote_position_keys(self, positions: list[Mapping[str, Any]]) -> set[tuple[str, str]]:
+        keys: set[tuple[str, str]] = set()
+        series_prefix = self.config.kalshi.series_ticker
+        for row in positions:
+            ticker = str(row.get("ticker") or row.get("market_ticker") or "")
+            if not ticker or not ticker.startswith(series_prefix):
+                continue
+            yes_count = _numeric_first(row, "yes_count", "yes_position", "yes_contracts")
+            no_count = _numeric_first(row, "no_count", "no_position", "no_contracts")
+            net_position = _numeric_first(row, "position", "count", "net_position")
+            side = str(row.get("side") or row.get("contract_side") or "").upper()
+            if yes_count > 1e-9 or (net_position > 1e-9 and side != "NO"):
+                keys.add((ticker, "YES"))
+            if no_count > 1e-9 or net_position < -1e-9 or (net_position > 1e-9 and side == "NO"):
+                keys.add((ticker, "NO"))
+        return keys
 
     def _entry_contract_count(self, prediction: Prediction) -> int:
         entry_price = prediction.market.yes_ask if prediction.side == "YES" else prediction.market.no_ask
@@ -666,9 +700,7 @@ class LiveTrader:
         price = market.yes_bid if side == "YES" else market.no_bid
         price_cents = price_to_cents(price)
         count = math.floor(float(position["count"]))
-        client_order_id = (
-            f"kbtc15-{position['market_ticker']}-{exit_reason}-sell-{side.lower()}"[:64]
-        )
+        client_order_id = f"kbtc15-exit-{side.lower()}-{exit_reason[:12]}-{uuid.uuid4().hex[:12]}"
         body: dict[str, Any] = {
             "ticker": position["market_ticker"],
             "side": side.lower(),
@@ -791,6 +823,15 @@ def cents_to_dollars(value: Any) -> float:
 
 def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
+
+
+def _numeric_first(row: Mapping[str, Any], *keys: str) -> float:
+    for key in keys:
+        if key in row:
+            value = _float(row.get(key), default=0.0)
+            if abs(value) > 1e-9:
+                return value
+    return 0.0
 
 
 def _parse_fill(fill: Mapping[str, Any]) -> dict[str, Any] | None:
