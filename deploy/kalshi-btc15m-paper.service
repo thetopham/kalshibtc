@@ -1,0 +1,21 @@
+[Unit]
+Description=Kalshi BTC 15m paper prediction bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/matt/workspace/kalshi-btc-15m-bot
+Environment=KALSHI_BTC15M_CONFIG=configs/default.toml
+ExecStart=/usr/bin/bash -lc 'while true; do /home/matt/workspace/kalshi-btc-15m-bot/.venv/bin/kbtc15 --config configs/default.toml scan; sleep 60; done'
+Restart=always
+RestartSec=10
+
+# Safety: v1 is paper-only. Do not add live Kalshi credentials here.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/home/matt/workspace/kalshi-btc-15m-bot/data
+
+[Install]
+WantedBy=default.target

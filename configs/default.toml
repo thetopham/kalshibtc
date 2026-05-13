@@ -1,0 +1,41 @@
+# Paper-first default config for the BTC 15m Kalshi predictor.
+# All paths are resolved from the current working directory unless absolute.
+
+trading_mode = "paper"
+enable_live_orders = false
+data_dir = "data"
+
+[kalshi]
+base_url = "https://external-api.kalshi.com/trade-api/v2"
+series_ticker = "KXBTC15M"
+market_status = "open"
+
+[market_data]
+# Coinbase is the default because Kalshi settles against CF Benchmarks BRTI,
+# not Binance. Coinbase is only a public proxy, not the settlement source.
+provider = "coinbase"
+product_id = "BTC-USD"
+symbol = "BTCUSDT"
+granularity_seconds = 900
+lookback_days = 21
+request_timeout_seconds = 20
+
+[predictor]
+min_confidence = 0.54
+min_edge = 0.035
+min_seconds_to_close = 45
+max_seconds_to_close = 840
+model_min_train_samples = 250
+model_test_fraction = 0.25
+rule_weight_floor = 0.55
+
+[paper]
+initial_cash = 1000.0
+auto_trade = true
+max_position_dollars = 25.0
+kelly_fraction_cap = 0.10
+one_trade_per_market = true
+
+[backtest]
+confidence_threshold = 0.56
+synthetic_entry_price = 0.53
