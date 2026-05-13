@@ -35,6 +35,18 @@ auto_trade = true
 max_position_dollars = 25.0
 kelly_fraction_cap = 0.10
 one_trade_per_market = true
+# Paper-only active management. These close simulated positions at public bid marks;
+# they do not submit Kalshi orders.
+manage_positions = true
+take_profit_pct = 0.30
+stop_loss_pct = -0.40
+force_close_seconds_to_close = 20
+# Risk gates for opening new paper trades.
+max_open_trades = 2
+max_daily_trades = 12
+max_daily_loss_dollars = 50.0
+min_liquidity_dollars = 50.0
+max_spread = 0.20
 
 [backtest]
 confidence_threshold = 0.56

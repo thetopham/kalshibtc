@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/home/matt/workspace/kalshi-btc-15m-bot
 Environment=KALSHI_BTC15M_CONFIG=configs/default.toml
-ExecStart=/usr/bin/bash -lc 'while true; do /home/matt/workspace/kalshi-btc-15m-bot/.venv/bin/kbtc15 --config configs/default.toml scan; sleep 60; done'
+ExecStart=/home/matt/workspace/kalshi-btc-15m-bot/.venv/bin/kbtc15 --config configs/default.toml run --interval-seconds 60
 Restart=always
 RestartSec=10
 

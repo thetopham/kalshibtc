@@ -44,6 +44,15 @@ class PaperConfig:
     max_position_dollars: float = 25.0
     kelly_fraction_cap: float = 0.10
     one_trade_per_market: bool = True
+    manage_positions: bool = True
+    take_profit_pct: float = 0.30
+    stop_loss_pct: float = -0.40
+    force_close_seconds_to_close: int = 20
+    max_open_trades: int = 2
+    max_daily_trades: int = 12
+    max_daily_loss_dollars: float = 50.0
+    min_liquidity_dollars: float = 50.0
+    max_spread: float = 0.20
 
 
 @dataclass(frozen=True)
@@ -146,6 +155,28 @@ def load_config(path: str | Path | None = None) -> BotConfig:
             one_trade_per_market=bool(
                 _deep_get(raw, "paper", "one_trade_per_market", PaperConfig.one_trade_per_market)
             ),
+            manage_positions=bool(_deep_get(raw, "paper", "manage_positions", PaperConfig.manage_positions)),
+            take_profit_pct=float(_deep_get(raw, "paper", "take_profit_pct", PaperConfig.take_profit_pct)),
+            stop_loss_pct=float(_deep_get(raw, "paper", "stop_loss_pct", PaperConfig.stop_loss_pct)),
+            force_close_seconds_to_close=int(
+                _deep_get(
+                    raw,
+                    "paper",
+                    "force_close_seconds_to_close",
+                    PaperConfig.force_close_seconds_to_close,
+                )
+            ),
+            max_open_trades=int(_deep_get(raw, "paper", "max_open_trades", PaperConfig.max_open_trades)),
+            max_daily_trades=int(
+                _deep_get(raw, "paper", "max_daily_trades", PaperConfig.max_daily_trades)
+            ),
+            max_daily_loss_dollars=float(
+                _deep_get(raw, "paper", "max_daily_loss_dollars", PaperConfig.max_daily_loss_dollars)
+            ),
+            min_liquidity_dollars=float(
+                _deep_get(raw, "paper", "min_liquidity_dollars", PaperConfig.min_liquidity_dollars)
+            ),
+            max_spread=float(_deep_get(raw, "paper", "max_spread", PaperConfig.max_spread)),
         ),
         backtest=BacktestConfig(
             confidence_threshold=float(
