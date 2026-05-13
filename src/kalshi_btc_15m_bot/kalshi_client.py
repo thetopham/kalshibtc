@@ -82,7 +82,7 @@ class KalshiPublicClient:
         for read-only quoting instead of breaking status/scan output.
         """
         try:
-            payload = self.get_orderbook(market.ticker, depth=1)
+            payload = self.get_orderbook(market.ticker, depth=20)
         except requests.RequestException:
             return market
         orderbook = payload.get("orderbook_fp") or payload.get("orderbook") or {}
@@ -94,12 +94,15 @@ class KalshiPublicClient:
         refreshed_no_bid = no_bid if no_bid is not None else market.no_bid
         refreshed_yes_ask = (1.0 - refreshed_no_bid) if no_bid is not None else market.yes_ask
         refreshed_no_ask = (1.0 - refreshed_yes_bid) if yes_bid is not None else market.no_ask
+        visible_liquidity = _visible_liquidity(orderbook.get("yes_dollars") or orderbook.get("yes"))
+        visible_liquidity += _visible_liquidity(orderbook.get("no_dollars") or orderbook.get("no"))
         return replace(
             market,
             yes_bid=round(refreshed_yes_bid, 4),
             yes_ask=round(refreshed_yes_ask, 4),
             no_bid=round(refreshed_no_bid, 4),
             no_ask=round(refreshed_no_ask, 4),
+            liquidity=round(max(market.liquidity, visible_liquidity), 4),
         )
 
 
@@ -123,3 +126,20 @@ def _best_bid(levels: Any) -> float | None:
         if 0.0 < price < 1.0 and (best is None or price > best):
             best = price
     return best
+
+
+def _visible_liquidity(levels: Any) -> float:
+    total = 0.0
+    if not isinstance(levels, list):
+        return total
+    for level in levels:
+        if not isinstance(level, list | tuple) or len(level) < 2:
+            continue
+        try:
+            price = float(level[0])
+            count = float(level[1])
+        except (TypeError, ValueError):
+            continue
+        if 0.0 < price < 1.0 and count > 0.0:
+            total += price * count
+    return total

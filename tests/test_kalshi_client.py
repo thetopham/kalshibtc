@@ -43,7 +43,7 @@ class FakeSession:
                             "close_time": "2099-01-04T00:15:00Z",
                             "expected_expiration_time": "2099-01-04T00:15:00Z",
                             "volume_fp": "100.00",
-                            "liquidity_dollars": "50.00",
+                            "liquidity_dollars": "0.0000",
                             "open_interest_fp": "10.00",
                         }
                     ]
@@ -51,7 +51,7 @@ class FakeSession:
             )
         if parsed.path.endswith("/markets/KXBTC15M-TEST-45/orderbook"):
             assert parse_qs(parsed.query) == {}
-            assert params == {"depth": 1}
+            assert params == {"depth": 20}
             return FakeResponse(
                 {
                     "orderbook_fp": {
@@ -74,5 +74,6 @@ def test_current_market_refreshes_best_quotes_from_kalshi_orderbook() -> None:
     assert market.no_bid == 0.42
     assert market.yes_ask == 0.58
     assert market.no_ask == 0.45
+    assert market.liquidity == 0.55 * 2.0 + 0.23 * 10.0 + 0.42 * 3.0 + 0.01 * 10.0
     assert fake_session.calls[0][0].endswith("/markets")
     assert fake_session.calls[1][0].endswith("/markets/KXBTC15M-TEST-45/orderbook")
