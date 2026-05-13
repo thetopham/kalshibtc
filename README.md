@@ -74,6 +74,9 @@ kbtc15 --config configs/default.toml status
 # Operator report with equity, PnL, win rate, expectancy, and open-position exit signals
 kbtc15 --config configs/default.toml report
 
+# Read-only dashboard; local-only by default and never submits orders
+kbtc15 --config configs/default.toml dashboard --host 127.0.0.1 --port 8792
+
 # Try settling open paper trades from public Kalshi results
 kbtc15 --config configs/default.toml resolve
 
@@ -83,6 +86,41 @@ kbtc15 --config configs/default.toml markets
 # Offline directional backtest on recent 15m BTC candles
 kbtc15 --config configs/default.toml backtest
 ```
+
+## Dashboard
+
+The dashboard is read-only. It calls status surfaces only and has no route that can scan, submit, cancel, or exit orders.
+
+```bash
+# Local-only dashboard, no token required because it binds to loopback
+kbtc15 --config configs/default.toml dashboard --host 127.0.0.1 --port 8792
+
+# LAN/tailnet dashboard must use a token
+mkdir -p ~/.config/kalshibtc
+python - <<'PY'
+import secrets
+from pathlib import Path
+path = Path.home() / ".config/kalshibtc/kalshibtc-dashboard.env"
+path.write_text(f"KALSHI_BTC15M_DASHBOARD_TOKEN={secrets.token_urlsafe(32)}\n")
+path.chmod(0o600)
+print(path)
+PY
+kbtc15 --config configs/live-prod.local.toml dashboard --host 0.0.0.0 --port 8792 --scan-interval-seconds 60
+```
+
+The page shows live account balance/portfolio when the selected config has live credentials loaded, paper and live PnL from the local SQLite ledger, latest predictions, live orders/fills, open positions, service status, and the active safety boundary.
+
+To run the dashboard as a user service:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/kalshi-btc15m-dashboard.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now kalshi-btc15m-dashboard.service
+systemctl --user status kalshi-btc15m-dashboard.service --no-pager
+```
+
+The dashboard service template uses `--scan-interval-seconds 60` because the live production bot service processes once per minute with `run --interval-seconds 60`. The market itself is still a 15-minute Kalshi market using 900-second BTC candles.
 
 ## Guarded demo/live trading
 
@@ -154,7 +192,7 @@ Tables:
 
 ## Deployment note
 
-A sample paper user-service file is in `deploy/kalshi-btc15m-paper.service`. A guarded demo-live template is in `deploy/kalshi-btc15m-live-demo.service`; it expects credentials in `%h/.config/kalshibtc/kalshibtc.env` and a local untracked `configs/live-demo.local.toml`. Neither service is installed or started automatically. Review every cap before use.
+A sample paper user-service file is in `deploy/kalshi-btc15m-paper.service`. A guarded demo-live template is in `deploy/kalshi-btc15m-live-demo.service`; it expects credentials in `%h/.config/kalshibtc/kalshibtc.env` and a local untracked `configs/live-demo.local.toml`. A read-only dashboard template is in `deploy/kalshi-btc15m-dashboard.service`; it expects production env credentials plus `%h/.config/kalshibtc/kalshibtc-dashboard.env` for dashboard auth. None of these services is installed or started automatically. Review every cap before use.
 
 ## Verification
 
@@ -169,6 +207,7 @@ kbtc15 --config configs/default.toml run --interval-seconds 1 --max-scans 1
 kbtc15 --config configs/default.toml scan
 kbtc15 --config configs/default.toml status
 kbtc15 --config configs/default.toml report
+timeout 5s env KALSHI_BTC15M_DASHBOARD_TOKEN=test-token kbtc15 --config configs/default.toml dashboard --host 127.0.0.1 --port 8792 || test $? -eq 124
 kbtc15 --config configs/default.toml live-status
 # With demo credentials configured outside the repo:
 # kbtc15 --config configs/live-demo.local.toml auth-check

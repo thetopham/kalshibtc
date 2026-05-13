@@ -1,0 +1,22 @@
+[Unit]
+Description=Kalshi BTC 15m read-only dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/matt/workspace/kalshi-btc-15m-bot
+EnvironmentFile=%h/.config/kalshibtc/kalshibtc-prod.env
+EnvironmentFile=%h/.config/kalshibtc/kalshibtc-dashboard.env
+ExecStart=/home/matt/workspace/kalshi-btc-15m-bot/.venv/bin/kbtc15 --config configs/live-prod.local.toml dashboard --host 0.0.0.0 --port 8792 --refresh-seconds 10 --scan-interval-seconds 60
+Restart=always
+RestartSec=10
+
+# Safety: dashboard is read-only. It has no route that can scan, submit, cancel, or exit orders.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/home/matt/workspace/kalshi-btc-15m-bot/data-live-prod
+
+[Install]
+WantedBy=default.target

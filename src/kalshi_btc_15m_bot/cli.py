@@ -66,6 +66,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser("resolve", help="Try to settle open paper trades from Kalshi market results")
     sub.add_parser("markets", help="List current KXBTC15M markets from Kalshi")
+    dashboard = sub.add_parser("dashboard", help="Start a read-only web dashboard; never submits orders")
+    dashboard.add_argument("--host", default="127.0.0.1", help="Dashboard bind host (default: 127.0.0.1)")
+    dashboard.add_argument("--port", type=int, default=8792, help="Dashboard port (default: 8792)")
+    dashboard.add_argument(
+        "--token",
+        default=None,
+        help="Optional bearer/query token; required when binding to 0.0.0.0 unless env token is set",
+    )
+    dashboard.add_argument(
+        "--refresh-seconds",
+        type=int,
+        default=10,
+        help="Browser auto-refresh interval in seconds (default: 10)",
+    )
+    dashboard.add_argument(
+        "--scan-interval-seconds",
+        type=float,
+        default=60.0,
+        help="Operator display hint for the running scan loop cadence (default: 60)",
+    )
     backtest = sub.add_parser("backtest", help="Run offline BTC 15m directional backtest")
     backtest.add_argument("--show-trades", action="store_true", help="Include synthetic trades in JSON")
     return parser
@@ -192,6 +212,19 @@ def main(argv: list[str] | None = None) -> int:
                         f"target={market.get('target_price')} yes={market.get('yes_bid')}/{market.get('yes_ask')} "
                         f"no={market.get('no_bid')}/{market.get('no_ask')} status={market.get('status')}"
                     )
+            return 0
+
+        if args.command == "dashboard":
+            from .dashboard import serve_dashboard
+
+            serve_dashboard(
+                bot,
+                host=args.host,
+                port=args.port,
+                token=args.token,
+                refresh_seconds=args.refresh_seconds,
+                scan_interval_seconds=args.scan_interval_seconds,
+            )
             return 0
 
         if args.command == "backtest":
