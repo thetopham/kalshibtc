@@ -1,0 +1,84 @@
+# Guarded demo-live config for Kalshi BTC 15m markets.
+# This file is an example. Copy it to an untracked local file before use:
+#   cp configs/live-demo.example.toml configs/live-demo.local.toml
+#   chmod 600 ~/.config/kalshibtc/kalshi-demo.key
+#   KALSHI_API_KEY_ID=... KALSHI_PRIVATE_KEY_FILE=... kbtc15 --config configs/live-demo.local.toml auth-check
+#
+# Demo-live mode can submit Kalshi demo orders. Production requires a different
+# acknowledgement string plus allow_production=true.
+
+trading_mode = "live"
+enable_live_orders = true
+data_dir = "data-live-demo"
+
+[kalshi]
+base_url = "https://external-api.kalshi.com/trade-api/v2"
+series_ticker = "KXBTC15M"
+market_status = "open"
+
+[market_data]
+provider = "coinbase"
+product_id = "BTC-USD"
+symbol = "BTCUSDT"
+granularity_seconds = 900
+lookback_days = 21
+request_timeout_seconds = 20
+
+[predictor]
+min_confidence = 0.56
+min_edge = 0.045
+min_seconds_to_close = 60
+max_seconds_to_close = 780
+model_min_train_samples = 250
+model_test_fraction = 0.25
+rule_weight_floor = 0.55
+
+[live]
+environment = "demo"
+base_url = "https://external-api.demo.kalshi.co/trade-api/v2"
+acknowledgement = "I_UNDERSTAND_KALSHI_DEMO_ORDERS"
+auto_trade = true
+
+# Hard account/order caps. Start tiny and prove behavior before increasing.
+max_order_dollars = 5.0
+max_contracts = 5
+max_open_positions = 1
+max_daily_orders = 3
+max_daily_loss_dollars = 10.0
+min_cash_reserve_dollars = 25.0
+
+# Market-quality gates.
+min_liquidity_dollars = 50.0
+max_spread = 0.10
+
+# Live position exits submit reduce-only IOC sell orders.
+take_profit_pct = 0.20
+stop_loss_pct = -0.30
+force_close_seconds_to_close = 30
+min_seconds_between_orders = 60
+
+time_in_force = "immediate_or_cancel"
+subaccount = 0
+allow_production = false
+
+[paper]
+# Paper settings are ignored for entries in live mode but kept so status/report
+# can still show any old paper ledger state.
+initial_cash = 1000.0
+auto_trade = false
+manage_positions = false
+max_position_dollars = 0.0
+kelly_fraction_cap = 0.0
+one_trade_per_market = true
+take_profit_pct = 0.30
+stop_loss_pct = -0.40
+force_close_seconds_to_close = 20
+max_open_trades = 0
+max_daily_trades = 0
+max_daily_loss_dollars = 0.0
+min_liquidity_dollars = 50.0
+max_spread = 0.20
+
+[backtest]
+confidence_threshold = 0.56
+synthetic_entry_price = 0.53

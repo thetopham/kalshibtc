@@ -1,0 +1,21 @@
+[Unit]
+Description=Kalshi BTC 15m guarded demo-live bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/matt/workspace/kalshi-btc-15m-bot
+EnvironmentFile=%h/.config/kalshibtc/kalshibtc.env
+ExecStart=/home/matt/workspace/kalshi-btc-15m-bot/.venv/bin/kbtc15 --config configs/live-demo.local.toml run --interval-seconds 60
+Restart=always
+RestartSec=10
+
+# Safety: this service is for Kalshi demo-live only. Keep the referenced config local and untracked.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/home/matt/workspace/kalshi-btc-15m-bot/data-live-demo
+
+[Install]
+WantedBy=default.target

@@ -1,8 +1,8 @@
-# Kalshi BTC 15m Paper Prediction Bot
+# Kalshi BTC 15m Bot
 
-A paper-first Python bot for Kalshi's `KXBTC15M` BTC Up/Down 15-minute markets.
+A paper-first Python bot for Kalshi's `KXBTC15M` BTC Up/Down 15-minute markets, with an explicit guarded live adapter for tiny IOC limit orders once you opt in.
 
-Safety boundary: this v1 uses public market data and a local SQLite paper ledger only. It has no code path that submits live Kalshi orders.
+Safety boundary: default config is paper-only. Live trading requires a separate live config, Kalshi credentials outside the repo, a literal acknowledgement string, demo/production environment selection, hard dollar/contract caps, cash reserve gates, and SQLite audit logging before any order path is constructed.
 
 ## What it does
 
@@ -16,8 +16,11 @@ Safety boundary: this v1 uses public market data and a local SQLite paper ledger
 - Actively manages paper positions with take-profit, stop-loss, and near-close simulated exits at public bid marks.
 - Reports open paper positions with public Kalshi mark-to-market quotes, unrealized PnL, liquidity, max-win exposure, and exit signals.
 - Logs performance stats: equity, realized/unrealized PnL, win rate, expectancy, ROI on risk, and largest win/loss.
-- Can run continuously with bounded smoke mode, transient provider-error retries, or an unbounded paper-only service command.
+- Can run continuously with bounded smoke mode, transient provider-error retries, or an unbounded paper-only/live service command.
 - Can try to settle open paper trades by reading Kalshi's public market result after settlement.
+- Supports authenticated read-only Kalshi checks before trading: balance, portfolio value, and nonzero positions.
+- Supports guarded demo/live order submission with RSA-PSS request signing, IOC limit buys, hard order/account caps, min-cash reserve, spread/liquidity gates, duplicate-order cooldowns, and a separate live SQLite audit ledger.
+- Manages live positions from confirmed fills and can submit reduce-only IOC exits for take-profit, stop-loss, and near-close time exits.
 
 Important settlement caveat: Kalshi crypto markets settle on CF Benchmarks BRTI, averaged over the final 60 seconds. Coinbase/Binance prices are only proxies. This bot treats them as directional inputs, not the official settlement feed.
 
@@ -46,7 +49,9 @@ pip install -e ".[dev]"
 cp .env.example .env
 ```
 
-The default config is `configs/default.toml`. Keep `trading_mode = "paper"` and `enable_live_orders = false`.
+The default config is `configs/default.toml`. It is paper-only: `trading_mode = "paper"` and `enable_live_orders = false`.
+
+A guarded demo-live template is available at `configs/live-demo.example.toml`. Copy it to an untracked local file before use.
 
 ## Commands
 
@@ -79,6 +84,46 @@ kbtc15 --config configs/default.toml markets
 kbtc15 --config configs/default.toml backtest
 ```
 
+## Guarded demo/live trading
+
+Do not run live mode until paper mode has behaved correctly and you have reviewed the caps in `configs/live-demo.example.toml`.
+
+```bash
+# 1) Put credentials outside the repo
+mkdir -p ~/.config/kalshibtc
+mv kalshi-api-key.key ~/.config/kalshibtc/kalshi-demo.key
+chmod 600 ~/.config/kalshibtc/kalshi-demo.key
+
+# 2) Copy the demo-live template to a local untracked config
+cp configs/live-demo.example.toml configs/live-demo.local.toml
+
+# 3) Export credential references only; never commit key material
+export KALSHI_API_KEY_ID="..."
+export KALSHI_PRIVATE_KEY_FILE="$HOME/.config/kalshibtc/kalshi-demo.key"
+
+# 4) Read-only account check; submits no orders
+kbtc15 --config configs/live-demo.local.toml auth-check
+
+# 5) Local live ledger/status; submits no orders
+kbtc15 --config configs/live-demo.local.toml live-status
+
+# 6) One guarded demo-live scan. If all prediction/risk gates pass, this can submit a tiny IOC limit order.
+kbtc15 --config configs/live-demo.local.toml scan
+
+# 7) Continuous guarded demo-live loop. Review logs closely.
+kbtc15 --config configs/live-demo.local.toml run --interval-seconds 60
+```
+
+Live mode protections:
+
+- RSA-PSS Kalshi request signing using `KALSHI_API_KEY_ID` and `KALSHI_PRIVATE_KEY_FILE`.
+- Private key stays outside the repo and must be readable only by the user.
+- Demo acknowledgement: `I_UNDERSTAND_KALSHI_DEMO_ORDERS`.
+- Production requires `environment = "production"`, `allow_production = true`, and acknowledgement `I_UNDERSTAND_THIS_SUBMITS_REAL_KALSHI_PRODUCTION_ORDERS`.
+- Entries are IOC limit buys only; exits are reduce-only IOC sells.
+- Hard caps: max dollars/order, contracts/order, open positions, daily orders, daily loss, min cash reserve, liquidity, spread, and order cooldown.
+- Live orders/fills are recorded in `live_orders` and `live_fills`, separate from `paper_trades`.
+
 ## Config knobs
 
 - `market_data.provider`: `coinbase` by default; `binance` is available but may be region-limited.
@@ -91,19 +136,25 @@ kbtc15 --config configs/default.toml backtest
 - `paper.force_close_seconds_to_close`: exits simulated positions near close instead of letting stale marks linger.
 - `paper.max_open_trades`, `paper.max_daily_trades`, `paper.max_daily_loss_dollars`: basic opening risk brakes.
 - `paper.min_liquidity_dollars`, `paper.max_spread`: public-quote quality gates before opening paper trades.
+- `live.environment`: `demo` by default; production requires the stronger production acknowledgement and `allow_production = true`.
+- `live.max_order_dollars`, `live.max_contracts`, `live.max_open_positions`, `live.max_daily_orders`, `live.max_daily_loss_dollars`, `live.min_cash_reserve_dollars`: hard live risk brakes.
+- `live.take_profit_pct`, `live.stop_loss_pct`, `live.force_close_seconds_to_close`: reduce-only live exit triggers.
+- `live.min_seconds_between_orders`: duplicate-order cooldown for both buys and live exits.
 
 ## Ledger
 
-SQLite ledger path: `data/paper-ledger.sqlite3`
+SQLite ledger path: `<data_dir>/paper-ledger.sqlite3` (the live audit tables live in the same SQLite file for that config's data directory).
 
 Tables:
 
 - `predictions`: every scan decision with probability, edge, model metadata, reasons, and feature snapshot.
 - `paper_trades`: simulated YES/NO contract entries, active paper exits, settlement PnL, exit price, and exit reason.
+- `live_orders`: guarded live order intents, submitted responses, errors, client IDs, and request JSON.
+- `live_fills`: confirmed authenticated fill records used to reconstruct live position state and realized PnL.
 
 ## Deployment note
 
-A sample user-service file is in `deploy/kalshi-btc15m-paper.service`. It is not installed or started automatically. Review it before use.
+A sample paper user-service file is in `deploy/kalshi-btc15m-paper.service`. A guarded demo-live template is in `deploy/kalshi-btc15m-live-demo.service`; it expects credentials in `%h/.config/kalshibtc/kalshibtc.env` and a local untracked `configs/live-demo.local.toml`. Neither service is installed or started automatically. Review every cap before use.
 
 ## Verification
 
@@ -118,4 +169,7 @@ kbtc15 --config configs/default.toml run --interval-seconds 1 --max-scans 1
 kbtc15 --config configs/default.toml scan
 kbtc15 --config configs/default.toml status
 kbtc15 --config configs/default.toml report
+kbtc15 --config configs/default.toml live-status
+# With demo credentials configured outside the repo:
+# kbtc15 --config configs/live-demo.local.toml auth-check
 ```

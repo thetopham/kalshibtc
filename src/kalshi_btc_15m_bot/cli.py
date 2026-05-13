@@ -7,7 +7,14 @@ from collections.abc import Callable
 from typing import Any
 
 from .backtest import run_backtest_from_provider
-from .bot import KalshiBTC15MBot, dump_json, format_report, format_scan, format_status
+from .bot import (
+    KalshiBTC15MBot,
+    dump_json,
+    format_live_auth_check,
+    format_report,
+    format_scan,
+    format_status,
+)
 from .config import load_config
 
 
@@ -46,8 +53,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=10.0,
         help="Seconds to sleep after a failed scan before retrying (default: 10)",
     )
-    sub.add_parser("status", help="Show local paper ledger status")
-    sub.add_parser("report", help="Show operator-grade paper performance report")
+    sub.add_parser("status", help="Show local paper/live ledger status")
+    sub.add_parser("report", help="Show operator-grade paper/live performance report")
+    sub.add_parser(
+        "auth-check",
+        help="Run authenticated read-only Kalshi balance/position check; submits no orders",
+    )
+    sub.add_parser("live-status", help="Show local live order/fill ledger without submitting orders")
+    sub.add_parser(
+        "sync-live-fills",
+        help="Fetch recent authenticated Kalshi fills into the live ledger; submits no orders",
+    )
     sub.add_parser("resolve", help="Try to settle open paper trades from Kalshi market results")
     sub.add_parser("markets", help="List current KXBTC15M markets from Kalshi")
     backtest = sub.add_parser("backtest", help="Run offline BTC 15m directional backtest")
@@ -142,6 +158,21 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "report":
             payload = bot.report()
             print(dump_json(payload) if args.json else format_report(payload))
+            return 0
+
+        if args.command == "auth-check":
+            payload = bot.live_auth_check()
+            print(dump_json(payload) if args.json else format_live_auth_check(payload))
+            return 0
+
+        if args.command == "live-status":
+            payload = bot.live_status(sync_fills=False)
+            print(dump_json(payload))
+            return 0
+
+        if args.command == "sync-live-fills":
+            payload = bot.sync_live_fills()
+            print(dump_json(payload))
             return 0
 
         if args.command == "resolve":
