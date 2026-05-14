@@ -12,6 +12,7 @@ Safety boundary: default config is paper-only. Live trading requires a separate 
 - Trains a modest logistic-regression direction model on recent 15-minute BTC candles using time-ordered train/test splits.
 - Blends the ML probability with transparent rule-based logic and the live distance to the Kalshi target price.
 - Compares predicted probability to Kalshi YES/NO asks and records a local paper trade only when edge gates pass.
+- Provides a read-only `stream-state` websocket loop that keeps BTC ticks and the Kalshi order book fresh, recomputes expiration-aware YES/NO probabilities against the current top-of-book, and flags model/market/direction disagreement in every state payload.
 - Stores predictions and paper trades in `data/paper-ledger.sqlite3`.
 - Actively manages paper positions with take-profit, stop-loss, and near-close simulated exits at public bid marks.
 - Reports open paper positions with public Kalshi mark-to-market quotes, unrealized PnL, liquidity, max-win exposure, and exit signals.
@@ -61,6 +62,11 @@ kbtc15 --config configs/default.toml scan
 
 # Continuous paper-only loop; Ctrl-C stops it
 kbtc15 --config configs/default.toml run --interval-seconds 60
+
+# Read-only websocket market-state stream; emits fresh BTC/orderbook YES/NO edge state
+# Output uses monitor=EDGE_* labels, not order-submission language.
+# Kalshi WebSocket requires KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY_FILE even when not submitting orders.
+kbtc15 --config configs/default.toml stream-state --emit-min-interval-seconds 1
 
 # Bounded loop for smoke testing service behavior
 kbtc15 --config configs/default.toml run --interval-seconds 1 --max-scans 2
@@ -209,6 +215,9 @@ kbtc15 --config configs/default.toml status
 kbtc15 --config configs/default.toml report
 timeout 5s env KALSHI_BTC15M_DASHBOARD_TOKEN=test-token kbtc15 --config configs/default.toml dashboard --host 127.0.0.1 --port 8792 || test $? -eq 124
 kbtc15 --config configs/default.toml live-status
+kbtc15 --config configs/default.toml stream-state --help
+# With Kalshi WebSocket credentials configured outside the repo:
+# kbtc15 --config configs/default.toml stream-state --max-events 3
 # With demo credentials configured outside the repo:
 # kbtc15 --config configs/live-demo.local.toml auth-check
 ```

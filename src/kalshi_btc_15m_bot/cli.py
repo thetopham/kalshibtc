@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 import time
 from collections.abc import Callable
@@ -28,6 +29,22 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("scan", help="Run one public-data prediction scan and optional paper trade")
+    stream = sub.add_parser(
+        "stream-state",
+        help="Read-only websocket market-state stream; refreshes BTC/orderbook continuously",
+    )
+    stream.add_argument(
+        "--emit-min-interval-seconds",
+        type=float,
+        default=1.0,
+        help="Minimum seconds between emitted state lines (default: 1.0)",
+    )
+    stream.add_argument(
+        "--max-events",
+        type=int,
+        default=None,
+        help="Stop after N emitted state payloads; useful for smoke tests",
+    )
     run = sub.add_parser("run", help="Continuously run paper scans until stopped")
     run.add_argument(
         "--interval-seconds",
@@ -159,6 +176,18 @@ def main(argv: list[str] | None = None) -> int:
             payload = bot.scan_once()
             print(dump_json(payload) if args.json else format_scan(payload))
             return 0
+
+        if args.command == "stream-state":
+            from .streaming import run_realtime_state_stream
+
+            return asyncio.run(
+                run_realtime_state_stream(
+                    bot,
+                    json_output=args.json,
+                    max_events=args.max_events,
+                    emit_min_interval_seconds=args.emit_min_interval_seconds,
+                )
+            )
 
         if args.command == "run":
             return run_loop(

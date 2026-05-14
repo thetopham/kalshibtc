@@ -180,6 +180,29 @@ def test_authenticated_client_signs_full_api_path_without_query(tmp_path) -> Non
     assert headers["KALSHI-ACCESS-TIMESTAMP"] == "1703123456789"
 
 
+def test_authenticated_client_signs_websocket_handshake_path(tmp_path) -> None:
+    key_path = tmp_path / "kalshi.key"
+    private_key = write_private_key(key_path)
+    client = KalshiAuthenticatedClient(
+        base_url="https://external-api.demo.kalshi.co/trade-api/v2",
+        api_key_id="key-id",
+        private_key_file=key_path,
+        timestamp_ms=lambda: "1703123456789",
+    )
+
+    headers = client.websocket_auth_headers()
+
+    signature = base64.b64decode(headers["KALSHI-ACCESS-SIGNATURE"])
+    private_key.public_key().verify(
+        signature,
+        b"1703123456789GET/trade-api/ws/v2",
+        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
+        hashes.SHA256(),
+    )
+    assert headers["KALSHI-ACCESS-KEY"] == "key-id"
+    assert headers["KALSHI-ACCESS-TIMESTAMP"] == "1703123456789"
+
+
 def test_authenticated_client_rejects_group_readable_private_key(tmp_path) -> None:
     key_path = tmp_path / "kalshi.key"
     write_private_key(key_path, mode=0o644)

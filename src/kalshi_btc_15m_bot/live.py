@@ -83,8 +83,19 @@ class KalshiAuthenticatedClient:
             )
 
     def auth_headers(self, method: str, path: str) -> dict[str, str]:
-        timestamp = self.timestamp_ms()
         sign_path = self._signature_path(path)
+        return self._signed_headers(method, sign_path)
+
+    def websocket_auth_headers(self) -> dict[str, str]:
+        """Authentication headers for Kalshi's WebSocket handshake.
+
+        Kalshi signs websocket connections as timestamp + GET + /trade-api/ws/v2,
+        which intentionally differs from REST's /trade-api/v2/... path.
+        """
+        return self._signed_headers("GET", "/trade-api/ws/v2")
+
+    def _signed_headers(self, method: str, sign_path: str) -> dict[str, str]:
+        timestamp = self.timestamp_ms()
         message = f"{timestamp}{method.upper()}{sign_path}".encode()
         signature = self.private_key.sign(
             message,

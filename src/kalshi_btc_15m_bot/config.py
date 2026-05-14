@@ -124,8 +124,8 @@ def _resolve_data_dir(value: str | Path, *, allow_env_override: bool) -> Path:
 
 def load_config(path: str | Path | None = None) -> BotConfig:
     """Load config with fail-closed paper/live trading boundaries."""
-    load_dotenv()
     config_path = Path(path or os.getenv("KALSHI_BTC15M_CONFIG", "configs/default.toml"))
+    _load_config_dotenv(config_path)
     raw: dict[str, Any] = {}
     if config_path.exists():
         with config_path.open("rb") as fh:
@@ -264,6 +264,28 @@ def load_config(path: str | Path | None = None) -> BotConfig:
     _validate_config(cfg)
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     return cfg
+
+
+def _load_config_dotenv(config_path: Path) -> None:
+    """Load only the operator's local .env files, never a searched parent repo .env.
+
+    python-dotenv's default search can leak a developer checkout .env into tests or
+    other working directories. Keep loading deterministic: current directory first,
+    then the directory containing an explicit config path.
+    """
+    candidates = [Path.cwd() / ".env"]
+    config_dir = config_path.expanduser().parent
+    if config_dir != Path("."):
+        config_env = config_dir if config_dir.is_absolute() else Path.cwd() / config_dir
+        candidates.append(config_env / ".env")
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.exists():
+            load_dotenv(dotenv_path=resolved, override=False)
 
 
 def _validate_config(cfg: BotConfig) -> None:

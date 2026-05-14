@@ -1,0 +1,747 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import math
+import os
+import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+from typing import Any
+from urllib.parse import urlparse
+
+from .bot import KalshiBTC15MBot, dump_json
+from .kalshi_client import KalshiPublicClient
+from .live import KalshiAuthenticatedClient, KalshiCredentialError
+from .market_data import candles_to_frame
+from .models import KalshiMarket, Prediction, now_utc, parse_ts
+
+MIN_MONITOR_EDGE = 0.01
+
+
+@dataclass(frozen=True)
+class BtcTick:
+    source: str
+    product: str
+    price: float
+    bid: float | None
+    ask: float | None
+    ts: datetime
+
+
+class KalshiOrderBook:
+    """Mutable Kalshi binary order book view keyed by YES/NO bid levels.
+
+    Kalshi publishes YES bids and NO bids. The cheapest YES ask is the complement
+    of the best NO bid, and the cheapest NO ask is the complement of the best YES bid.
+    """
+
+    def __init__(self, market_ticker: str) -> None:
+        self.market_ticker = market_ticker
+        self.yes_levels: dict[float, float] = {}
+        self.no_levels: dict[float, float] = {}
+        self.last_seq: int | None = None
+        self.updated_at: datetime | None = None
+
+    @classmethod
+    def from_snapshot(cls, market_ticker: str, msg: Mapping[str, Any]) -> KalshiOrderBook:
+        book = cls(str(msg.get("market_ticker") or market_ticker))
+        book.apply_snapshot(msg)
+        return book
+
+    def apply_snapshot(self, msg: Mapping[str, Any]) -> None:
+        ticker = str(msg.get("market_ticker") or self.market_ticker)
+        if ticker and ticker != self.market_ticker:
+            self.market_ticker = ticker
+        self.yes_levels = _levels_to_dict(_book_levels(msg, "yes"))
+        self.no_levels = _levels_to_dict(_book_levels(msg, "no"))
+        self.updated_at = _message_time(msg) or now_utc()
+
+    def apply_delta(self, msg: Mapping[str, Any]) -> None:
+        ticker = str(msg.get("market_ticker") or self.market_ticker)
+        if ticker != self.market_ticker:
+            return
+        side = str(msg.get("side") or "").lower()
+        levels = self.yes_levels if side == "yes" else self.no_levels if side == "no" else None
+        if levels is None:
+            return
+        price = _as_float(msg.get("price_dollars") or msg.get("price"), default=0.0)
+        delta = _as_float(msg.get("delta_fp") or msg.get("delta") or msg.get("count_delta"), default=0.0)
+        if not (0.0 < price < 1.0) or abs(delta) <= 1e-9:
+            return
+        current = levels.get(price, 0.0) + delta
+        if current <= 1e-9:
+            levels.pop(price, None)
+        else:
+            levels[price] = current
+        self.updated_at = _message_time(msg) or now_utc()
+
+    @property
+    def best_yes_bid(self) -> float | None:
+        return max(self.yes_levels) if self.yes_levels else None
+
+    @property
+    def best_no_bid(self) -> float | None:
+        return max(self.no_levels) if self.no_levels else None
+
+    @property
+    def yes_ask(self) -> float | None:
+        return round(1.0 - self.best_no_bid, 4) if self.best_no_bid is not None else None
+
+    @property
+    def no_ask(self) -> float | None:
+        return round(1.0 - self.best_yes_bid, 4) if self.best_yes_bid is not None else None
+
+    @property
+    def visible_liquidity(self) -> float:
+        return sum(price * count for price, count in self.yes_levels.items()) + sum(
+            price * count for price, count in self.no_levels.items()
+        )
+
+    def to_market(self, market: KalshiMarket) -> KalshiMarket:
+        yes_bid = self.best_yes_bid if self.best_yes_bid is not None else market.yes_bid
+        no_bid = self.best_no_bid if self.best_no_bid is not None else market.no_bid
+        yes_ask = self.yes_ask if self.yes_ask is not None else market.yes_ask
+        no_ask = self.no_ask if self.no_ask is not None else market.no_ask
+        return replace(
+            market,
+            yes_bid=round(yes_bid, 4),
+            yes_ask=round(yes_ask, 4),
+            no_bid=round(no_bid, 4),
+            no_ask=round(no_ask, 4),
+            liquidity=round(max(market.liquidity, self.visible_liquidity), 4),
+        )
+
+
+def build_realtime_state(
+    prediction: Prediction,
+    *,
+    market: KalshiMarket,
+    orderbook: KalshiOrderBook,
+    btc: BtcTick,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    now = now or now_utc()
+    quoted_market = orderbook.to_market(market)
+    yes_ask = quoted_market.yes_ask
+    no_ask = quoted_market.no_ask
+    expiration = market.expected_expiration_time or market.close_time
+    seconds_to_expiration = (expiration - now).total_seconds() if expiration else None
+    seconds_to_close = market.seconds_to_close(now)
+    distance_to_target, distance_to_target_pct, direction_state = _target_distance(
+        current_price=btc.price,
+        target_price=market.target_price,
+    )
+    probability_yes, probability_source, volatility_15m, distance_z = _expiration_state_probability_yes(
+        current_price=btc.price,
+        target_price=market.target_price,
+        seconds_to_expiration=seconds_to_expiration,
+        feature_snapshot=prediction.feature_snapshot,
+        fallback_probability_yes=prediction.probability_yes,
+    )
+    probability_no = 1.0 - probability_yes
+    edge_yes = probability_yes - yes_ask if 0.0 < yes_ask < 1.0 else None
+    edge_no = probability_no - no_ask if 0.0 < no_ask < 1.0 else None
+    best_side, best_edge = _best_side(edge_yes=edge_yes, edge_no=edge_no)
+    market_implied_yes = _market_implied_yes(quoted_market)
+    warnings = _state_warnings(
+        direction_state=direction_state,
+        best_side=best_side,
+        best_edge=best_edge,
+        probability_yes=probability_yes,
+        model_probability_yes=prediction.probability_yes,
+        market_implied_yes=market_implied_yes,
+    )
+    return {
+        "event": "market_state",
+        "as_of": now.isoformat(),
+        "btc_source": btc.source,
+        "btc_product": btc.product,
+        "btc_ts": btc.ts.isoformat(),
+        "current_price": btc.price,
+        "btc_bid": btc.bid,
+        "btc_ask": btc.ask,
+        "market_ticker": market.ticker,
+        "event_ticker": market.event_ticker,
+        "target_price": market.target_price,
+        "market_close_time": market.close_time.isoformat() if market.close_time else None,
+        "market_expiration_time": expiration.isoformat() if expiration else None,
+        "seconds_to_close": seconds_to_close,
+        "seconds_to_expiration": seconds_to_expiration,
+        "distance_to_target": distance_to_target,
+        "distance_to_target_pct": distance_to_target_pct,
+        "direction_state": direction_state,
+        "probability_yes": probability_yes,
+        "probability_no": probability_no,
+        "probability_source": probability_source,
+        "state_probability_yes": probability_yes,
+        "state_probability_no": probability_no,
+        "state_probability_vol_15m": volatility_15m,
+        "state_probability_distance_z": distance_z,
+        "model_probability_yes": prediction.probability_yes,
+        "model_probability_no": prediction.probability_no,
+        "model_probability_gap": probability_yes - prediction.probability_yes,
+        "market_implied_yes": market_implied_yes,
+        "market_probability_gap": probability_yes - market_implied_yes if market_implied_yes is not None else None,
+        "confidence": abs(probability_yes - 0.5) * 2.0,
+        "model_confidence": prediction.confidence,
+        "yes_bid": quoted_market.yes_bid,
+        "yes_ask": quoted_market.yes_ask,
+        "no_bid": quoted_market.no_bid,
+        "no_ask": quoted_market.no_ask,
+        "orderbook_liquidity": orderbook.visible_liquidity,
+        "liquidity": quoted_market.liquidity,
+        "edge_yes": edge_yes,
+        "edge_no": edge_no,
+        "best_side": best_side,
+        "best_edge": best_edge,
+        "monitor_action": _monitor_action(best_side=best_side, best_edge=best_edge),
+        "warnings": warnings,
+        "prediction_action": prediction.action,
+        "prediction_side": prediction.side,
+        "stake_dollars": prediction.stake_dollars,
+        "reasons": prediction.reasons,
+        "boundary": "read-only websocket market-state stream; no orders submitted",
+    }
+
+
+def _target_distance(*, current_price: float, target_price: float | None) -> tuple[float | None, float | None, str]:
+    if target_price is None or not math.isfinite(target_price) or target_price <= 0:
+        return None, None, "UNKNOWN"
+    distance = current_price - target_price
+    distance_pct = distance / target_price
+    if abs(distance_pct) < 0.00001:
+        direction = "AT_TARGET"
+    elif distance > 0:
+        direction = "ABOVE_TARGET"
+    else:
+        direction = "BELOW_TARGET"
+    return distance, distance_pct, direction
+
+
+def _expiration_state_probability_yes(
+    *,
+    current_price: float,
+    target_price: float | None,
+    seconds_to_expiration: float | None,
+    feature_snapshot: Mapping[str, Any],
+    fallback_probability_yes: float,
+) -> tuple[float, str, float | None, float | None]:
+    """Estimate expiry YES probability from current distance, time left, and BTC volatility.
+
+    The streaming view needs a *current-state* probability, not just the slower
+    technical model's directional prior. Treat the remaining move as log-normal
+    noise with 15-minute realized volatility from the latest feature snapshot.
+    """
+    fallback = _clamp_probability(fallback_probability_yes)
+    if (
+        target_price is None
+        or target_price <= 0
+        or current_price <= 0
+        or seconds_to_expiration is None
+        or seconds_to_expiration <= 0
+    ):
+        return fallback, "model_fallback", None, None
+    volatility_15m = _as_float(feature_snapshot.get("vol_16"), default=0.0)
+    if not math.isfinite(volatility_15m) or volatility_15m <= 0:
+        return fallback, "model_fallback_no_volatility", None, None
+    volatility_15m = max(0.0005, min(0.02, volatility_15m))
+    remaining_sigma = volatility_15m * math.sqrt(max(seconds_to_expiration, 1.0) / 900.0)
+    if remaining_sigma <= 0:
+        return fallback, "model_fallback_no_sigma", volatility_15m, None
+    distance_z = math.log(current_price / target_price) / remaining_sigma
+    probability_yes = 0.5 * (1.0 + math.erf(distance_z / math.sqrt(2.0)))
+    return _clamp_probability(probability_yes), "expiration_distance_volatility", volatility_15m, distance_z
+
+
+def _market_implied_yes(market: KalshiMarket) -> float | None:
+    if 0.0 < market.yes_bid < market.yes_ask < 1.0:
+        return (market.yes_bid + market.yes_ask) / 2.0
+    if 0.0 < market.no_bid < market.no_ask < 1.0:
+        return 1.0 - ((market.no_bid + market.no_ask) / 2.0)
+    return None
+
+
+def _monitor_action(*, best_side: str | None, best_edge: float | None) -> str:
+    if best_side in {"YES", "NO"} and best_edge is not None and best_edge >= MIN_MONITOR_EDGE:
+        return f"EDGE_{best_side}"
+    return "NO_EDGE"
+
+
+def _state_warnings(
+    *,
+    direction_state: str,
+    best_side: str | None,
+    best_edge: float | None,
+    probability_yes: float,
+    model_probability_yes: float,
+    market_implied_yes: float | None,
+) -> list[str]:
+    warnings: list[str] = []
+    if best_edge is not None and best_edge > 0.03:
+        if direction_state == "ABOVE_TARGET" and best_side == "NO":
+            warnings.append("edge_direction_disagreement")
+        elif direction_state == "BELOW_TARGET" and best_side == "YES":
+            warnings.append("edge_direction_disagreement")
+    if abs(probability_yes - model_probability_yes) >= 0.25:
+        warnings.append("model_state_probability_gap")
+    if market_implied_yes is not None and abs(probability_yes - market_implied_yes) >= 0.25:
+        warnings.append("market_probability_gap")
+    return warnings
+
+
+def _clamp_probability(value: float) -> float:
+    if not math.isfinite(value):
+        return 0.5
+    return max(0.01, min(0.99, value))
+
+
+def format_realtime_state(payload: Mapping[str, Any]) -> str:
+    close_seconds = _seconds_label(payload.get("seconds_to_close"))
+    expiration_seconds = _seconds_label(payload.get("seconds_to_expiration"))
+    monitor_action = str(payload.get("monitor_action") or "NO_EDGE")
+    monitor_side = payload.get("best_side") if monitor_action != "NO_EDGE" else "NONE"
+    lines = [
+        "BTC 15m Kalshi stream market_state",
+        (
+            f"market={payload.get('market_ticker')} target={payload.get('target_price')} "
+            f"btc={float(payload.get('current_price') or 0.0):.2f} "
+            f"closes_in={close_seconds} expires_in={expiration_seconds}"
+        ),
+        (
+            f"direction={payload.get('direction_state', 'UNKNOWN')} "
+            f"distance={_fmt_dollars(payload.get('distance_to_target'))} "
+            f"distance_pct={_fmt_pct(payload.get('distance_to_target_pct'))}"
+        ),
+        (
+            f"prob_yes={float(payload.get('probability_yes') or 0.0):.3f} "
+            f"prob_no={float(payload.get('probability_no') or 0.0):.3f} "
+            f"source={payload.get('probability_source', 'unknown')} "
+            f"model_yes={float(payload.get('model_probability_yes') or 0.0):.3f} "
+            f"market_yes={_fmt_probability(payload.get('market_implied_yes'))}"
+        ),
+        (
+            f"book yes={float(payload.get('yes_bid') or 0.0):.3f}/"
+            f"{float(payload.get('yes_ask') or 0.0):.3f} "
+            f"no={float(payload.get('no_bid') or 0.0):.3f}/"
+            f"{float(payload.get('no_ask') or 0.0):.3f} "
+            f"edge_yes={_fmt_edge(payload.get('edge_yes'))} "
+            f"edge_no={_fmt_edge(payload.get('edge_no'))}"
+        ),
+        (
+            f"monitor={monitor_action} "
+            f"edge_side={monitor_side} "
+            f"edge={_fmt_edge(payload.get('best_edge'))} "
+            f"paper_action_ref={payload.get('prediction_action')} "
+            f"paper_stake_ref=${float(payload.get('stake_dollars') or 0.0):.2f}"
+        ),
+    ]
+    warnings = payload.get("warnings")
+    if isinstance(warnings, list) and warnings:
+        lines.append(f"warnings={','.join(str(warning) for warning in warnings)}")
+    lines.append(f"boundary: {payload.get('boundary', 'read-only')}")
+    return "\n".join(lines)
+
+
+def kalshi_ws_url_from_rest_url(rest_url: str) -> str:
+    parsed = urlparse(rest_url)
+    host_map = {
+        "external-api.kalshi.com": "external-api-ws.kalshi.com",
+        "external-api.demo.kalshi.co": "external-api-ws.demo.kalshi.co",
+        "api.elections.kalshi.com": "api.elections.kalshi.com",
+        "demo-api.kalshi.co": "demo-api.kalshi.co",
+    }
+    host = host_map.get(parsed.netloc)
+    if not host:
+        raise ValueError(f"Unsupported Kalshi REST host for websocket mapping: {parsed.netloc}")
+    return f"wss://{host}/trade-api/ws/v2"
+
+
+def btc_ws_url_from_bot(bot: KalshiBTC15MBot) -> str:
+    cfg = bot.config.market_data
+    if cfg.provider.lower() == "binance":
+        return f"wss://stream.binance.com:9443/ws/{cfg.symbol.lower()}@bookTicker"
+    if cfg.provider.lower() == "coinbase":
+        return "wss://ws-feed.exchange.coinbase.com"
+    raise ValueError(f"Unsupported websocket market_data.provider: {cfg.provider}")
+
+
+def parse_binance_book_ticker(payload: Mapping[str, Any]) -> BtcTick:
+    data = _combined_payload(payload)
+    bid = _as_float(data.get("b") or data.get("bidPrice"), default=0.0)
+    ask = _as_float(data.get("a") or data.get("askPrice"), default=0.0)
+    price = (bid + ask) / 2 if bid > 0 and ask > 0 else _as_float(data.get("c"), default=0.0)
+    if price <= 0:
+        raise ValueError("Binance bookTicker payload did not contain a usable BTC price")
+    ts_ms = _as_float(data.get("E") or data.get("u"), default=0.0)
+    ts = datetime.fromtimestamp(ts_ms / 1000, tz=UTC) if ts_ms > 0 else now_utc()
+    return BtcTick(
+        source="binance_ws",
+        product=str(data.get("s") or "BTCUSDT"),
+        price=price,
+        bid=bid or None,
+        ask=ask or None,
+        ts=ts,
+    )
+
+
+def parse_coinbase_ticker(payload: Mapping[str, Any]) -> BtcTick:
+    if str(payload.get("type") or "") not in {"ticker", "last_match", "match"}:
+        raise ValueError("Coinbase payload is not a ticker/trade message")
+    price = _as_float(payload.get("price"), default=0.0)
+    bid = _as_float(payload.get("best_bid"), default=0.0)
+    ask = _as_float(payload.get("best_ask"), default=0.0)
+    if price <= 0 and bid > 0 and ask > 0:
+        price = (bid + ask) / 2
+    if price <= 0:
+        raise ValueError("Coinbase ticker payload did not contain a usable BTC price")
+    return BtcTick(
+        source="coinbase_ws",
+        product=str(payload.get("product_id") or "BTC-USD"),
+        price=price,
+        bid=bid or None,
+        ask=ask or None,
+        ts=parse_ts(str(payload.get("time") or "")) or now_utc(),
+    )
+
+
+class RealtimeStateStreamer:
+    """Read-only websocket market-state loop.
+
+    The loop updates BTC price and Kalshi top-of-book state from websocket events,
+    recomputes the current YES/NO probabilities against the fresh order book, and
+    emits operator-readable state. It intentionally does not call order submission.
+    """
+
+    def __init__(
+        self,
+        bot: KalshiBTC15MBot,
+        *,
+        json_output: bool = False,
+        max_events: int | None = None,
+        emit_min_interval_seconds: float = 1.0,
+        emit: Callable[[str], None] | None = None,
+        clock: Callable[[], datetime] = now_utc,
+    ) -> None:
+        if emit_min_interval_seconds < 0:
+            raise ValueError("emit_min_interval_seconds must be >= 0")
+        if max_events is not None and max_events < 1:
+            raise ValueError("max_events must be at least 1 when provided")
+        self.bot = bot
+        self.json_output = json_output
+        self.max_events = max_events
+        self.emit_min_interval_seconds = emit_min_interval_seconds
+        self.emit = emit or (lambda text: print(text, flush=True))
+        self.clock = clock
+        self.market: KalshiMarket | None = None
+        self.orderbook: KalshiOrderBook | None = None
+        self.btc: BtcTick | None = None
+        self.frame = None
+        self._last_emit_monotonic = 0.0
+        self._emitted = 0
+
+    def bootstrap(self) -> None:
+        self.market = self.bot.kalshi.current_btc15m_market(
+            self.bot.config.kalshi.series_ticker,
+            status=self.bot.config.kalshi.market_status,
+        )
+        self.orderbook = _rest_orderbook(self.bot.kalshi, self.market.ticker)
+        candles = self.bot.market_data.fetch_candles(self.bot.config.market_data.lookback_days)
+        self.frame = candles_to_frame(
+            candles,
+            granularity_seconds=self.bot.config.market_data.granularity_seconds,
+            drop_incomplete=True,
+        )
+        price = self.bot.market_data.current_price()
+        self.btc = BtcTick(
+            source="rest_bootstrap",
+            product=self._btc_product_label(),
+            price=price,
+            bid=None,
+            ask=None,
+            ts=self.clock(),
+        )
+        self.emit_state(force=True)
+
+    def apply_btc_tick(self, tick: BtcTick) -> None:
+        self.btc = tick
+        self.emit_state()
+
+    def apply_kalshi_message(self, message: Mapping[str, Any]) -> None:
+        if self.orderbook is None:
+            return
+        msg_type = str(message.get("type") or "")
+        msg = message.get("msg") if isinstance(message.get("msg"), Mapping) else message
+        if not isinstance(msg, Mapping):
+            return
+        if msg_type == "orderbook_snapshot":
+            self.orderbook.apply_snapshot(msg)
+        elif msg_type == "orderbook_delta":
+            self.orderbook.apply_delta(msg)
+        else:
+            return
+        seq = message.get("seq")
+        if isinstance(seq, int):
+            self.orderbook.last_seq = seq
+        self.emit_state()
+
+    def emit_state(self, *, force: bool = False) -> None:
+        if self.market is None or self.orderbook is None or self.btc is None or self.frame is None:
+            return
+        now_monotonic = time.monotonic()
+        if not force and now_monotonic - self._last_emit_monotonic < self.emit_min_interval_seconds:
+            return
+        now = self.clock()
+        quoted_market = self.orderbook.to_market(self.market)
+        prediction = self.bot.predictor.predict(
+            self.frame,
+            market=quoted_market,
+            current_price=self.btc.price,
+            now=now,
+        )
+        payload = build_realtime_state(
+            prediction,
+            market=quoted_market,
+            orderbook=self.orderbook,
+            btc=self.btc,
+            now=now,
+        )
+        self.emit(dump_json(payload) if self.json_output else format_realtime_state(payload))
+        self._last_emit_monotonic = now_monotonic
+        self._emitted += 1
+
+    async def run(self) -> int:
+        self.bootstrap()
+        if self._max_events_reached():
+            return 0
+        stop = asyncio.Event()
+        try:
+            await asyncio.gather(self._btc_ws_loop(stop), self._kalshi_ws_loop(stop))
+        except KeyboardInterrupt:
+            raise
+        return 0
+
+    async def _btc_ws_loop(self, stop: asyncio.Event) -> None:
+        websockets = _import_websockets()
+        url = btc_ws_url_from_bot(self.bot)
+        async with websockets.connect(url) as ws:
+            if self.bot.config.market_data.provider.lower() == "coinbase":
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "subscribe",
+                            "product_ids": [self.bot.config.market_data.product_id],
+                            "channels": ["ticker"],
+                        }
+                    )
+                )
+            while not stop.is_set():
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                except TimeoutError:
+                    continue
+                data = json.loads(raw)
+                try:
+                    tick = (
+                        parse_binance_book_ticker(data)
+                        if self.bot.config.market_data.provider.lower() == "binance"
+                        else parse_coinbase_ticker(data)
+                    )
+                except ValueError:
+                    continue
+                self.apply_btc_tick(tick)
+                if self._max_events_reached():
+                    stop.set()
+
+    async def _kalshi_ws_loop(self, stop: asyncio.Event) -> None:
+        if self.market is None:
+            return
+        websockets = _import_websockets()
+        rest_base_url = self._kalshi_rest_url_for_ws()
+        url = kalshi_ws_url_from_rest_url(rest_base_url)
+        headers = _kalshi_ws_auth_headers(rest_base_url, self.bot.config.market_data.request_timeout_seconds)
+        connect = _websockets_connect(websockets, url, headers=headers)
+        async with connect as ws:
+            await ws.send(
+                json.dumps(
+                    {
+                        "id": 1,
+                        "cmd": "subscribe",
+                        "params": {
+                            "channels": ["orderbook_delta"],
+                            "market_tickers": [self.market.ticker],
+                        },
+                    }
+                )
+            )
+            while not stop.is_set():
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                except TimeoutError:
+                    continue
+                data = json.loads(raw)
+                self.apply_kalshi_message(data)
+                if self._max_events_reached():
+                    stop.set()
+
+    def _kalshi_rest_url_for_ws(self) -> str:
+        if self.bot.config.is_live_mode:
+            return self.bot.config.live.base_url
+        return self.bot.config.kalshi.base_url
+
+    def _btc_product_label(self) -> str:
+        if self.bot.config.market_data.provider.lower() == "binance":
+            return self.bot.config.market_data.symbol
+        return self.bot.config.market_data.product_id
+
+    def _max_events_reached(self) -> bool:
+        return self.max_events is not None and self._emitted >= self.max_events
+
+
+async def run_realtime_state_stream(
+    bot: KalshiBTC15MBot,
+    *,
+    json_output: bool = False,
+    max_events: int | None = None,
+    emit_min_interval_seconds: float = 1.0,
+) -> int:
+    streamer = RealtimeStateStreamer(
+        bot,
+        json_output=json_output,
+        max_events=max_events,
+        emit_min_interval_seconds=emit_min_interval_seconds,
+    )
+    return await streamer.run()
+
+
+def _rest_orderbook(kalshi: KalshiPublicClient, ticker: str) -> KalshiOrderBook:
+    payload = kalshi.get_orderbook(ticker, depth=100)
+    raw = payload.get("orderbook_fp") or payload.get("orderbook") or payload
+    if not isinstance(raw, Mapping):
+        raw = {}
+    return KalshiOrderBook.from_snapshot(ticker, raw)
+
+
+def _kalshi_ws_auth_headers(rest_base_url: str, timeout_seconds: int) -> dict[str, str]:
+    api_key_id = os.getenv("KALSHI_API_KEY_ID")
+    private_key_file = os.getenv("KALSHI_PRIVATE_KEY_FILE")
+    if not api_key_id or not private_key_file:
+        raise KalshiCredentialError(
+            "Kalshi WebSocket requires KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_FILE."
+        )
+    client = KalshiAuthenticatedClient(
+        base_url=rest_base_url,
+        api_key_id=api_key_id,
+        private_key_file=private_key_file,
+        timeout_seconds=timeout_seconds,
+    )
+    return client.websocket_auth_headers()
+
+
+def _import_websockets():
+    try:
+        import websockets
+    except ImportError as exc:  # pragma: no cover - exercised by operator environment.
+        raise RuntimeError(
+            "The 'websockets' package is required for stream-state. "
+            "Run: pip install -e '.[dev]'"
+        ) from exc
+    return websockets
+
+
+def _websockets_connect(websockets_module, url: str, *, headers: dict[str, str]):
+    try:
+        return websockets_module.connect(url, additional_headers=headers)
+    except TypeError:  # websockets<14 used extra_headers.
+        return websockets_module.connect(url, extra_headers=list(headers.items()))
+
+
+def _levels_to_dict(levels: Any) -> dict[float, float]:
+    result: dict[float, float] = {}
+    if not isinstance(levels, list):
+        return result
+    for level in levels:
+        if not isinstance(level, list | tuple) or len(level) < 2:
+            continue
+        price = _as_float(level[0], default=0.0)
+        count = _as_float(level[1], default=0.0)
+        if 0.0 < price < 1.0 and count > 0.0:
+            result[price] = count
+    return result
+
+
+def _book_levels(msg: Mapping[str, Any], side: str) -> Any:
+    return (
+        msg.get(f"{side}_dollars_fp")
+        or msg.get(f"{side}_dollars")
+        or msg.get(f"{side}")
+        or []
+    )
+
+
+def _message_time(msg: Mapping[str, Any]) -> datetime | None:
+    raw = msg.get("time") or msg.get("ts")
+    if isinstance(raw, str):
+        return parse_ts(raw)
+    ts_ms = _as_float(msg.get("ts_ms"), default=0.0)
+    if ts_ms > 0:
+        return datetime.fromtimestamp(ts_ms / 1000, tz=UTC)
+    return None
+
+
+def _combined_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    data = payload.get("data")
+    return data if isinstance(data, Mapping) else payload
+
+
+def _best_side(*, edge_yes: float | None, edge_no: float | None) -> tuple[str | None, float | None]:
+    if edge_yes is None and edge_no is None:
+        return None, None
+    if edge_no is None or (edge_yes is not None and edge_yes >= edge_no):
+        return "YES", edge_yes
+    return "NO", edge_no
+
+
+def _as_float(value: Any, *, default: float) -> float:
+    try:
+        if value in (None, ""):
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _seconds_label(value: Any) -> str:
+    try:
+        return f"{float(value):.0f}s"
+    except (TypeError, ValueError):
+        return "unknown"
+
+
+def _fmt_edge(value: Any) -> str:
+    try:
+        return f"{float(value):+.3f}"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def _fmt_dollars(value: Any) -> str:
+    try:
+        return f"{float(value):+.2f}"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def _fmt_pct(value: Any) -> str:
+    try:
+        return f"{float(value) * 100:+.3f}%"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def _fmt_probability(value: Any) -> str:
+    try:
+        return f"{float(value):.3f}"
+    except (TypeError, ValueError):
+        return "n/a"
