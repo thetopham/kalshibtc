@@ -45,6 +45,9 @@ SNAPSHOT_COLUMNS = [
     "yes_mid",
     "no_mid",
     "spread",
+    "yes_spread",
+    "no_spread",
+    "min_spread",
     "yes_bid_depth",
     "yes_ask_depth",
     "no_bid_depth",
@@ -146,6 +149,9 @@ class RealtimeSnapshotRecorder:
                     yes_mid REAL,
                     no_mid REAL,
                     spread REAL,
+                    yes_spread REAL,
+                    no_spread REAL,
+                    min_spread REAL,
                     yes_bid_depth REAL,
                     yes_ask_depth REAL,
                     no_bid_depth REAL,
@@ -187,15 +193,26 @@ class RealtimeSnapshotRecorder:
                     ON realtime_snapshots_1s(market_ticker, seconds_to_close);
                 """
             )
+            existing_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(realtime_snapshots_1s)")
+            }
+            for column in ("yes_spread", "no_spread", "min_spread"):
+                if column not in existing_columns:
+                    conn.execute(f"ALTER TABLE realtime_snapshots_1s ADD COLUMN {column} REAL")
 
     def record_snapshot(self, payload: Mapping[str, Any]) -> bool:
         row = snapshot_row_from_payload(payload)
         placeholders = ", ".join("?" for _ in SNAPSHOT_COLUMNS)
         columns = ", ".join(SNAPSHOT_COLUMNS)
         values = tuple(row[column] for column in SNAPSHOT_COLUMNS)
+        update_columns = [column for column in SNAPSHOT_COLUMNS if column not in {"market_ticker", "ts"}]
+        updates = ", ".join(f"{column}=excluded.{column}" for column in update_columns)
         with self.connect() as conn:
             cursor = conn.execute(
-                f"INSERT OR IGNORE INTO realtime_snapshots_1s ({columns}) VALUES ({placeholders})",
+                f"""
+                INSERT INTO realtime_snapshots_1s ({columns}) VALUES ({placeholders})
+                ON CONFLICT(market_ticker, ts) DO UPDATE SET {updates}
+                """,
                 values,
             )
         return cursor.rowcount == 1
@@ -225,9 +242,19 @@ def snapshot_row_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     no_mid = _first_float(payload, "no_mid")
     if no_mid is None and no_bid is not None and no_ask is not None:
         no_mid = (no_bid + no_ask) / 2.0
+    yes_spread = _first_float(payload, "yes_spread")
+    if yes_spread is None:
+        yes_spread = _side_spread(bid=yes_bid, ask=yes_ask)
+    no_spread = _first_float(payload, "no_spread")
+    if no_spread is None:
+        no_spread = _side_spread(bid=no_bid, ask=no_ask)
+    min_spread = _first_float(payload, "min_spread")
+    if min_spread is None:
+        spread_candidates = [value for value in (yes_spread, no_spread) if value is not None]
+        min_spread = min(spread_candidates) if spread_candidates else None
     spread = _first_float(payload, "spread", "best_spread")
     if spread is None:
-        spread = _side_spread(bid=yes_bid, ask=yes_ask) or _side_spread(bid=no_bid, ask=no_ask)
+        spread = min_spread
 
     seconds_to_close = _float_or_none(payload.get("seconds_to_close"))
     raw_execution = payload.get("execution_decision")
@@ -298,6 +325,9 @@ def snapshot_row_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "yes_mid": yes_mid,
         "no_mid": no_mid,
         "spread": spread,
+        "yes_spread": yes_spread,
+        "no_spread": no_spread,
+        "min_spread": min_spread,
         "yes_bid_depth": _float_or_none(payload.get("yes_bid_depth")),
         "yes_ask_depth": _float_or_none(payload.get("yes_ask_depth")),
         "no_bid_depth": _float_or_none(payload.get("no_bid_depth")),

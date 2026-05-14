@@ -93,16 +93,17 @@ def test_insert_one_1s_snapshot(tmp_path) -> None:
     assert row["raw_state_json"]
 
 
-def test_duplicate_snapshot_for_same_market_and_second_is_ignored(tmp_path) -> None:
+def test_duplicate_snapshot_for_same_market_and_second_updates_existing_row(tmp_path) -> None:
     recorder = RealtimeSnapshotRecorder(tmp_path / "snapshots.sqlite3")
     payload = sample_stream_payload()
 
     assert recorder.record_snapshot(payload) is True
-    assert recorder.record_snapshot({**payload, "current_price": 100_200.0}) is False
+    assert recorder.record_snapshot({**payload, "current_price": 100_200.0}) is True
 
     stored = rows(recorder)
     assert len(stored) == 1
-    assert stored[0]["btc_price"] == pytest.approx(100_125.0)
+    assert stored[0]["btc_price"] == pytest.approx(100_200.0)
+    assert json.loads(stored[0]["raw_state_json"])["current_price"] == pytest.approx(100_200.0)
 
 
 def test_missing_volume_fields_do_not_crash_and_store_todo(tmp_path) -> None:
@@ -162,6 +163,9 @@ def test_snapshot_row_includes_manual_observation_fields() -> None:
     assert row["no_bid"] == pytest.approx(0.36)
     assert row["no_ask"] == pytest.approx(0.39)
     assert row["spread"] == pytest.approx(0.03)
+    assert row["yes_spread"] == pytest.approx(0.03)
+    assert row["no_spread"] == pytest.approx(0.03)
+    assert row["min_spread"] == pytest.approx(0.03)
     assert row["execution_action"] == "BUY_YES"
     assert row["execution_side"] == "YES"
     assert row["execution_confidence"] == pytest.approx(0.72)
@@ -183,6 +187,11 @@ def test_zero_values_are_preserved_in_fallback_fields() -> None:
         probability_edge_no=0.25,
         best_side="",
         best_ev_side="NO",
+        spread=None,
+        yes_bid=0.0,
+        yes_ask=0.0,
+        no_bid=0.02,
+        no_ask=0.05,
     )
 
     row = snapshot_row_from_payload(payload)
@@ -193,6 +202,26 @@ def test_zero_values_are_preserved_in_fallback_fields() -> None:
     assert row["edge_yes"] == pytest.approx(0.0)
     assert row["edge_no"] == pytest.approx(0.0)
     assert row["best_side"] is None
+    assert row["yes_spread"] == pytest.approx(0.0)
+    assert row["min_spread"] == pytest.approx(0.0)
+    assert row["spread"] == pytest.approx(0.0)
+
+
+def test_yes_no_and_min_spreads_are_computed_from_top_of_book() -> None:
+    row = snapshot_row_from_payload(
+        sample_stream_payload(
+            spread=None,
+            yes_bid=0.41,
+            yes_ask=0.45,
+            no_bid=0.52,
+            no_ask=0.58,
+        )
+    )
+
+    assert row["yes_spread"] == pytest.approx(0.04)
+    assert row["no_spread"] == pytest.approx(0.06)
+    assert row["min_spread"] == pytest.approx(0.04)
+    assert row["spread"] == pytest.approx(0.04)
 
 
 def test_cli_exposes_record_1s_command() -> None:
