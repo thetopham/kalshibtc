@@ -161,6 +161,12 @@ def test_realtime_state_compares_prediction_to_current_orderbook_and_close_clock
     assert payload["no_ask"] == pytest.approx(0.45)
     assert payload["edge_yes"] == pytest.approx(-0.01)
     assert payload["edge_no"] == pytest.approx(-0.09)
+    assert payload["ev_yes_per_contract"] == pytest.approx(-0.01)
+    assert payload["ev_no_per_contract"] == pytest.approx(-0.09)
+    assert payload["ev_yes_per_dollar"] == pytest.approx(0.64 / 0.65 - 1.0)
+    assert payload["ev_no_per_dollar"] == pytest.approx(0.36 / 0.45 - 1.0)
+    assert payload["best_ev_side"] == "YES"
+    assert payload["best_ev_per_dollar"] == pytest.approx(0.64 / 0.65 - 1.0)
     assert payload["best_side"] == "YES"
     assert payload["best_edge"] == pytest.approx(-0.01)
 
@@ -168,9 +174,11 @@ def test_realtime_state_compares_prediction_to_current_orderbook_and_close_clock
     assert "stream market_state" in formatted
     assert "closes_in=300s" in formatted
     assert "expires_in=" not in formatted
-    assert "edge_yes=-0.010" in formatted
-    assert "edge_no=-0.090" in formatted
-    assert "monitor=NO_EDGE edge_side=NONE" in formatted
+    assert "prob_edge_yes=-0.010" in formatted
+    assert "prob_edge_no=-0.090" in formatted
+    assert "ev_yes=-1.5%" in formatted
+    assert "ev_no=-20.0%" in formatted
+    assert "monitor=NO_EDGE ev_side=NONE" in formatted
 
 
 def test_realtime_state_uses_expiration_aware_probability_for_orderbook_edges() -> None:
@@ -252,11 +260,150 @@ def test_read_only_stream_format_uses_monitor_language_and_warns_on_direction_di
     assert "edge_direction_disagreement" in payload["warnings"]
 
     formatted = format_realtime_state(payload)
-    assert "monitor=EDGE_NO" in formatted
-    assert "paper_stake_ref=$25.00" in formatted
+    assert "monitor=EV_NO" in formatted
+    assert "ev_side=NO" in formatted
+    assert "prob_edge=" in formatted
+    assert "ev_per_$=" in formatted
+    assert "paper_action_ref" not in formatted
+    assert "paper_stake_ref" not in formatted
     assert "warnings=edge_direction_disagreement" in formatted
     assert "signal=BUY" not in formatted
     assert " stake=$" not in formatted
+
+
+def test_realtime_state_calculates_ev_dollars_and_watch_only_model_disagreement() -> None:
+    now = datetime(2026, 1, 4, 0, 9, tzinfo=UTC)
+    base_market = market()
+    test_market = KalshiMarket(
+        **{
+            **base_market.to_jsonable(),
+            "close_time": now + timedelta(seconds=60),
+            "expected_expiration_time": now + timedelta(minutes=6),
+            "raw": {},
+        }
+    )
+    book = KalshiOrderBook.from_snapshot(
+        test_market.ticker,
+        {
+            "yes_dollars_fp": [["0.2200", "2.00"]],
+            "no_dollars_fp": [["0.7700", "3.00"]],
+        },
+    )
+    btc = BtcTick(
+        source="coinbase_ws",
+        product="BTC-USD",
+        price=99_903.55,
+        bid=99_903.0,
+        ask=99_904.0,
+        ts=now,
+    )
+
+    payload = build_realtime_state(
+        prediction(
+            test_market,
+            probability_yes=0.69,
+            action="BUY_YES",
+            stake_dollars=25.0,
+            feature_snapshot={"vol_16": 0.00386},
+        ),
+        market=test_market,
+        orderbook=book,
+        btc=btc,
+        now=now,
+    )
+
+    assert payload["direction_state"] == "BELOW_TARGET"
+    assert payload["probability_yes"] == pytest.approx(0.166, abs=0.002)
+    assert payload["probability_no"] == pytest.approx(0.834, abs=0.002)
+    assert payload["yes_ask"] == pytest.approx(0.23)
+    assert payload["no_ask"] == pytest.approx(0.78)
+    assert payload["edge_no"] == pytest.approx(payload["probability_no"] - 0.78)
+    assert payload["ev_no_per_contract"] == pytest.approx(payload["edge_no"])
+    assert payload["ev_no_per_dollar"] == pytest.approx(payload["probability_no"] / 0.78 - 1.0)
+    assert payload["best_ev_side"] == "NO"
+    assert payload["best_ev_per_dollar"] == pytest.approx(payload["ev_no_per_dollar"])
+    assert payload["best_ev_reference_profit_dollars"] == pytest.approx(
+        25.0 * payload["ev_no_per_dollar"]
+    )
+    assert payload["monitor_action"] == "EV_NO"
+    assert payload["decision"] == "WATCH_ONLY_MODEL_DISAGREEMENT"
+    assert "model_state_probability_gap" in payload["warnings"]
+
+    formatted = format_realtime_state(payload)
+    assert "monitor=EV_NO" in formatted
+    assert "ev_side=NO" in formatted
+    assert "prob_edge=+0.054" in formatted
+    assert "ev_per_$=+6.9%" in formatted
+    assert "ev_$25=+$1.72" in formatted
+    assert "decision=WATCH_ONLY_MODEL_DISAGREEMENT" in formatted
+    assert "paper_action_ref" not in formatted
+    assert "paper_stake_ref" not in formatted
+
+
+def test_realtime_state_marks_positive_ev_below_buffer_as_watch_only_low_ev() -> None:
+    test_market = market()
+    book = KalshiOrderBook.from_snapshot(
+        test_market.ticker,
+        {
+            "yes_dollars_fp": [["0.2200", "2.00"]],
+            "no_dollars_fp": [["0.7700", "3.00"]],
+        },
+    )
+    btc = BtcTick(
+        source="coinbase_ws",
+        product="BTC-USD",
+        price=99_900.0,
+        bid=99_899.0,
+        ask=99_901.0,
+        ts=datetime(2026, 1, 4, 0, 5, tzinfo=UTC),
+    )
+
+    payload = build_realtime_state(
+        prediction(test_market, probability_yes=0.167),
+        market=test_market,
+        orderbook=book,
+        btc=btc,
+        now=datetime(2026, 1, 4, 0, 5, tzinfo=UTC),
+    )
+
+    assert payload["best_ev_side"] == "NO"
+    assert payload["best_ev_per_dollar"] == pytest.approx(0.833 / 0.78 - 1.0)
+    assert payload["monitor_action"] == "EV_NO"
+    assert payload["decision"] == "WATCH_ONLY_LOW_EV"
+
+
+def test_realtime_state_marks_buffered_ev_signal_as_read_only_watch() -> None:
+    test_market = market()
+    book = KalshiOrderBook.from_snapshot(
+        test_market.ticker,
+        {
+            "yes_dollars_fp": [["0.2200", "2.00"]],
+            "no_dollars_fp": [["0.7700", "3.00"]],
+        },
+    )
+    btc = BtcTick(
+        source="coinbase_ws",
+        product="BTC-USD",
+        price=99_900.0,
+        bid=99_899.0,
+        ask=99_901.0,
+        ts=datetime(2026, 1, 4, 0, 5, tzinfo=UTC),
+    )
+
+    payload = build_realtime_state(
+        prediction(test_market, probability_yes=0.14),
+        market=test_market,
+        orderbook=book,
+        btc=btc,
+        now=datetime(2026, 1, 4, 0, 5, tzinfo=UTC),
+    )
+
+    assert payload["best_ev_side"] == "NO"
+    assert payload["best_ev_per_dollar"] == pytest.approx(0.86 / 0.78 - 1.0)
+    assert payload["best_edge"] == pytest.approx(0.08)
+    assert payload["best_spread"] == pytest.approx(0.01)
+    assert payload["monitor_action"] == "EV_NO"
+    assert payload["decision"] == "WATCH_ONLY_EV_SIGNAL"
 
 
 def test_monitor_action_ignores_dust_edges() -> None:
@@ -290,7 +437,7 @@ def test_monitor_action_ignores_dust_edges() -> None:
     assert payload["monitor_action"] == "NO_EDGE"
 
     formatted = format_realtime_state(payload)
-    assert "monitor=NO_EDGE edge_side=NONE" in formatted
+    assert "monitor=NO_EDGE ev_side=NONE" in formatted
 
 
 def test_realtime_state_uses_contract_close_for_probability_clock_and_operator_label() -> None:
@@ -356,10 +503,12 @@ def test_invalid_crossed_orderbook_suppresses_monitor_edges() -> None:
     assert payload["orderbook_valid"] is False
     assert payload["edge_yes"] is None
     assert payload["edge_no"] is None
+    assert payload["ev_yes_per_dollar"] is None
+    assert payload["ev_no_per_dollar"] is None
     assert payload["monitor_action"] == "NO_EDGE"
     assert "invalid_crossed_orderbook" in payload["warnings"]
     formatted = format_realtime_state(payload)
-    assert "monitor=NO_EDGE edge_side=NONE" in formatted
+    assert "monitor=NO_EDGE ev_side=NONE" in formatted
     assert "warnings=invalid_crossed_orderbook" in formatted
 
 
@@ -397,7 +546,10 @@ def test_closed_contract_suppresses_monitor_edges_until_rollover() -> None:
     assert payload["market_closed"] is True
     assert payload["edge_yes"] is None
     assert payload["edge_no"] is None
+    assert payload["ev_yes_per_dollar"] is None
+    assert payload["ev_no_per_dollar"] is None
     assert payload["monitor_action"] == "NO_EDGE"
+    assert payload["decision"] == "WATCH_ONLY_MARKET_CLOSED"
     assert "market_closed_pending_rollover" in payload["warnings"]
 
 

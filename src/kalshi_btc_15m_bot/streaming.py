@@ -18,6 +18,16 @@ from .market_data import candles_to_frame
 from .models import KalshiMarket, Prediction, now_utc, parse_ts
 
 MIN_MONITOR_EDGE = 0.01
+MIN_EV_PER_DOLLAR = 0.08
+MIN_PROB_EDGE = 0.03
+MAX_SPREAD = 0.04
+EV_REFERENCE_RISK_DOLLARS = 25.0
+NO_TRADE_WARNING_DECISIONS = {
+    "invalid_crossed_orderbook": "WATCH_ONLY_INVALID_ORDERBOOK",
+    "market_closed_pending_rollover": "WATCH_ONLY_MARKET_CLOSED",
+    "model_state_probability_gap": "WATCH_ONLY_MODEL_DISAGREEMENT",
+    "market_probability_gap": "WATCH_ONLY_MARKET_DISAGREEMENT",
+}
 
 
 @dataclass(frozen=True)
@@ -160,7 +170,38 @@ def build_realtime_state(
     quotes_usable = orderbook_valid and not market_closed
     edge_yes = probability_yes - yes_ask if quotes_usable and 0.0 < yes_ask < 1.0 else None
     edge_no = probability_no - no_ask if quotes_usable and 0.0 < no_ask < 1.0 else None
-    best_side, best_edge = _best_side(edge_yes=edge_yes, edge_no=edge_no)
+    best_probability_edge_side, best_probability_edge = _best_side(edge_yes=edge_yes, edge_no=edge_no)
+    ev_yes_per_contract = _binary_ev_per_contract(
+        probability=probability_yes if quotes_usable else None,
+        ask=yes_ask if quotes_usable else None,
+    )
+    ev_no_per_contract = _binary_ev_per_contract(
+        probability=probability_no if quotes_usable else None,
+        ask=no_ask if quotes_usable else None,
+    )
+    ev_yes_per_dollar = _binary_ev_per_dollar(
+        probability=probability_yes if quotes_usable else None,
+        ask=yes_ask if quotes_usable else None,
+    )
+    ev_no_per_dollar = _binary_ev_per_dollar(
+        probability=probability_no if quotes_usable else None,
+        ask=no_ask if quotes_usable else None,
+    )
+    best_ev_side, best_ev_per_dollar = _best_side(
+        edge_yes=ev_yes_per_dollar,
+        edge_no=ev_no_per_dollar,
+    )
+    best_ev_per_contract = _side_value(
+        best_ev_side,
+        yes=ev_yes_per_contract,
+        no=ev_no_per_contract,
+    )
+    best_side = best_ev_side
+    best_edge = _side_value(best_ev_side, yes=edge_yes, no=edge_no)
+    best_spread = _side_spread(best_ev_side, market=quoted_market)
+    best_ev_reference_profit_dollars = (
+        best_ev_per_dollar * EV_REFERENCE_RISK_DOLLARS if best_ev_per_dollar is not None else None
+    )
     market_implied_yes = _market_implied_yes(quoted_market) if quotes_usable else None
     warnings: list[str] = []
     if not orderbook_valid:
@@ -176,6 +217,18 @@ def build_realtime_state(
             model_probability_yes=prediction.probability_yes,
             market_implied_yes=market_implied_yes,
         )
+    )
+    monitor_action = _monitor_action(
+        best_side=best_ev_side,
+        best_edge=best_edge,
+        best_ev_per_dollar=best_ev_per_dollar,
+    )
+    decision = _stream_decision(
+        best_ev_side=best_ev_side,
+        best_ev_per_dollar=best_ev_per_dollar,
+        best_edge=best_edge,
+        best_spread=best_spread,
+        warnings=warnings,
     )
     return {
         "event": "market_state",
@@ -224,9 +277,27 @@ def build_realtime_state(
         "orderbook_valid": orderbook_valid,
         "edge_yes": edge_yes,
         "edge_no": edge_no,
+        "probability_edge_yes": edge_yes,
+        "probability_edge_no": edge_no,
+        "best_probability_edge_side": best_probability_edge_side,
+        "best_probability_edge": best_probability_edge,
+        "ev_yes_per_contract": ev_yes_per_contract,
+        "ev_no_per_contract": ev_no_per_contract,
+        "ev_yes_per_dollar": ev_yes_per_dollar,
+        "ev_no_per_dollar": ev_no_per_dollar,
+        "best_ev_side": best_ev_side,
+        "best_ev_per_contract": best_ev_per_contract,
+        "best_ev_per_dollar": best_ev_per_dollar,
+        "best_spread": best_spread,
+        "ev_reference_risk_dollars": EV_REFERENCE_RISK_DOLLARS,
+        "best_ev_reference_profit_dollars": best_ev_reference_profit_dollars,
         "best_side": best_side,
         "best_edge": best_edge,
-        "monitor_action": _monitor_action(best_side=best_side, best_edge=best_edge),
+        "monitor_action": monitor_action,
+        "decision": decision,
+        "min_ev_per_dollar": MIN_EV_PER_DOLLAR,
+        "min_probability_edge": MIN_PROB_EDGE,
+        "max_spread": MAX_SPREAD,
         "warnings": warnings,
         "prediction_action": prediction.action,
         "prediction_side": prediction.side,
@@ -294,10 +365,77 @@ def _market_implied_yes(market: KalshiMarket) -> float | None:
     return None
 
 
-def _monitor_action(*, best_side: str | None, best_edge: float | None) -> str:
-    if best_side in {"YES", "NO"} and best_edge is not None and best_edge >= MIN_MONITOR_EDGE:
-        return f"EDGE_{best_side}"
+def _binary_ev_per_dollar(*, probability: float | None, ask: float | None) -> float | None:
+    if probability is None or ask is None:
+        return None
+    if not (0.0 < ask < 1.0):
+        return None
+    return probability / ask - 1.0
+
+
+def _binary_ev_per_contract(*, probability: float | None, ask: float | None) -> float | None:
+    if probability is None or ask is None:
+        return None
+    if not (0.0 < ask < 1.0):
+        return None
+    return probability - ask
+
+
+def _side_value(side: str | None, *, yes: float | None, no: float | None) -> float | None:
+    if side == "YES":
+        return yes
+    if side == "NO":
+        return no
+    return None
+
+
+def _side_spread(side: str | None, *, market: KalshiMarket) -> float | None:
+    if side == "YES" and 0.0 < market.yes_bid < market.yes_ask < 1.0:
+        return market.yes_ask - market.yes_bid
+    if side == "NO" and 0.0 < market.no_bid < market.no_ask < 1.0:
+        return market.no_ask - market.no_bid
+    return None
+
+
+def _monitor_action(
+    *,
+    best_side: str | None,
+    best_edge: float | None,
+    best_ev_per_dollar: float | None,
+) -> str:
+    if (
+        best_side in {"YES", "NO"}
+        and best_edge is not None
+        and best_edge >= MIN_MONITOR_EDGE
+        and best_ev_per_dollar is not None
+        and best_ev_per_dollar > 0.0
+    ):
+        return f"EV_{best_side}"
     return "NO_EDGE"
+
+
+def _stream_decision(
+    *,
+    best_ev_side: str | None,
+    best_ev_per_dollar: float | None,
+    best_edge: float | None,
+    best_spread: float | None,
+    warnings: list[str],
+) -> str:
+    for warning, decision in NO_TRADE_WARNING_DECISIONS.items():
+        if warning in warnings:
+            return decision
+    if best_ev_side not in {"YES", "NO"} or best_ev_per_dollar is None or best_edge is None:
+        return "WATCH_ONLY_NO_EV"
+    if best_ev_per_dollar <= 0.0 or best_edge <= 0.0:
+        return "WATCH_ONLY_NO_POSITIVE_EV"
+    if best_ev_per_dollar < MIN_EV_PER_DOLLAR:
+        return "WATCH_ONLY_LOW_EV"
+    if best_edge < MIN_PROB_EDGE:
+        return "WATCH_ONLY_LOW_PROB_EDGE"
+    if best_spread is None or best_spread > MAX_SPREAD:
+        return "WATCH_ONLY_WIDE_SPREAD"
+    return "WATCH_ONLY_EV_SIGNAL"
 
 
 def _state_warnings(
@@ -331,7 +469,10 @@ def _clamp_probability(value: float) -> float:
 def format_realtime_state(payload: Mapping[str, Any]) -> str:
     close_seconds = _seconds_label(payload.get("seconds_to_close"))
     monitor_action = str(payload.get("monitor_action") or "NO_EDGE")
-    monitor_side = payload.get("best_side") if monitor_action != "NO_EDGE" else "NONE"
+    monitor_side = payload.get("best_ev_side") if monitor_action != "NO_EDGE" else "NONE"
+    risk_dollars = float(payload.get("ev_reference_risk_dollars") or EV_REFERENCE_RISK_DOLLARS)
+    risk_label = f"ev_${risk_dollars:.0f}"
+    best_ev_side = payload.get("best_ev_side") or "NONE"
     lines = [
         "BTC 15m Kalshi stream market_state",
         (
@@ -356,15 +497,22 @@ def format_realtime_state(payload: Mapping[str, Any]) -> str:
             f"{float(payload.get('yes_ask') or 0.0):.3f} "
             f"no={float(payload.get('no_bid') or 0.0):.3f}/"
             f"{float(payload.get('no_ask') or 0.0):.3f} "
-            f"edge_yes={_fmt_edge(payload.get('edge_yes'))} "
-            f"edge_no={_fmt_edge(payload.get('edge_no'))}"
+            f"prob_edge_yes={_fmt_edge(payload.get('edge_yes'))} "
+            f"prob_edge_no={_fmt_edge(payload.get('edge_no'))}"
+        ),
+        (
+            f"ev_yes={_fmt_ev_pct(payload.get('ev_yes_per_dollar'))} "
+            f"ev_no={_fmt_ev_pct(payload.get('ev_no_per_dollar'))} "
+            f"best_ev={best_ev_side} {_fmt_ev_pct(payload.get('best_ev_per_dollar'))}"
         ),
         (
             f"monitor={monitor_action} "
-            f"edge_side={monitor_side} "
-            f"edge={_fmt_edge(payload.get('best_edge'))} "
-            f"paper_action_ref={payload.get('prediction_action')} "
-            f"paper_stake_ref=${float(payload.get('stake_dollars') or 0.0):.2f}"
+            f"ev_side={monitor_side} "
+            f"prob_edge={_fmt_edge(payload.get('best_edge'))} "
+            f"ev_per_$={_fmt_ev_pct(payload.get('best_ev_per_dollar'))} "
+            f"spread={_fmt_edge(payload.get('best_spread'))} "
+            f"{risk_label}={_fmt_signed_money(payload.get('best_ev_reference_profit_dollars'))} "
+            f"decision={payload.get('decision', 'WATCH_ONLY_UNKNOWN')}"
         ),
     ]
     warnings = payload.get("warnings")
@@ -801,6 +949,22 @@ def _fmt_pct(value: Any) -> str:
         return f"{float(value) * 100:+.3f}%"
     except (TypeError, ValueError):
         return "n/a"
+
+
+def _fmt_ev_pct(value: Any) -> str:
+    try:
+        return f"{float(value) * 100:+.1f}%"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def _fmt_signed_money(value: Any) -> str:
+    try:
+        dollars = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    sign = "+" if dollars >= 0 else "-"
+    return f"{sign}${abs(dollars):.2f}"
 
 
 def _fmt_probability(value: Any) -> str:
