@@ -24,7 +24,9 @@ MIN_EV_PER_DOLLAR = 0.08
 MIN_PROB_EDGE = 0.03
 MAX_SPREAD = 0.04
 EV_REFERENCE_RISK_DOLLARS = 25.0
-ROLLOVER_REFRESH_LEAD_SECONDS = 5.0
+ROLLOVER_REFRESH_LEAD_SECONDS = 30.0
+ROLLOVER_RETRY_BEFORE_CLOSE_SECONDS = 2.0
+ROLLOVER_RETRY_AFTER_CLOSE_SECONDS = 1.0
 INITIAL_MARKET_REFRESH_BACKOFF_SECONDS = 2.0
 MAX_MARKET_REFRESH_BACKOFF_SECONDS = 30.0
 NO_TRADE_WARNING_DECISIONS = {
@@ -151,6 +153,10 @@ def build_realtime_state(
     btc: BtcTick,
     now: datetime | None = None,
     last_refresh_error: str | None = None,
+    rollover_attempted: bool = False,
+    rollover_status: str | None = None,
+    rollover_old_ticker: str | None = None,
+    rollover_retry_in_seconds: float | None = None,
 ) -> dict[str, Any]:
     now = now or now_utc()
     quoted_market = orderbook.to_market(market)
@@ -162,6 +168,7 @@ def build_realtime_state(
     )
     seconds_to_close = market.seconds_to_close(now)
     market_closed = seconds_to_close is not None and seconds_to_close <= 0
+    stale_closed_seconds = abs(seconds_to_close) if market_closed and seconds_to_close is not None else None
     rollover_window = (
         seconds_to_close is not None and seconds_to_close <= ROLLOVER_REFRESH_LEAD_SECONDS
     )
@@ -270,6 +277,11 @@ def build_realtime_state(
         "market_closed": market_closed,
         "market_rollover_unsafe": rollover_unsafe,
         "rollover_refresh_lead_seconds": ROLLOVER_REFRESH_LEAD_SECONDS,
+        "rollover_attempted": bool(rollover_attempted),
+        "rollover_status": rollover_status,
+        "rollover_old_ticker": rollover_old_ticker or market.ticker,
+        "rollover_retry_in_seconds": rollover_retry_in_seconds,
+        "stale_closed_seconds": stale_closed_seconds,
         "distance_to_target": distance_to_target,
         "distance_to_target_pct": distance_to_target_pct,
         "direction_state": direction_state,
@@ -552,6 +564,13 @@ def format_realtime_state(payload: Mapping[str, Any]) -> str:
     warnings = payload.get("warnings")
     if isinstance(warnings, list) and warnings:
         lines.append(f"warnings={','.join(str(warning) for warning in warnings)}")
+    if payload.get("rollover_attempted") and payload.get("rollover_status") == "same_market_returned":
+        stale_seconds = payload.get("stale_closed_seconds")
+        stale_part = f" stale_for={_seconds_label(stale_seconds)}" if stale_seconds is not None else ""
+        lines.append(
+            f"rollover=waiting old={payload.get('rollover_old_ticker') or payload.get('market_ticker')}"
+            f"{stale_part} retry_in={_seconds_label(payload.get('rollover_retry_in_seconds'))}"
+        )
     if payload.get("last_refresh_error"):
         lines.append(f"last_refresh_error={_fmt_error(payload.get('last_refresh_error'))}")
     if payload.get("stream_paper", {}).get("enabled"):
@@ -665,6 +684,11 @@ class RealtimeStateStreamer:
         self._emitted = 0
         self._next_market_refresh_monotonic = 0.0
         self._market_refresh_backoff_seconds = INITIAL_MARKET_REFRESH_BACKOFF_SECONDS
+        self._next_rollover_refresh_monotonic = 0.0
+        self._rollover_refresh_backoff_seconds = ROLLOVER_RETRY_BEFORE_CLOSE_SECONDS
+        self._rollover_attempted = False
+        self._rollover_status: str | None = None
+        self._rollover_old_ticker: str | None = None
         self._last_refresh_error: str | None = None
 
     def bootstrap(self) -> None:
@@ -686,19 +710,32 @@ class RealtimeStateStreamer:
         )
         self.emit_state(force=True)
 
-    def refresh_market(self, *, force: bool = False) -> bool:
+    def refresh_market(
+        self,
+        *,
+        force: bool = False,
+        rollover: bool = False,
+        seconds_to_close: float | None = None,
+    ) -> bool:
         """Refresh the active Kalshi contract and REST order book.
 
         Returns True when the streamer moved to a different market ticker, or
         when a forced initial refresh populated the market for the first time.
         Refresh failures are process-fail-open but signal-fail-closed: keep the
         previous market/book so the websocket loop stays alive, record the
-        error for operator output, suppress edge output, and schedule
-        exponential backoff.
+        error for operator output, suppress edge output, and schedule bounded
+        backoff. Rollover refreshes use their own near-close cadence so stale
+        market discovery is not delayed by the normal REST refresh backoff.
         """
         now_monotonic = time.monotonic()
-        if not force and now_monotonic < self._next_market_refresh_monotonic:
-            return False
+        if not force:
+            next_refresh = (
+                self._next_rollover_refresh_monotonic
+                if rollover
+                else self._next_market_refresh_monotonic
+            )
+            if now_monotonic < next_refresh:
+                return False
 
         previous_ticker = self.market.ticker if self.market is not None else None
         try:
@@ -707,19 +744,35 @@ class RealtimeStateStreamer:
                 status=self.bot.config.kalshi.market_status,
             )
         except Exception as exc:
-            self._schedule_market_refresh_backoff(now_monotonic, exc)
+            if rollover:
+                self._schedule_rollover_refresh_backoff(now_monotonic, exc, seconds_to_close)
+            else:
+                self._schedule_market_refresh_backoff(now_monotonic, exc)
             return False
 
         if not force and previous_ticker == market.ticker:
-            self._last_refresh_error = None
-            self._market_refresh_backoff_seconds = INITIAL_MARKET_REFRESH_BACKOFF_SECONDS
-            self._next_market_refresh_monotonic = now_monotonic + INITIAL_MARKET_REFRESH_BACKOFF_SECONDS
+            if rollover:
+                self._mark_rollover_same_market(
+                    now_monotonic=now_monotonic,
+                    previous_ticker=previous_ticker,
+                    seconds_to_close=seconds_to_close,
+                )
+            else:
+                self._reset_rollover_state()
+                self._last_refresh_error = None
+                self._market_refresh_backoff_seconds = INITIAL_MARKET_REFRESH_BACKOFF_SECONDS
+                self._next_market_refresh_monotonic = (
+                    now_monotonic + INITIAL_MARKET_REFRESH_BACKOFF_SECONDS
+                )
             return False
 
         try:
             orderbook = _rest_orderbook(self.bot.kalshi, market.ticker)
         except Exception as exc:
-            self._schedule_market_refresh_backoff(now_monotonic, exc)
+            if rollover:
+                self._schedule_rollover_refresh_backoff(now_monotonic, exc, seconds_to_close)
+            else:
+                self._schedule_market_refresh_backoff(now_monotonic, exc)
             return False
 
         self.market = market
@@ -728,6 +781,7 @@ class RealtimeStateStreamer:
         self._next_market_refresh_monotonic = 0.0
         self._market_refresh_backoff_seconds = INITIAL_MARKET_REFRESH_BACKOFF_SECONDS
         self._last_refresh_error = None
+        self._reset_rollover_state()
         return force or previous_ticker != market.ticker
 
     def _schedule_market_refresh_backoff(self, now_monotonic: float, exc: Exception) -> None:
@@ -738,14 +792,67 @@ class RealtimeStateStreamer:
             MAX_MARKET_REFRESH_BACKOFF_SECONDS,
         )
 
+    def _schedule_rollover_refresh_backoff(
+        self,
+        now_monotonic: float,
+        exc: Exception,
+        seconds_to_close: float | None,
+    ) -> None:
+        was_refresh_failed = self._rollover_status == "refresh_failed"
+        self._rollover_attempted = True
+        self._rollover_status = "refresh_failed"
+        self._rollover_old_ticker = self.market.ticker if self.market is not None else None
+        self._last_refresh_error = _fmt_error(exc)
+        cadence = _rollover_refresh_cadence(seconds_to_close)
+        if _is_rate_limit_error(exc):
+            delay = self._rollover_refresh_backoff_seconds if was_refresh_failed else cadence
+            if delay < cadence:
+                delay = cadence
+            self._rollover_refresh_backoff_seconds = min(
+                max(delay * 2.0, cadence),
+                MAX_MARKET_REFRESH_BACKOFF_SECONDS,
+            )
+        else:
+            delay = cadence
+            self._rollover_refresh_backoff_seconds = cadence
+        self._next_rollover_refresh_monotonic = now_monotonic + delay
+
+    def _mark_rollover_same_market(
+        self,
+        *,
+        now_monotonic: float,
+        previous_ticker: str | None,
+        seconds_to_close: float | None,
+    ) -> None:
+        self._rollover_attempted = True
+        self._rollover_status = "same_market_returned"
+        self._rollover_old_ticker = previous_ticker
+        self._last_refresh_error = None
+        cadence = _rollover_refresh_cadence(seconds_to_close)
+        self._rollover_refresh_backoff_seconds = cadence
+        self._next_rollover_refresh_monotonic = now_monotonic + cadence
+
+    def _reset_rollover_state(self) -> None:
+        self._next_rollover_refresh_monotonic = 0.0
+        self._rollover_refresh_backoff_seconds = ROLLOVER_RETRY_BEFORE_CLOSE_SECONDS
+        self._rollover_attempted = False
+        self._rollover_status = None
+        self._rollover_old_ticker = None
+
+    def _rollover_retry_in_seconds(self) -> float | None:
+        if not self._rollover_attempted:
+            return None
+        return max(0.0, self._next_rollover_refresh_monotonic - time.monotonic())
+
     def refresh_market_if_closed(self, *, now: datetime | None = None) -> bool:
         """Roll to the next Kalshi contract shortly before the current contract closes."""
         if self.market is None:
             return self.refresh_market()
         seconds_to_close = self.market.seconds_to_close(now or self.clock())
         if seconds_to_close is None or seconds_to_close > ROLLOVER_REFRESH_LEAD_SECONDS:
+            self._reset_rollover_state()
             return False
-        return self.refresh_market()
+        return self.refresh_market(rollover=True, seconds_to_close=seconds_to_close)
 
     def apply_btc_tick(self, tick: BtcTick) -> None:
         self.btc = tick
@@ -793,6 +900,10 @@ class RealtimeStateStreamer:
             btc=self.btc,
             now=now,
             last_refresh_error=self._last_refresh_error,
+            rollover_attempted=self._rollover_attempted,
+            rollover_status=self._rollover_status,
+            rollover_old_ticker=self._rollover_old_ticker,
+            rollover_retry_in_seconds=self._rollover_retry_in_seconds(),
         )
         if self.paper_trading:
             self._apply_stream_paper(prediction, quoted_market=quoted_market, payload=payload, now=now)
@@ -824,6 +935,9 @@ class RealtimeStateStreamer:
 
         decision = str(payload.get("decision") or "WATCH_ONLY_UNKNOWN")
         if payload.get("orderbook_valid") is not True:
+            payload["paper_trade_skip_reason"] = f"stream_decision: {decision}"
+            return
+        if payload.get("market_rollover_unsafe") is True:
             payload["paper_trade_skip_reason"] = f"stream_decision: {decision}"
             return
 
@@ -1186,6 +1300,20 @@ def _is_kalshi_auth_error(exc: Exception) -> bool:
         return True
     text = str(exc).lower()
     return "401" in text or "unauthorized" in text
+
+
+def _rollover_refresh_cadence(seconds_to_close: float | None) -> float:
+    if seconds_to_close is not None and seconds_to_close <= 0:
+        return ROLLOVER_RETRY_AFTER_CLOSE_SECONDS
+    return ROLLOVER_RETRY_BEFORE_CLOSE_SECONDS
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    status_code = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    if status_code == 429:
+        return True
+    text = str(exc).lower()
+    return "429" in text or "rate limit" in text or "too many requests" in text
 
 
 def _fmt_error(value: Any) -> str:

@@ -852,7 +852,7 @@ def test_streamer_refreshes_market_after_contract_close() -> None:
     assert fake_kalshi.market_refreshes == 1
 
 
-def test_streamer_starts_rollover_refresh_inside_five_second_window() -> None:
+def test_streamer_starts_rollover_refresh_inside_thirty_second_window() -> None:
     old_market = market()
     new_market = replace(
         old_market,
@@ -901,7 +901,7 @@ def test_streamer_starts_rollover_refresh_inside_five_second_window() -> None:
         {"yes_dollars_fp": [["0.5000", "1.00"]], "no_dollars_fp": [["0.4000", "1.00"]]},
     )
 
-    refreshed = streamer.refresh_market_if_closed(now=datetime(2026, 1, 4, 0, 9, 56, tzinfo=UTC))
+    refreshed = streamer.refresh_market_if_closed(now=datetime(2026, 1, 4, 0, 9, 31, tzinfo=UTC))
 
     assert refreshed is True
     assert streamer.market == new_market
@@ -951,23 +951,23 @@ def test_streamer_refresh_rate_limit_error_keeps_stale_market_and_backs_off(monk
     assert streamer.market == old_market
     assert streamer.orderbook is old_book
     assert streamer._last_refresh_error == "429 Client Error: Too Many Requests"
-    assert streamer._next_market_refresh_monotonic == pytest.approx(102.0)
-    assert streamer._market_refresh_backoff_seconds == pytest.approx(4.0)
+    assert streamer._next_rollover_refresh_monotonic == pytest.approx(101.0)
+    assert streamer._rollover_refresh_backoff_seconds == pytest.approx(2.0)
     assert fake_kalshi.market_refreshes == 1
 
-    monotonic_now = 101.0
+    monotonic_now = 100.5
     refreshed = streamer.refresh_market_if_closed(now=datetime(2026, 1, 4, 0, 10, 2, tzinfo=UTC))
 
     assert refreshed is False
     assert fake_kalshi.market_refreshes == 1
 
-    monotonic_now = 103.0
+    monotonic_now = 101.0
     refreshed = streamer.refresh_market_if_closed(now=datetime(2026, 1, 4, 0, 10, 3, tzinfo=UTC))
 
     assert refreshed is False
     assert fake_kalshi.market_refreshes == 2
-    assert streamer._next_market_refresh_monotonic == pytest.approx(107.0)
-    assert streamer._market_refresh_backoff_seconds == pytest.approx(8.0)
+    assert streamer._next_rollover_refresh_monotonic == pytest.approx(103.0)
+    assert streamer._rollover_refresh_backoff_seconds == pytest.approx(4.0)
 
 
 def test_streamer_orderbook_refresh_error_keeps_previous_market_and_backs_off(
@@ -1015,8 +1015,160 @@ def test_streamer_orderbook_refresh_error_keeps_previous_market_and_backs_off(
     assert streamer.market == old_market
     assert streamer.orderbook is old_book
     assert streamer._last_refresh_error == "429 Client Error: orderbook rate limited"
-    assert streamer._next_market_refresh_monotonic == pytest.approx(202.0)
-    assert streamer._market_refresh_backoff_seconds == pytest.approx(4.0)
+    assert streamer._next_rollover_refresh_monotonic == pytest.approx(201.0)
+    assert streamer._rollover_refresh_backoff_seconds == pytest.approx(2.0)
+
+
+def test_stream_paper_waits_during_delayed_closed_rollover_and_switches_later(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    close_time = datetime(2026, 1, 4, 0, 10, tzinfo=UTC)
+    old_market = replace(
+        market(),
+        status="active",
+        yes_bid=0.50,
+        yes_ask=0.60,
+        no_bid=0.40,
+        no_ask=0.50,
+        liquidity=200.0,
+        close_time=close_time,
+        expected_expiration_time=close_time + timedelta(minutes=5),
+        raw={},
+    )
+    new_market = replace(
+        old_market,
+        ticker="KXBTC15M-TEST-60",
+        event_ticker="KXBTC15M-TEST-NEXT",
+        target_price=100_250.0,
+        open_time=close_time,
+        close_time=close_time + timedelta(minutes=15),
+        expected_expiration_time=close_time + timedelta(minutes=20),
+        raw={},
+    )
+    clock_state = {
+        "now": close_time + timedelta(seconds=1),
+        "monotonic": 100.0,
+    }
+    monkeypatch.setattr(
+        "kalshi_btc_15m_bot.streaming.time.monotonic",
+        lambda: clock_state["monotonic"],
+    )
+
+    class DelayedRolloverKalshi:
+        def __init__(self) -> None:
+            self.market_refreshes = 0
+            self.orderbook_tickers: list[str] = []
+
+        def current_btc15m_market(self, series_ticker: str, status: str) -> KalshiMarket:
+            self.market_refreshes += 1
+            assert series_ticker == "KXBTC15M"
+            assert status == "open"
+            if self.market_refreshes < 3:
+                return old_market
+            return new_market
+
+        def get_orderbook(self, ticker: str, *, depth: int | None = None) -> dict:
+            self.orderbook_tickers.append(ticker)
+            assert ticker == new_market.ticker
+            assert depth == 100
+            return {
+                "orderbook_fp": {
+                    "yes_dollars_fp": [["0.5000", "1.00"]],
+                    "no_dollars_fp": [["0.4900", "1.00"]],
+                }
+            }
+
+    class FlatPredictor:
+        def predict(self, frame, *, market: KalshiMarket, current_price: float, now: datetime) -> Prediction:
+            return prediction(market, probability_yes=0.50, feature_snapshot={})
+
+    config = replace(BotConfig(), data_dir=tmp_path)
+    ledger = PaperLedger(config.ledger_path, config.paper)
+    open_prediction = prediction(
+        old_market,
+        action="BUY_YES",
+        stake_dollars=config.paper.max_position_dollars,
+    )
+    ledger.record_prediction(open_prediction)
+    trade_id = ledger.maybe_open_paper_trade(open_prediction)
+    assert trade_id is not None
+
+    fake_kalshi = DelayedRolloverKalshi()
+    fake_bot = SimpleNamespace(
+        kalshi=fake_kalshi,
+        config=config,
+        predictor=FlatPredictor(),
+        ledger=ledger,
+    )
+    emitted: list[str] = []
+    streamer = RealtimeStateStreamer(
+        fake_bot,
+        json_output=True,
+        emit=emitted.append,
+        emit_min_interval_seconds=0,
+        clock=lambda: clock_state["now"],
+        paper_trading=True,
+    )
+    streamer.market = old_market
+    streamer.orderbook = KalshiOrderBook.from_snapshot(
+        old_market.ticker,
+        {"yes_dollars_fp": [["0.5000", "1.00"]], "no_dollars_fp": [["0.4000", "1.00"]]},
+    )
+    streamer.btc = BtcTick(
+        source="coinbase_ws",
+        product="BTC-USD",
+        price=100_100.0,
+        bid=100_099.0,
+        ask=100_101.0,
+        ts=clock_state["now"],
+    )
+    streamer.frame = object()
+
+    streamer.emit_state(force=True)
+    first_payload = json.loads(emitted[-1])
+
+    assert fake_kalshi.market_refreshes == 1
+    assert first_payload["market_ticker"] == old_market.ticker
+    assert first_payload["rollover_attempted"] is True
+    assert first_payload["rollover_status"] == "same_market_returned"
+    assert first_payload["stale_closed_seconds"] == pytest.approx(1.0)
+    assert first_payload["rollover_retry_in_seconds"] == pytest.approx(1.0)
+    assert first_payload["decision"] == "NO_TRADE_ROLLOVER_UNSAFE"
+    assert first_payload["monitor_action"] == "NO_EDGE"
+    assert first_payload["best_ev_side"] is None
+    assert first_payload["paper_trade_id"] is None
+    assert first_payload["stream_paper"]["managed_positions"] == []
+    assert ledger.latest_trades(limit=1)[0]["status"] == "OPEN"
+    formatted = format_realtime_state(first_payload)
+    assert f"rollover=waiting old={old_market.ticker} stale_for=1s retry_in=1s" in formatted
+
+    clock_state["now"] = close_time + timedelta(seconds=2)
+    clock_state["monotonic"] = 101.0
+    streamer.emit_state(force=True)
+    second_payload = json.loads(emitted[-1])
+
+    assert fake_kalshi.market_refreshes == 2
+    assert second_payload["market_ticker"] == old_market.ticker
+    assert second_payload["rollover_status"] == "same_market_returned"
+    assert second_payload["stale_closed_seconds"] == pytest.approx(2.0)
+    assert ledger.latest_trades(limit=1)[0]["status"] == "OPEN"
+
+    clock_state["now"] = close_time + timedelta(seconds=3)
+    clock_state["monotonic"] = 102.0
+    streamer.emit_state(force=True)
+    third_payload = json.loads(emitted[-1])
+
+    assert fake_kalshi.market_refreshes == 3
+    assert fake_kalshi.orderbook_tickers == [new_market.ticker]
+    assert streamer.market == new_market
+    assert streamer.orderbook is not None
+    assert streamer.orderbook.market_ticker == new_market.ticker
+    assert third_payload["market_ticker"] == new_market.ticker
+    assert third_payload["rollover_attempted"] is False
+    assert third_payload["rollover_status"] is None
+    assert third_payload["last_refresh_error"] is None
+    assert ledger.latest_trades(limit=1)[0]["status"] == "OPEN"
 
 
 def test_realtime_state_exposes_rollover_refresh_error_and_suppresses_edges() -> None:
