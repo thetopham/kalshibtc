@@ -45,6 +45,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Stop after N emitted state payloads; useful for smoke tests",
     )
+    record_1s = sub.add_parser(
+        "record-1s",
+        help="Read-only websocket recorder; writes one normalized stream snapshot per market/second",
+    )
+    record_1s.add_argument(
+        "--emit-min-interval-seconds",
+        type=float,
+        default=1.0,
+        help="Minimum seconds between recorded state snapshots (default: 1.0)",
+    )
+    record_1s.add_argument(
+        "--max-events",
+        type=int,
+        default=None,
+        help="Stop after N recorded/emitted state payloads; useful for smoke tests",
+    )
     stream_paper = sub.add_parser(
         "stream-paper",
         help="Websocket paper trader; refreshes BTC/orderbook continuously and writes only local paper trades",
@@ -230,6 +246,18 @@ def main(argv: list[str] | None = None) -> int:
 
             return asyncio.run(
                 run_realtime_state_stream(
+                    bot,
+                    json_output=args.json,
+                    max_events=args.max_events,
+                    emit_min_interval_seconds=args.emit_min_interval_seconds,
+                )
+            )
+
+        if args.command == "record-1s":
+            from .streaming import run_realtime_record_1s_stream
+
+            return asyncio.run(
+                run_realtime_record_1s_stream(
                     bot,
                     json_output=args.json,
                     max_events=args.max_events,

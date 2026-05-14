@@ -115,6 +115,10 @@ class BotConfig:
         return self.data_dir / "paper-ledger.sqlite3"
 
     @property
+    def realtime_snapshots_path(self) -> Path:
+        return self.data_dir / "realtime-snapshots-1s.sqlite3"
+
+    @property
     def is_live_mode(self) -> bool:
         return self.trading_mode == "live" and self.enable_live_orders
 

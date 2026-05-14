@@ -172,6 +172,30 @@ class KalshiOrderBook:
             price * count for price, count in self.no_levels.items()
         )
 
+    @property
+    def best_yes_bid_depth(self) -> float | None:
+        return self.yes_levels.get(self.best_yes_bid) if self.best_yes_bid is not None else None
+
+    @property
+    def best_no_bid_depth(self) -> float | None:
+        return self.no_levels.get(self.best_no_bid) if self.best_no_bid is not None else None
+
+    @property
+    def yes_ask_depth(self) -> float | None:
+        return self.best_no_bid_depth
+
+    @property
+    def no_ask_depth(self) -> float | None:
+        return self.best_yes_bid_depth
+
+    def top_levels(self, *, depth: int = 5) -> dict[str, list[list[float]]]:
+        yes = sorted(self.yes_levels.items(), key=lambda item: item[0], reverse=True)[:depth]
+        no = sorted(self.no_levels.items(), key=lambda item: item[0], reverse=True)[:depth]
+        return {
+            "yes_bids": [[price, count] for price, count in yes],
+            "no_bids": [[price, count] for price, count in no],
+        }
+
     def to_market(self, market: KalshiMarket) -> KalshiMarket:
         yes_bid = self.best_yes_bid if self.best_yes_bid is not None else market.yes_bid
         no_bid = self.best_no_bid if self.best_no_bid is not None else market.no_bid
@@ -355,10 +379,13 @@ def build_realtime_state(
         "market_ticker": market.ticker,
         "event_ticker": market.event_ticker,
         "target_price": market.target_price,
-        "market_close_time": market.close_time.isoformat() if market.close_time else None,
-        "market_expiration_time": expected_expiration.isoformat() if expected_expiration else None,
-        "market_expected_expiration_time": expected_expiration.isoformat() if expected_expiration else None,
+        "market_open_time": _datetime_iso(market.open_time),
+        "market_close_time": _datetime_iso(market.close_time),
+        "market_expiration_time": _datetime_iso(expected_expiration),
+        "market_expected_expiration_time": _datetime_iso(expected_expiration),
         "seconds_to_close": seconds_to_close,
+        "minutes_to_close": seconds_to_close / 60.0 if seconds_to_close is not None else None,
+        "time_bucket": _stream_time_bucket(seconds_to_close),
         "seconds_to_expiration": seconds_to_expected_expiration,
         "seconds_to_expected_expiration": seconds_to_expected_expiration,
         "seconds_to_probability_cutoff": seconds_to_close,
@@ -372,9 +399,22 @@ def build_realtime_state(
         "rollover_retry_in_seconds": rollover_retry_in_seconds,
         "stale_closed_seconds": stale_closed_seconds,
         "distance_to_target": distance_to_target,
+        "distance_from_strike": distance_to_target,
+        "abs_distance_from_strike": abs(distance_to_target) if distance_to_target is not None else None,
+        "is_above_strike": distance_to_target > 0 if distance_to_target is not None else None,
         "distance_to_target_pct": distance_to_target_pct,
+        "distance_pct": distance_to_target_pct,
         "direction_state": direction_state,
+        "btc_velocity_10s": velocity_features.get("btc_velocity_10s"),
         "btc_velocity_30s": velocity_features.get("btc_velocity_30s"),
+        "btc_velocity_60s": velocity_features.get("btc_velocity_60s"),
+        "slope_10s": velocity_features.get("slope_10s"),
+        "slope_30s": velocity_features.get("slope_30s"),
+        "slope_60s": velocity_features.get("slope_60s"),
+        "distance_velocity_30s": velocity_features.get("distance_velocity_30s"),
+        "distance_expanding": velocity_features.get("distance_expanding"),
+        "strike_crossed_recently": velocity_features.get("strike_crossed_recently"),
+        "seconds_since_last_strike_cross": velocity_features.get("seconds_since_last_strike_cross"),
         "regime": regime,
         "probability_yes": probability_yes,
         "probability_no": probability_no,
@@ -394,8 +434,26 @@ def build_realtime_state(
         "yes_ask": quoted_market.yes_ask,
         "no_bid": quoted_market.no_bid,
         "no_ask": quoted_market.no_ask,
+        "yes_mid": quoted_market.yes_mid,
+        "no_mid": quoted_market.no_mid,
+        "spread": _side_spread("YES", market=quoted_market),
+        "yes_bid_depth": orderbook.best_yes_bid_depth,
+        "yes_ask_depth": orderbook.yes_ask_depth,
+        "no_bid_depth": orderbook.best_no_bid_depth,
+        "no_ask_depth": orderbook.no_ask_depth,
+        "top_book": orderbook.top_levels(depth=5),
+        "orderbook_sequence": orderbook.last_seq,
         "orderbook_liquidity": orderbook.visible_liquidity,
         "liquidity": quoted_market.liquidity,
+        "cumulative_volume": quoted_market.volume,
+        "volume": quoted_market.volume,
+        "volume_delta_1s": None,
+        "volume_delta_10s": None,
+        "volume_delta_60s": None,
+        "recent_trade_count": None,
+        "last_trade_price": None,
+        "last_trade_side": None,
+        "volume_todo": "Kalshi trade feed unavailable in current orderbook_delta stream; add trade subscription once observed.",
         "orderbook_valid": orderbook_valid,
         "orderbook_updated_at": orderbook.updated_at.isoformat() if orderbook.updated_at else None,
         "orderbook_age_seconds": orderbook_age_seconds,
@@ -451,6 +509,32 @@ def _target_distance(*, current_price: float, target_price: float | None) -> tup
     return distance, distance_pct, direction
 
 
+def _datetime_iso(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, str):
+        try:
+            parsed = parse_ts(value)
+        except (TypeError, ValueError):
+            parsed = None
+        return parsed.isoformat() if parsed is not None else value
+    return str(value)
+
+
+def _stream_time_bucket(seconds_to_close: float | None) -> str:
+    if seconds_to_close is None:
+        return "unknown"
+    if seconds_to_close <= 30:
+        return "final_seconds"
+    if seconds_to_close <= 180:
+        return "late"
+    if seconds_to_close <= 600:
+        return "middle"
+    return "early"
+
+
 def _datetime_age_seconds(*, now: datetime, ts: datetime | None) -> float | None:
     if ts is None:
         return None
@@ -464,11 +548,42 @@ def _btc_velocity_features(
     history: Sequence[BtcTick],
     now: datetime,
 ) -> dict[str, Any]:
+    del now  # Features are keyed to the BTC tick timestamps, not wall-clock arrival.
     points = sorted(
-        [tick for tick in history if tick.ts <= current.ts and tick.price > 0],
+        [tick for tick in [*history, current] if tick.ts <= current.ts and tick.price > 0],
         key=lambda tick: tick.ts,
     )
-    return {"btc_velocity_30s": _price_velocity(points, current=current, window_seconds=30.0)}
+    velocity_10s = _price_velocity(points, current=current, window_seconds=10.0)
+    velocity_30s = _price_velocity(points, current=current, window_seconds=30.0)
+    velocity_60s = _price_velocity(points, current=current, window_seconds=60.0)
+    prior_30s = _prior_tick_for_window(points, current=current, window_seconds=30.0)
+    distance_velocity_30s = velocity_30s if target_price is not None else None
+    distance_expanding = None
+    seconds_since_cross = None
+    strike_crossed_recently = None
+    if target_price is not None and math.isfinite(target_price):
+        if prior_30s is not None:
+            current_distance = current.price - target_price
+            prior_distance = prior_30s.price - target_price
+            distance_expanding = abs(current_distance) >= abs(prior_distance)
+        seconds_since_cross = _seconds_since_last_strike_cross(
+            points,
+            current=current,
+            target_price=target_price,
+        )
+        strike_crossed_recently = seconds_since_cross is not None and seconds_since_cross <= 60.0
+    return {
+        "btc_velocity_10s": velocity_10s,
+        "btc_velocity_30s": velocity_30s,
+        "btc_velocity_60s": velocity_60s,
+        "slope_10s": velocity_10s,
+        "slope_30s": velocity_30s,
+        "slope_60s": velocity_60s,
+        "distance_velocity_30s": distance_velocity_30s,
+        "distance_expanding": distance_expanding,
+        "strike_crossed_recently": strike_crossed_recently,
+        "seconds_since_last_strike_cross": seconds_since_cross,
+    }
 
 
 def _prior_tick_for_window(
@@ -494,6 +609,39 @@ def _price_velocity(history: list[BtcTick], *, current: BtcTick, window_seconds:
     if elapsed <= 0:
         return None
     return (current.price - prior.price) / elapsed
+
+
+def _seconds_since_last_strike_cross(
+    history: Sequence[BtcTick],
+    *,
+    current: BtcTick,
+    target_price: float,
+) -> float | None:
+    if not history or not math.isfinite(target_price):
+        return None
+    previous_side: int | None = None
+    last_cross_ts: datetime | None = None
+    for tick in sorted(history, key=lambda item: item.ts):
+        if tick.ts > current.ts:
+            continue
+        side = _strike_side(tick.price, target_price)
+        if side == 0:
+            last_cross_ts = tick.ts
+            continue
+        if previous_side is not None and side != previous_side:
+            last_cross_ts = tick.ts
+        previous_side = side
+    if last_cross_ts is None:
+        return None
+    return max(0.0, (current.ts - last_cross_ts).total_seconds())
+
+
+def _strike_side(price: float, target_price: float) -> int:
+    if price > target_price:
+        return 1
+    if price < target_price:
+        return -1
+    return 0
 
 
 def _classify_execution_regime(*, velocity_features: Mapping[str, Any]) -> str:
@@ -993,6 +1141,8 @@ class RealtimeStateStreamer:
         clock: Callable[[], datetime] = now_utc,
         paper_trading: bool = False,
         feature_client: Any | None = None,
+        snapshot_recorder: Any | None = None,
+        emit_on_idle: bool = False,
     ) -> None:
         if emit_min_interval_seconds < 0:
             raise ValueError("emit_min_interval_seconds must be >= 0")
@@ -1006,6 +1156,8 @@ class RealtimeStateStreamer:
         self.clock = clock
         self.paper_trading = paper_trading
         self.feature_client = feature_client if feature_client is not None else _feature_client_from_bot(bot)
+        self.snapshot_recorder = snapshot_recorder
+        self.emit_on_idle = emit_on_idle
         self.market: KalshiMarket | None = None
         self.orderbook: KalshiOrderBook | None = None
         self.btc: BtcTick | None = None
@@ -1272,6 +1424,14 @@ class RealtimeStateStreamer:
         self._attach_supabase_features(payload, supabase_features, supabase_feature_error)
         if self.paper_trading:
             self._apply_stream_paper(prediction, quoted_market=quoted_market, payload=payload, now=now)
+        if self.snapshot_recorder is not None:
+            try:
+                payload["snapshot_recorded"] = bool(self.snapshot_recorder.record_snapshot(payload))
+                payload["snapshot_db_path"] = str(getattr(self.snapshot_recorder, "path", ""))
+            except Exception as exc:  # noqa: BLE001 - recording must not kill the websocket loop.
+                payload["snapshot_recorded"] = False
+                payload["snapshot_record_error"] = _fmt_error(exc)
+                _force_no_trade_warning(payload, "snapshot_record_error", "WATCH_ONLY_RECORDING_ERROR")
         self.emit(dump_json(payload) if self.json_output else format_realtime_state(payload))
         self._last_emit_monotonic = now_monotonic
         self._emitted += 1
@@ -1486,6 +1646,10 @@ class RealtimeStateStreamer:
                         try:
                             raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
                         except TimeoutError:
+                            if self.emit_on_idle:
+                                self.emit_state()
+                                if self._max_events_reached():
+                                    stop.set()
                             continue
                         data = json.loads(raw)
                         try:
@@ -1553,6 +1717,10 @@ class RealtimeStateStreamer:
                         try:
                             raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
                         except TimeoutError:
+                            if self.emit_on_idle:
+                                self.emit_state()
+                                if self._max_events_reached():
+                                    stop.set()
                             continue
                         data = json.loads(raw)
                         self.apply_kalshi_message(data)
@@ -1641,6 +1809,27 @@ async def run_realtime_paper_stream(
         max_events=max_events,
         emit_min_interval_seconds=emit_min_interval_seconds,
         paper_trading=True,
+    )
+    return await streamer.run()
+
+
+async def run_realtime_record_1s_stream(
+    bot: KalshiBTC15MBot,
+    *,
+    json_output: bool = False,
+    max_events: int | None = None,
+    emit_min_interval_seconds: float = 1.0,
+) -> int:
+    from .recorder import RealtimeSnapshotRecorder, snapshot_db_path
+
+    recorder = RealtimeSnapshotRecorder(snapshot_db_path(bot.config))
+    streamer = RealtimeStateStreamer(
+        bot,
+        json_output=json_output,
+        max_events=max_events,
+        emit_min_interval_seconds=emit_min_interval_seconds,
+        snapshot_recorder=recorder,
+        emit_on_idle=True,
     )
     return await streamer.run()
 

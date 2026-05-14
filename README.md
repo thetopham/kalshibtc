@@ -13,6 +13,7 @@ Safety boundary: default config is paper-only. Live trading requires a separate 
 - Blends the ML probability with transparent rule-based logic and the live distance to the Kalshi target price.
 - Compares predicted probability to Kalshi YES/NO asks and records a local paper trade only when edge gates pass.
 - Provides a read-only `stream-state` websocket loop that keeps BTC ticks and the Kalshi order book fresh, recomputes contract-close-aware YES/NO probabilities against the current top-of-book, rolls to the next 15-minute contract after close, and flags model/market/direction disagreement in every state payload.
+- Provides a read-only `record-1s` websocket recorder that stores one normalized realtime snapshot per market/second for replay, labeling, and post-session research.
 - Stores predictions and paper trades in `data/paper-ledger.sqlite3`.
 - Actively manages paper positions with take-profit, stop-loss, and near-close simulated exits at public bid marks.
 - Reports open paper positions with public Kalshi mark-to-market quotes, unrealized PnL, liquidity, max-win exposure, and exit signals.
@@ -67,6 +68,9 @@ kbtc15 --config configs/default.toml run --interval-seconds 60
 # Output uses monitor=EDGE_* labels, not order-submission language.
 # Kalshi WebSocket requires KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY_FILE even when not submitting orders.
 kbtc15 --config configs/default.toml stream-state --emit-min-interval-seconds 1
+
+# Read-only 1s websocket recorder; writes normalized snapshots to SQLite for replay/research
+kbtc15 --config configs/default.toml record-1s --emit-min-interval-seconds 1
 
 # Websocket paper trader; same realtime BTC/orderbook state, but opens/closes only local SQLite paper trades
 # Boundary remains paper-only: no Kalshi live orders are submitted by this command.
@@ -152,6 +156,30 @@ systemctl --user status kalshi-btc15m-dashboard.service --no-pager
 
 The dashboard service template uses `--stream --stream-emit-min-interval-seconds 1`, so `/` is the websocket stream dashboard and `/api/stream` is the latest state JSON. `/status` remains the ledger/account dashboard. The market itself is still a 15-minute Kalshi market using 900-second BTC candles.
 
+## 1s Websocket Data Feed
+
+`record-1s` is a read-only capture mode for observation sessions:
+
+```bash
+kbtc15 --config configs/default.toml record-1s --emit-min-interval-seconds 1
+```
+
+It reuses the same websocket state engine as `stream-state`, but attaches a local recorder and writes at most one row per `(market_ticker, second)` to `<data_dir>/realtime-snapshots-1s.sqlite3` in table `realtime_snapshots_1s`. Duplicate websocket events in the same second are ignored so the feed stays replayable as a normalized 1 Hz tape.
+
+Recorded columns include the operator-decision inputs needed for later replay and labeling:
+
+- Time/contract: timestamp, market ticker, open/close/expiration times, seconds/minutes to close, time bucket.
+- BTC/strike state: BTC price, strike/target, signed and absolute distance from strike, distance percent, above/below-strike flag.
+- Velocity: 10s/30s/60s BTC velocity, 30s distance velocity, distance expanding flag, recent strike-cross flag, seconds since last cross when known.
+- Kalshi confirmation: YES/NO top-of-book, mid prices, spread, top levels/depth, orderbook sequence, crossed/invalid quote warning, market-implied YES.
+- Model/debug: probability YES/NO, probability deltas when available, model probability, EV/edge fields, best side, warnings via raw JSON.
+- Execution: final `execution_decision` action, side, confidence, regime, reason, and blockers.
+- Raw payload: the full stream state JSON for future schema recovery.
+
+Volume/trade velocity is intentionally placeholder-friendly. If the active stream payload exposes cumulative volume or trade events, the recorder stores those fields. If not, it records a `volume_todo` note instead of guessing.
+
+Storage choice for v1: keep the primary recorder in SQLite. It is local, deterministic, zero-network, easy to back up, and avoids adding a remote dependency to a safety-critical observation loop. Supabase is still useful for separate remote feature feeds or later analytics/export, but it is not better than SQLite for the bot's authoritative 1 Hz capture path unless we specifically need multi-machine querying or shared dashboards.
+
 ## Guarded demo/live trading
 
 Do not run live mode until paper mode has behaved correctly and you have reviewed the caps in `configs/live-demo.example.toml`.
@@ -211,7 +239,7 @@ Live mode protections:
 
 ## Ledger
 
-SQLite ledger path: `<data_dir>/paper-ledger.sqlite3` (the live audit tables live in the same SQLite file for that config's data directory).
+SQLite ledger path: `<data_dir>/paper-ledger.sqlite3` (the live audit tables live in the same SQLite file for that config's data directory). Realtime 1 Hz observation snapshots are stored separately at `<data_dir>/realtime-snapshots-1s.sqlite3` so research captures cannot interfere with paper/live ledgers.
 
 Tables:
 
@@ -219,6 +247,7 @@ Tables:
 - `paper_trades`: simulated YES/NO contract entries, active paper exits, settlement PnL, exit price, and exit reason.
 - `live_orders`: guarded live order intents, submitted responses, errors, client IDs, and request JSON.
 - `live_fills`: confirmed authenticated fill records used to reconstruct live position state and realized PnL.
+- `realtime_snapshots_1s`: normalized read-only websocket observations keyed by `(market_ticker, ts)`, plus raw stream-state JSON for replay.
 
 ## Deployment note
 
@@ -240,9 +269,11 @@ kbtc15 --config configs/default.toml report
 timeout 5s env KALSHI_BTC15M_DASHBOARD_TOKEN=test-token kbtc15 --config configs/default.toml dashboard --host 127.0.0.1 --port 8792 --stream || test $? -eq 124
 kbtc15 --config configs/default.toml live-status
 kbtc15 --config configs/default.toml stream-state --help
+kbtc15 --config configs/default.toml record-1s --help
 kbtc15 --config configs/default.toml stream-paper --help
 # With Kalshi WebSocket credentials configured outside the repo:
 # kbtc15 --config configs/default.toml stream-state --max-events 3
+# kbtc15 --config configs/default.toml record-1s --max-events 3
 # kbtc15 --config configs/default.toml stream-paper --max-events 3
 # With demo credentials configured outside the repo:
 # kbtc15 --config configs/live-demo.local.toml auth-check
