@@ -94,6 +94,18 @@ class KalshiOrderBook:
         return round(1.0 - self.best_yes_bid, 4) if self.best_yes_bid is not None else None
 
     @property
+    def is_crossed(self) -> bool:
+        """True when YES/NO bids imply impossible crossed complements.
+
+        Kalshi asks are derived as the complement of the opposite side's bid. If
+        best YES bid + best NO bid is greater than $1.00, the local view is
+        stale/inconsistent and should not generate edge signals.
+        """
+        yes_bid = self.best_yes_bid
+        no_bid = self.best_no_bid
+        return yes_bid is not None and no_bid is not None and yes_bid + no_bid > 1.0 + 1e-9
+
+    @property
     def visible_liquidity(self) -> float:
         return sum(price * count for price, count in self.yes_levels.items()) + sum(
             price * count for price, count in self.no_levels.items()
@@ -126,32 +138,44 @@ def build_realtime_state(
     quoted_market = orderbook.to_market(market)
     yes_ask = quoted_market.yes_ask
     no_ask = quoted_market.no_ask
-    expiration = market.expected_expiration_time or market.close_time
-    seconds_to_expiration = (expiration - now).total_seconds() if expiration else None
+    expected_expiration = market.expected_expiration_time
+    seconds_to_expected_expiration = (
+        (expected_expiration - now).total_seconds() if expected_expiration else None
+    )
     seconds_to_close = market.seconds_to_close(now)
+    market_closed = seconds_to_close is not None and seconds_to_close <= 0
+    orderbook_valid = not orderbook.is_crossed
     distance_to_target, distance_to_target_pct, direction_state = _target_distance(
         current_price=btc.price,
         target_price=market.target_price,
     )
-    probability_yes, probability_source, volatility_15m, distance_z = _expiration_state_probability_yes(
+    probability_yes, probability_source, volatility_15m, distance_z = _close_state_probability_yes(
         current_price=btc.price,
         target_price=market.target_price,
-        seconds_to_expiration=seconds_to_expiration,
+        seconds_to_close=seconds_to_close,
         feature_snapshot=prediction.feature_snapshot,
         fallback_probability_yes=prediction.probability_yes,
     )
     probability_no = 1.0 - probability_yes
-    edge_yes = probability_yes - yes_ask if 0.0 < yes_ask < 1.0 else None
-    edge_no = probability_no - no_ask if 0.0 < no_ask < 1.0 else None
+    quotes_usable = orderbook_valid and not market_closed
+    edge_yes = probability_yes - yes_ask if quotes_usable and 0.0 < yes_ask < 1.0 else None
+    edge_no = probability_no - no_ask if quotes_usable and 0.0 < no_ask < 1.0 else None
     best_side, best_edge = _best_side(edge_yes=edge_yes, edge_no=edge_no)
-    market_implied_yes = _market_implied_yes(quoted_market)
-    warnings = _state_warnings(
-        direction_state=direction_state,
-        best_side=best_side,
-        best_edge=best_edge,
-        probability_yes=probability_yes,
-        model_probability_yes=prediction.probability_yes,
-        market_implied_yes=market_implied_yes,
+    market_implied_yes = _market_implied_yes(quoted_market) if quotes_usable else None
+    warnings: list[str] = []
+    if not orderbook_valid:
+        warnings.append("invalid_crossed_orderbook")
+    if market_closed:
+        warnings.append("market_closed_pending_rollover")
+    warnings.extend(
+        _state_warnings(
+            direction_state=direction_state,
+            best_side=best_side,
+            best_edge=best_edge,
+            probability_yes=probability_yes,
+            model_probability_yes=prediction.probability_yes,
+            market_implied_yes=market_implied_yes,
+        )
     )
     return {
         "event": "market_state",
@@ -166,9 +190,14 @@ def build_realtime_state(
         "event_ticker": market.event_ticker,
         "target_price": market.target_price,
         "market_close_time": market.close_time.isoformat() if market.close_time else None,
-        "market_expiration_time": expiration.isoformat() if expiration else None,
+        "market_expiration_time": expected_expiration.isoformat() if expected_expiration else None,
+        "market_expected_expiration_time": expected_expiration.isoformat() if expected_expiration else None,
         "seconds_to_close": seconds_to_close,
-        "seconds_to_expiration": seconds_to_expiration,
+        "seconds_to_expiration": seconds_to_expected_expiration,
+        "seconds_to_expected_expiration": seconds_to_expected_expiration,
+        "seconds_to_probability_cutoff": seconds_to_close,
+        "probability_cutoff": "contract_close",
+        "market_closed": market_closed,
         "distance_to_target": distance_to_target,
         "distance_to_target_pct": distance_to_target_pct,
         "direction_state": direction_state,
@@ -192,6 +221,7 @@ def build_realtime_state(
         "no_ask": quoted_market.no_ask,
         "orderbook_liquidity": orderbook.visible_liquidity,
         "liquidity": quoted_market.liquidity,
+        "orderbook_valid": orderbook_valid,
         "edge_yes": edge_yes,
         "edge_no": edge_no,
         "best_side": best_side,
@@ -220,39 +250,40 @@ def _target_distance(*, current_price: float, target_price: float | None) -> tup
     return distance, distance_pct, direction
 
 
-def _expiration_state_probability_yes(
+def _close_state_probability_yes(
     *,
     current_price: float,
     target_price: float | None,
-    seconds_to_expiration: float | None,
+    seconds_to_close: float | None,
     feature_snapshot: Mapping[str, Any],
     fallback_probability_yes: float,
 ) -> tuple[float, str, float | None, float | None]:
-    """Estimate expiry YES probability from current distance, time left, and BTC volatility.
+    """Estimate close-time YES probability from current distance, time left, and BTC volatility.
 
     The streaming view needs a *current-state* probability, not just the slower
-    technical model's directional prior. Treat the remaining move as log-normal
-    noise with 15-minute realized volatility from the latest feature snapshot.
+    technical model's directional prior. Kalshi BTC 15m contracts stop trading at
+    `close_time`, so the monitor uses contract close as the cutoff clock rather
+    than the later expected-expiration metadata.
     """
     fallback = _clamp_probability(fallback_probability_yes)
     if (
         target_price is None
         or target_price <= 0
         or current_price <= 0
-        or seconds_to_expiration is None
-        or seconds_to_expiration <= 0
+        or seconds_to_close is None
+        or seconds_to_close <= 0
     ):
         return fallback, "model_fallback", None, None
     volatility_15m = _as_float(feature_snapshot.get("vol_16"), default=0.0)
     if not math.isfinite(volatility_15m) or volatility_15m <= 0:
         return fallback, "model_fallback_no_volatility", None, None
     volatility_15m = max(0.0005, min(0.02, volatility_15m))
-    remaining_sigma = volatility_15m * math.sqrt(max(seconds_to_expiration, 1.0) / 900.0)
+    remaining_sigma = volatility_15m * math.sqrt(max(seconds_to_close, 1.0) / 900.0)
     if remaining_sigma <= 0:
         return fallback, "model_fallback_no_sigma", volatility_15m, None
     distance_z = math.log(current_price / target_price) / remaining_sigma
     probability_yes = 0.5 * (1.0 + math.erf(distance_z / math.sqrt(2.0)))
-    return _clamp_probability(probability_yes), "expiration_distance_volatility", volatility_15m, distance_z
+    return _clamp_probability(probability_yes), "close_distance_volatility", volatility_15m, distance_z
 
 
 def _market_implied_yes(market: KalshiMarket) -> float | None:
@@ -299,7 +330,6 @@ def _clamp_probability(value: float) -> float:
 
 def format_realtime_state(payload: Mapping[str, Any]) -> str:
     close_seconds = _seconds_label(payload.get("seconds_to_close"))
-    expiration_seconds = _seconds_label(payload.get("seconds_to_expiration"))
     monitor_action = str(payload.get("monitor_action") or "NO_EDGE")
     monitor_side = payload.get("best_side") if monitor_action != "NO_EDGE" else "NONE"
     lines = [
@@ -307,7 +337,7 @@ def format_realtime_state(payload: Mapping[str, Any]) -> str:
         (
             f"market={payload.get('market_ticker')} target={payload.get('target_price')} "
             f"btc={float(payload.get('current_price') or 0.0):.2f} "
-            f"closes_in={close_seconds} expires_in={expiration_seconds}"
+            f"closes_in={close_seconds}"
         ),
         (
             f"direction={payload.get('direction_state', 'UNKNOWN')} "
@@ -442,11 +472,7 @@ class RealtimeStateStreamer:
         self._emitted = 0
 
     def bootstrap(self) -> None:
-        self.market = self.bot.kalshi.current_btc15m_market(
-            self.bot.config.kalshi.series_ticker,
-            status=self.bot.config.kalshi.market_status,
-        )
-        self.orderbook = _rest_orderbook(self.bot.kalshi, self.market.ticker)
+        self.refresh_market(force=True)
         candles = self.bot.market_data.fetch_candles(self.bot.config.market_data.lookback_days)
         self.frame = candles_to_frame(
             candles,
@@ -463,6 +489,33 @@ class RealtimeStateStreamer:
             ts=self.clock(),
         )
         self.emit_state(force=True)
+
+    def refresh_market(self, *, force: bool = False) -> bool:
+        """Refresh the active Kalshi contract and REST order book.
+
+        Returns True when the streamer moved to a different market ticker, or
+        when a forced initial refresh populated the market for the first time.
+        """
+        previous_ticker = self.market.ticker if self.market is not None else None
+        market = self.bot.kalshi.current_btc15m_market(
+            self.bot.config.kalshi.series_ticker,
+            status=self.bot.config.kalshi.market_status,
+        )
+        if not force and previous_ticker == market.ticker:
+            return False
+        self.market = market
+        self.orderbook = _rest_orderbook(self.bot.kalshi, market.ticker)
+        self._last_emit_monotonic = 0.0
+        return force or previous_ticker != market.ticker
+
+    def refresh_market_if_closed(self, *, now: datetime | None = None) -> bool:
+        """Roll to the next Kalshi contract as soon as the current contract closes."""
+        if self.market is None:
+            return self.refresh_market(force=True)
+        seconds_to_close = self.market.seconds_to_close(now or self.clock())
+        if seconds_to_close is None or seconds_to_close > 0:
+            return False
+        return self.refresh_market()
 
     def apply_btc_tick(self, tick: BtcTick) -> None:
         self.btc = tick
@@ -489,10 +542,13 @@ class RealtimeStateStreamer:
     def emit_state(self, *, force: bool = False) -> None:
         if self.market is None or self.orderbook is None or self.btc is None or self.frame is None:
             return
+        now = self.clock()
+        self.refresh_market_if_closed(now=now)
+        if self.market is None or self.orderbook is None:
+            return
         now_monotonic = time.monotonic()
         if not force and now_monotonic - self._last_emit_monotonic < self.emit_min_interval_seconds:
             return
-        now = self.clock()
         quoted_market = self.orderbook.to_market(self.market)
         prediction = self.bot.predictor.predict(
             self.frame,
@@ -555,35 +611,42 @@ class RealtimeStateStreamer:
                     stop.set()
 
     async def _kalshi_ws_loop(self, stop: asyncio.Event) -> None:
-        if self.market is None:
-            return
         websockets = _import_websockets()
         rest_base_url = self._kalshi_rest_url_for_ws()
         url = kalshi_ws_url_from_rest_url(rest_base_url)
         headers = _kalshi_ws_auth_headers(rest_base_url, self.bot.config.market_data.request_timeout_seconds)
-        connect = _websockets_connect(websockets, url, headers=headers)
-        async with connect as ws:
-            await ws.send(
-                json.dumps(
-                    {
-                        "id": 1,
-                        "cmd": "subscribe",
-                        "params": {
-                            "channels": ["orderbook_delta"],
-                            "market_tickers": [self.market.ticker],
-                        },
-                    }
+        while not stop.is_set():
+            if self.market is None:
+                self.refresh_market(force=True)
+            if self.market is None:
+                return
+            subscribed_ticker = self.market.ticker
+            connect = _websockets_connect(websockets, url, headers=headers)
+            async with connect as ws:
+                await ws.send(
+                    json.dumps(
+                        {
+                            "id": 1,
+                            "cmd": "subscribe",
+                            "params": {
+                                "channels": ["orderbook_delta"],
+                                "market_tickers": [subscribed_ticker],
+                            },
+                        }
+                    )
                 )
-            )
-            while not stop.is_set():
-                try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
-                except TimeoutError:
-                    continue
-                data = json.loads(raw)
-                self.apply_kalshi_message(data)
-                if self._max_events_reached():
-                    stop.set()
+                while not stop.is_set():
+                    if self.refresh_market_if_closed(now=self.clock()):
+                        if self.market is not None and self.market.ticker != subscribed_ticker:
+                            break
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                    except TimeoutError:
+                        continue
+                    data = json.loads(raw)
+                    self.apply_kalshi_message(data)
+                    if self._max_events_reached():
+                        stop.set()
 
     def _kalshi_rest_url_for_ws(self) -> str:
         if self.bot.config.is_live_mode:

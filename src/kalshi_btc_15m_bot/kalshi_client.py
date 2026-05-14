@@ -66,6 +66,9 @@ class KalshiPublicClient:
             return self._with_orderbook_quote(min(live, key=lambda m: m.close_time or now))
 
         upcoming_or_recent = [m for m in markets if m.close_time is not None]
+        upcoming = [m for m in upcoming_or_recent if m.close_time and m.close_time > now]
+        if upcoming:
+            return self._with_orderbook_quote(min(upcoming, key=lambda m: m.close_time or now))
         if upcoming_or_recent:
             return self._with_orderbook_quote(
                 min(upcoming_or_recent, key=lambda m: abs((m.close_time or now) - now))

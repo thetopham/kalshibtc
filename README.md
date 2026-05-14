@@ -12,7 +12,7 @@ Safety boundary: default config is paper-only. Live trading requires a separate 
 - Trains a modest logistic-regression direction model on recent 15-minute BTC candles using time-ordered train/test splits.
 - Blends the ML probability with transparent rule-based logic and the live distance to the Kalshi target price.
 - Compares predicted probability to Kalshi YES/NO asks and records a local paper trade only when edge gates pass.
-- Provides a read-only `stream-state` websocket loop that keeps BTC ticks and the Kalshi order book fresh, recomputes expiration-aware YES/NO probabilities against the current top-of-book, and flags model/market/direction disagreement in every state payload.
+- Provides a read-only `stream-state` websocket loop that keeps BTC ticks and the Kalshi order book fresh, recomputes contract-close-aware YES/NO probabilities against the current top-of-book, rolls to the next 15-minute contract after close, and flags model/market/direction disagreement in every state payload.
 - Stores predictions and paper trades in `data/paper-ledger.sqlite3`.
 - Actively manages paper positions with take-profit, stop-loss, and near-close simulated exits at public bid marks.
 - Reports open paper positions with public Kalshi mark-to-market quotes, unrealized PnL, liquidity, max-win exposure, and exit signals.

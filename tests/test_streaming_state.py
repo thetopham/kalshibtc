@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -8,6 +9,7 @@ from kalshi_btc_15m_bot.models import KalshiMarket, ModelInfo, Prediction
 from kalshi_btc_15m_bot.streaming import (
     BtcTick,
     KalshiOrderBook,
+    RealtimeStateStreamer,
     build_realtime_state,
     format_realtime_state,
     kalshi_ws_url_from_rest_url,
@@ -120,7 +122,7 @@ def test_kalshi_orderbook_snapshot_and_deltas_drive_top_of_book() -> None:
     assert book.yes_ask == pytest.approx(0.75)
 
 
-def test_realtime_state_compares_prediction_to_current_orderbook_and_expiration_clock() -> None:
+def test_realtime_state_compares_prediction_to_current_orderbook_and_close_clock() -> None:
     test_market = market()
     book = KalshiOrderBook.from_snapshot(
         test_market.ticker,
@@ -150,6 +152,8 @@ def test_realtime_state_compares_prediction_to_current_orderbook_and_expiration_
     assert payload["market_ticker"] == "KXBTC15M-TEST-45"
     assert payload["current_price"] == pytest.approx(100_100.0)
     assert payload["seconds_to_close"] == pytest.approx(300.0)
+    assert payload["seconds_to_probability_cutoff"] == pytest.approx(300.0)
+    assert payload["probability_cutoff"] == "contract_close"
     assert payload["seconds_to_expiration"] == pytest.approx(600.0)
     assert payload["probability_yes"] == pytest.approx(0.64)
     assert payload["probability_no"] == pytest.approx(0.36)
@@ -162,7 +166,8 @@ def test_realtime_state_compares_prediction_to_current_orderbook_and_expiration_
 
     formatted = format_realtime_state(payload)
     assert "stream market_state" in formatted
-    assert "expires_in=600s" in formatted
+    assert "closes_in=300s" in formatted
+    assert "expires_in=" not in formatted
     assert "edge_yes=-0.010" in formatted
     assert "edge_no=-0.090" in formatted
     assert "monitor=NO_EDGE edge_side=NONE" in formatted
@@ -286,6 +291,174 @@ def test_monitor_action_ignores_dust_edges() -> None:
 
     formatted = format_realtime_state(payload)
     assert "monitor=NO_EDGE edge_side=NONE" in formatted
+
+
+def test_realtime_state_uses_contract_close_for_probability_clock_and_operator_label() -> None:
+    test_market = market()
+    book = KalshiOrderBook.from_snapshot(
+        test_market.ticker,
+        {
+            "yes_dollars_fp": [["0.7000", "2.00"]],
+            "no_dollars_fp": [["0.2400", "3.00"]],
+        },
+    )
+    btc = BtcTick(
+        source="coinbase_ws",
+        product="BTC-USD",
+        price=100_080.0,
+        bid=100_079.0,
+        ask=100_081.0,
+        ts=datetime(2026, 1, 4, 0, 5, tzinfo=UTC),
+    )
+
+    payload = build_realtime_state(
+        prediction(test_market, probability_yes=0.55, feature_snapshot={"vol_16": 0.002}),
+        market=test_market,
+        orderbook=book,
+        btc=btc,
+        now=datetime(2026, 1, 4, 0, 5, tzinfo=UTC),
+    )
+
+    assert payload["seconds_to_close"] == pytest.approx(300.0)
+    assert payload["seconds_to_probability_cutoff"] == pytest.approx(300.0)
+    assert payload["probability_source"] == "close_distance_volatility"
+    formatted = format_realtime_state(payload)
+    assert "closes_in=300s" in formatted
+    assert "expires_in=" not in formatted
+
+
+def test_invalid_crossed_orderbook_suppresses_monitor_edges() -> None:
+    test_market = market()
+    book = KalshiOrderBook.from_snapshot(
+        test_market.ticker,
+        {
+            "yes_dollars_fp": [["0.9990", "2.00"]],
+            "no_dollars_fp": [["0.1600", "3.00"]],
+        },
+    )
+    btc = BtcTick(
+        source="coinbase_ws",
+        product="BTC-USD",
+        price=100_100.0,
+        bid=100_099.0,
+        ask=100_101.0,
+        ts=datetime(2026, 1, 4, 0, 5, tzinfo=UTC),
+    )
+
+    payload = build_realtime_state(
+        prediction(test_market, probability_yes=0.93, feature_snapshot={"vol_16": 0.001}),
+        market=test_market,
+        orderbook=book,
+        btc=btc,
+        now=datetime(2026, 1, 4, 0, 5, tzinfo=UTC),
+    )
+
+    assert payload["orderbook_valid"] is False
+    assert payload["edge_yes"] is None
+    assert payload["edge_no"] is None
+    assert payload["monitor_action"] == "NO_EDGE"
+    assert "invalid_crossed_orderbook" in payload["warnings"]
+    formatted = format_realtime_state(payload)
+    assert "monitor=NO_EDGE edge_side=NONE" in formatted
+    assert "warnings=invalid_crossed_orderbook" in formatted
+
+
+def test_closed_contract_suppresses_monitor_edges_until_rollover() -> None:
+    now = datetime(2026, 1, 4, 0, 10, 1, tzinfo=UTC)
+    closed_market = KalshiMarket(
+        **{
+            **market().to_jsonable(),
+            "close_time": datetime(2026, 1, 4, 0, 10, tzinfo=UTC),
+            "expected_expiration_time": datetime(2026, 1, 4, 0, 15, tzinfo=UTC),
+            "raw": {},
+        }
+    )
+    book = KalshiOrderBook.from_snapshot(
+        closed_market.ticker,
+        {"yes_dollars_fp": [["0.8300", "2.00"]], "no_dollars_fp": [["0.1600", "3.00"]]},
+    )
+    btc = BtcTick(
+        source="coinbase_ws",
+        product="BTC-USD",
+        price=100_100.0,
+        bid=100_099.0,
+        ask=100_101.0,
+        ts=now,
+    )
+
+    payload = build_realtime_state(
+        prediction(closed_market, probability_yes=0.91, feature_snapshot={"vol_16": 0.001}),
+        market=closed_market,
+        orderbook=book,
+        btc=btc,
+        now=now,
+    )
+
+    assert payload["market_closed"] is True
+    assert payload["edge_yes"] is None
+    assert payload["edge_no"] is None
+    assert payload["monitor_action"] == "NO_EDGE"
+    assert "market_closed_pending_rollover" in payload["warnings"]
+
+
+def test_streamer_refreshes_market_after_contract_close() -> None:
+    old_market = market()
+    new_market = KalshiMarket(
+        **{
+            **old_market.to_jsonable(),
+            "ticker": "KXBTC15M-TEST-60",
+            "event_ticker": "KXBTC15M-TEST-NEXT",
+            "target_price": 100_250.0,
+            "open_time": datetime(2026, 1, 4, 0, 10, tzinfo=UTC),
+            "close_time": datetime(2026, 1, 4, 0, 25, tzinfo=UTC),
+            "expected_expiration_time": datetime(2026, 1, 4, 0, 30, tzinfo=UTC),
+            "raw": {},
+        }
+    )
+
+    class FakeKalshi:
+        def __init__(self) -> None:
+            self.market_refreshes = 0
+
+        def current_btc15m_market(self, series_ticker: str, status: str) -> KalshiMarket:
+            self.market_refreshes += 1
+            assert series_ticker == "KXBTC15M"
+            assert status == "open"
+            return new_market
+
+        def get_orderbook(self, ticker: str, *, depth: int | None = None) -> dict:
+            assert ticker == new_market.ticker
+            assert depth == 100
+            return {
+                "orderbook_fp": {
+                    "yes_dollars_fp": [["0.4000", "1.00"]],
+                    "no_dollars_fp": [["0.5000", "1.00"]],
+                }
+            }
+
+    fake_kalshi = FakeKalshi()
+    fake_bot = SimpleNamespace(
+        kalshi=fake_kalshi,
+        config=SimpleNamespace(
+            kalshi=SimpleNamespace(series_ticker="KXBTC15M", market_status="open"),
+            market_data=SimpleNamespace(request_timeout_seconds=20),
+            is_live_mode=False,
+        ),
+    )
+    streamer = RealtimeStateStreamer(fake_bot, emit=lambda _: None)
+    streamer.market = old_market
+    streamer.orderbook = KalshiOrderBook.from_snapshot(
+        old_market.ticker,
+        {"yes_dollars_fp": [["0.5000", "1.00"]], "no_dollars_fp": [["0.4000", "1.00"]]},
+    )
+
+    refreshed = streamer.refresh_market_if_closed(now=datetime(2026, 1, 4, 0, 10, 1, tzinfo=UTC))
+
+    assert refreshed is True
+    assert streamer.market == new_market
+    assert streamer.orderbook is not None
+    assert streamer.orderbook.market_ticker == new_market.ticker
+    assert fake_kalshi.market_refreshes == 1
 
 
 def test_websocket_url_and_public_btc_ticker_parsers() -> None:

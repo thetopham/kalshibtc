@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
 
 from kalshi_btc_15m_bot.kalshi_client import KalshiPublicClient
@@ -77,3 +78,81 @@ def test_current_market_refreshes_best_quotes_from_kalshi_orderbook() -> None:
     assert market.liquidity == 0.55 * 2.0 + 0.23 * 10.0 + 0.42 * 3.0 + 0.01 * 10.0
     assert fake_session.calls[0][0].endswith("/markets")
     assert fake_session.calls[1][0].endswith("/markets/KXBTC15M-TEST-45/orderbook")
+
+
+class RolloverFakeSession:
+    def __init__(self) -> None:
+        self.headers: dict[str, str] = {}
+        self.calls: list[tuple[str, dict | None]] = []
+
+    def get(self, url: str, params: dict | None = None, timeout: int | None = None) -> FakeResponse:
+        self.calls.append((url, params))
+        parsed = urlparse(url)
+        if parsed.path.endswith("/markets"):
+            return FakeResponse(
+                {
+                    "markets": [
+                        {
+                            "ticker": "KXBTC15M-OLD",
+                            "event_ticker": "KXBTC15M-OLD-EVENT",
+                            "title": "Old BTC 15m",
+                            "status": "active",
+                            "yes_bid_dollars": "0.8300",
+                            "yes_ask_dollars": "0.8400",
+                            "no_bid_dollars": "0.1600",
+                            "no_ask_dollars": "0.1700",
+                            "last_price_dollars": "0.5000",
+                            "floor_strike": "79636.47",
+                            "open_time": "2026-05-14T14:45:00Z",
+                            "close_time": "2026-05-14T15:00:00Z",
+                            "expected_expiration_time": "2026-05-14T15:05:00Z",
+                            "volume_fp": "100.00",
+                            "liquidity_dollars": "10.0000",
+                            "open_interest_fp": "10.00",
+                        },
+                        {
+                            "ticker": "KXBTC15M-NEXT",
+                            "event_ticker": "KXBTC15M-NEXT-EVENT",
+                            "title": "Next BTC 15m",
+                            "status": "open",
+                            "yes_bid_dollars": "0.4100",
+                            "yes_ask_dollars": "0.5900",
+                            "no_bid_dollars": "0.4000",
+                            "no_ask_dollars": "0.6000",
+                            "last_price_dollars": "0.5000",
+                            "floor_strike": "79750.00",
+                            "open_time": None,
+                            "close_time": "2026-05-14T15:15:00Z",
+                            "expected_expiration_time": "2026-05-14T15:20:00Z",
+                            "volume_fp": "0.00",
+                            "liquidity_dollars": "10.0000",
+                            "open_interest_fp": "0.00",
+                        },
+                    ]
+                }
+            )
+        if parsed.path.endswith("/markets/KXBTC15M-NEXT/orderbook"):
+            return FakeResponse(
+                {
+                    "orderbook_fp": {
+                        "yes_dollars": [["0.4100", "1.00"]],
+                        "no_dollars": [["0.4000", "1.00"]],
+                    }
+                }
+            )
+        raise AssertionError(f"unexpected url {url}")
+
+
+def test_current_market_prefers_next_contract_after_previous_close(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "kalshi_btc_15m_bot.kalshi_client.now_utc",
+        lambda: datetime(2026, 5, 14, 15, 0, 21, tzinfo=UTC),
+    )
+    client = KalshiPublicClient("https://external-api.kalshi.com/trade-api/v2")
+    fake_session = RolloverFakeSession()
+    client.session = fake_session  # type: ignore[assignment]
+
+    market = client.current_btc15m_market("KXBTC15M", "open")
+
+    assert market.ticker == "KXBTC15M-NEXT"
+    assert market.target_price == 79750.0
