@@ -118,7 +118,7 @@ PY
 kbtc15 --config configs/live-prod.local.toml dashboard --host 0.0.0.0 --port 8792 --scan-interval-seconds 60 --stream --stream-emit-min-interval-seconds 1
 ```
 
-The stream page shows current BTC price, market ticker, target, time to close/expiration, YES/NO top-of-book, state/model probabilities, decision, monitor gate, best EV, probability edge, rollover status, collector warnings, and the raw latest stream payload. The `/status` page still shows live account balance/portfolio when the selected config has live credentials loaded, paper and live PnL from the local SQLite ledger, latest predictions, live orders/fills, open positions, service status, and the active safety boundary.
+The stream page shows current BTC price, market ticker, target, time to close/expiration, YES/NO top-of-book, state/model probabilities, decision, monitor gate, best EV, probability edge, rollover status, collector warnings, a browser canvas graph of recent BTC price / YES probability / EV / probability edge, and the raw latest stream payload. The `/status` page still shows live account balance/portfolio when the selected config has live credentials loaded, paper and live PnL from the local SQLite ledger, latest predictions, live orders/fills, open positions, service status, and the active safety boundary.
 
 To run the dashboard as a user service:
 

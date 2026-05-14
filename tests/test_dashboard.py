@@ -119,8 +119,8 @@ def test_render_dashboard_html_includes_cards_and_read_only_boundary() -> None:
     assert "KALSHI_API_KEY" not in text
 
 
-def _sample_stream_payload() -> dict[str, object]:
-    return {
+def _sample_stream_payload(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
         "event": "market_state",
         "as_of": "2026-05-14T17:01:02+00:00",
         "btc_source": "coinbase_ws",
@@ -156,6 +156,8 @@ def _sample_stream_payload() -> dict[str, object]:
         "warnings": ["model_state_probability_gap"],
         "boundary": "read-only websocket market-state stream; no orders submitted",
     }
+    payload.update(overrides)
+    return payload
 
 
 def test_stream_snapshot_store_tracks_latest_payload_and_reconnect_warnings() -> None:
@@ -170,6 +172,39 @@ def test_stream_snapshot_store_tracks_latest_payload_and_reconnect_warnings() ->
     assert snapshot["last_warning"]["warning"] == "kalshi_ws_reconnect_failed"
     assert snapshot["latest"]["market_ticker"] == "KXBTC15M-TEST"
     assert snapshot["latest"]["decision"] == "WATCH_ONLY_MODEL_DISAGREEMENT"
+
+
+def test_stream_snapshot_store_tracks_chart_history_points() -> None:
+    store = StreamSnapshotStore()
+    for idx, price in enumerate([64300.0, 64350.0, 64425.0]):
+        store.record_line(
+            json.dumps(
+                _sample_stream_payload(
+                    as_of=f"2026-05-14T17:01:0{idx}+00:00",
+                    current_price=price,
+                    target_price=64250.0,
+                    probability_yes=0.55 + idx * 0.02,
+                    probability_no=0.45 - idx * 0.02,
+                    yes_bid=0.51 + idx * 0.01,
+                    yes_ask=0.53 + idx * 0.01,
+                    no_bid=0.45 - idx * 0.01,
+                    no_ask=0.47 - idx * 0.01,
+                    best_ev_per_dollar=0.02 + idx * 0.015,
+                    best_edge=0.01 + idx * 0.005,
+                    seconds_to_close=328.0 - idx,
+                )
+            )
+        )
+
+    history = store.snapshot()["history"]
+
+    assert len(history) == 3
+    assert history[-1]["as_of"] == "2026-05-14T17:01:02+00:00"
+    assert history[-1]["current_price"] == 64425.0
+    assert history[-1]["target_price"] == 64250.0
+    assert history[-1]["probability_yes"] == pytest.approx(0.59)
+    assert history[-1]["best_ev_per_dollar"] == pytest.approx(0.05)
+    assert history[-1]["seconds_to_close"] == 326.0
 
 
 def test_collect_stream_dashboard_data_projects_latest_stream_state() -> None:
@@ -187,6 +222,7 @@ def test_collect_stream_dashboard_data_projects_latest_stream_state() -> None:
     assert data["strategy"]["stream_emit_min_interval_seconds"] == 1.0
     assert data["stream"]["latest"]["market_ticker"] == "KXBTC15M-TEST"
     assert data["stream"]["latest"]["monitor_action"] == "NO_EDGE"
+    assert data["stream"]["history"][-1]["current_price"] == 64321.5
 
 
 def test_render_stream_dashboard_html_includes_live_stream_shell_and_latest_state() -> None:
@@ -208,6 +244,11 @@ def test_render_stream_dashboard_html_includes_live_stream_shell_and_latest_stat
     assert "NO_EDGE" in text
     assert "best_ev" in text
     assert "prob_edge" in text
+    assert "Live graph" in text
+    assert "stream-chart" in text
+    assert "chart-metric" in text
+    assert "renderChart" in text
+    assert "stream.history" in text
     assert "no live orders submitted" in text
     assert "KALSHI_API_KEY" not in text
 

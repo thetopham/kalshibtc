@@ -24,6 +24,7 @@ DEFAULT_SERVICE_NAMES = (
     "kalshi-btc15m-paper.service",
 )
 STREAM_WARNING_HISTORY_LIMIT = 8
+STREAM_CHART_HISTORY_LIMIT = 900
 
 
 class StreamSnapshotStore:
@@ -37,6 +38,7 @@ class StreamSnapshotStore:
         self._updated_at: datetime | None = None
         self._events_seen = 0
         self._warnings: list[dict[str, Any]] = []
+        self._history: list[dict[str, Any]] = []
         self._last_error: str | None = None
 
     def mark_running(self, running: bool, *, error: str | None = None) -> None:
@@ -66,6 +68,8 @@ class StreamSnapshotStore:
             self._latest = _json_safe_dict(payload)
             self._updated_at = now
             self._events_seen += 1
+            self._history.append(_stream_history_point(payload, now))
+            self._history = self._history[-STREAM_CHART_HISTORY_LIMIT:]
             self._last_error = None
 
     def record_warning(self, payload: Mapping[str, Any]) -> None:
@@ -87,6 +91,7 @@ class StreamSnapshotStore:
         with self._lock:
             latest = _json_safe_dict(self._latest) if self._latest is not None else None
             warnings = [_json_safe_dict(warning) for warning in self._warnings]
+            history = [_json_safe_dict(point) for point in self._history]
             updated_at = self._updated_at
             staleness_seconds = (now - updated_at).total_seconds() if updated_at is not None else None
             return {
@@ -96,6 +101,8 @@ class StreamSnapshotStore:
                 "updated_at": updated_at.isoformat() if updated_at is not None else None,
                 "staleness_seconds": staleness_seconds,
                 "latest": latest,
+                "history": history,
+                "history_limit": STREAM_CHART_HISTORY_LIMIT,
                 "last_warning": warnings[-1] if warnings else None,
                 "warning_count": len(warnings),
                 "warnings": warnings,
@@ -378,6 +385,13 @@ def render_stream_dashboard_html(data: Mapping[str, Any], *, api_path: str = "/a
     .quotegrid {{ display:grid; grid-template-columns:repeat(2,1fr); gap:10px; }}
     .quote {{ background:rgba(21,31,48,.65); border:1px solid var(--line); border-radius:16px; padding:14px; }}
     .quote.yes {{ border-color:rgba(53,212,154,.3); }} .quote.no {{ border-color:rgba(255,95,121,.3); }}
+    .chart-head {{ display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }}
+    .chart-controls {{ display:flex; align-items:center; gap:8px; color:var(--muted); font-size:13px; }}
+    select {{ color:var(--text); background:#0b1220; border:1px solid var(--line); border-radius:12px; padding:8px 10px; }}
+    .chart-wrap {{ position:relative; min-height:260px; }}
+    canvas {{ width:100%; height:260px; display:block; border-radius:16px; background:linear-gradient(180deg, rgba(21,31,48,.55), rgba(8,12,20,.35)); border:1px solid rgba(36,50,74,.78); }}
+    .chart-legend {{ display:flex; flex-wrap:wrap; gap:10px; margin-top:10px; color:var(--muted); font-size:12px; }}
+    .legend-dot {{ width:9px; height:9px; display:inline-block; border-radius:99px; margin-right:5px; }}
     .green {{ color:var(--green); }} .red {{ color:var(--red); }} .yellow {{ color:var(--yellow); }} .blue {{ color:var(--blue); }} .purple {{ color:var(--purple); }}
     pre {{ white-space:pre-wrap; overflow-wrap:anywhere; color:var(--muted); background:#080f1b; border:1px solid var(--line); padding:12px; border-radius:14px; max-height:260px; overflow:auto; }}
     footer {{ color:var(--muted); margin-top:18px; font-size:12px; }}
@@ -428,6 +442,28 @@ def render_stream_dashboard_html(data: Mapping[str, Any], *, api_path: str = "/a
     {_stream_kpi('prob_edge', _pct_or_dash(latest.get('best_edge')), f"spread {_pct_or_dash(latest.get('best_spread'))}", 'prob-edge')}
   </section>
 
+  <section class="panel" style="margin-top:14px">
+    <div class="chart-head">
+      <div>
+        <h2>Live graph</h2>
+        <div id="chart-summary" class="hint">{esc(len(stream.get('history') or []))} retained stream points · newest at {esc(latest.get('as_of'))}</div>
+      </div>
+      <label class="chart-controls" for="chart-metric">metric
+        <select id="chart-metric" aria-label="Chart metric">
+          <option value="current_price">BTC price</option>
+          <option value="probability_yes">YES probability</option>
+          <option value="best_ev_per_dollar">best EV / $</option>
+          <option value="best_edge">prob edge</option>
+        </select>
+      </label>
+    </div>
+    <div class="chart-wrap"><canvas id="stream-chart" width="1100" height="260" aria-label="Live stream history chart"></canvas></div>
+    <div class="chart-legend">
+      <span><span class="legend-dot" style="background:var(--blue)"></span><span id="chart-primary-label">selected metric</span></span>
+      <span><span class="legend-dot" style="background:rgba(53,212,154,.7)"></span>target line when charting BTC price</span>
+    </div>
+  </section>
+
   <section class="grid two">
     <div class="panel">
       <h2>YES / NO orderbook</h2>
@@ -465,6 +501,40 @@ function signedMoney(v) {{ const n = Number(v); if (!Number.isFinite(n)) return 
 function seconds(v) {{ const n = Number(v); return Number.isFinite(n) ? Math.round(n) + 's' : '—'; }}
 function setText(id, value) {{ const el = document.getElementById(id); if (el) el.textContent = value; }}
 function kpi(id, value, hint) {{ setText(id + '-value', value); setText(id + '-hint', hint); }}
+const CHART_CONFIG = {{
+  current_price: {{label:'BTC price', color:'#67b7ff', fmt:money}},
+  probability_yes: {{label:'YES probability', color:'#35d49a', fmt:pct}},
+  best_ev_per_dollar: {{label:'best EV / $', color:'#a78bfa', fmt:pct}},
+  best_edge: {{label:'prob edge', color:'#ffca58', fmt:pct}}
+}};
+function chartMetric() {{ const el = document.getElementById('chart-metric'); return el ? el.value : 'current_price'; }}
+function finiteNumber(v) {{ const n = Number(v); return Number.isFinite(n) ? n : null; }}
+function chartBounds(values, padRatio=0.08) {{ let min = Math.min(...values), max = Math.max(...values); if (min === max) {{ const pad = Math.max(Math.abs(min) * padRatio, 0.01); min -= pad; max += pad; }} else {{ const pad = (max - min) * padRatio; min -= pad; max += pad; }} return [min, max]; }}
+function drawSeries(ctx, points, metric, color, xFor, yFor) {{
+  ctx.beginPath(); ctx.lineWidth = 2.5; ctx.strokeStyle = color; let started = false;
+  points.forEach((point, idx) => {{ const value = finiteNumber(point[metric]); if (value === null) return; const x = xFor(idx); const y = yFor(value); if (!started) {{ ctx.moveTo(x, y); started = true; }} else {{ ctx.lineTo(x, y); }} }});
+  if (started) ctx.stroke();
+}}
+function renderChart(history) {{
+  const canvas = document.getElementById('stream-chart'); if (!canvas) return;
+  const metric = chartMetric(); const cfg = CHART_CONFIG[metric] || CHART_CONFIG.current_price;
+  const rect = canvas.getBoundingClientRect(); const ratio = window.devicePixelRatio || 1; const width = Math.max(320, Math.floor(rect.width || canvas.width)); const height = 260;
+  if (canvas.width !== Math.floor(width * ratio) || canvas.height !== Math.floor(height * ratio)) {{ canvas.width = Math.floor(width * ratio); canvas.height = Math.floor(height * ratio); }}
+  const ctx = canvas.getContext('2d'); if (!ctx) return; ctx.setTransform(ratio, 0, 0, ratio, 0, 0); ctx.clearRect(0, 0, width, height);
+  const points = (history || []).filter(point => finiteNumber(point[metric]) !== null).slice(-300);
+  ctx.fillStyle = 'rgba(8,12,20,.95)'; ctx.fillRect(0, 0, width, height);
+  const pad = {{left:54, right:18, top:18, bottom:34}}; const plotW = Math.max(1, width - pad.left - pad.right); const plotH = Math.max(1, height - pad.top - pad.bottom);
+  ctx.strokeStyle = 'rgba(139,155,179,.16)'; ctx.lineWidth = 1; ctx.font = '11px ui-monospace, monospace'; ctx.fillStyle = 'rgba(139,155,179,.9)';
+  for (let i=0; i<=4; i++) {{ const y = pad.top + (plotH * i / 4); ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(width - pad.right, y); ctx.stroke(); }}
+  if (!points.length) {{ ctx.fillText('waiting for stream history...', pad.left, pad.top + 22); setText('chart-summary', '0 retained stream points'); return; }}
+  let values = points.map(point => finiteNumber(point[metric])).filter(value => value !== null);
+  if (metric === 'current_price') values = values.concat(points.map(point => finiteNumber(point.target_price)).filter(value => value !== null));
+  const [min, max] = chartBounds(values); const xFor = idx => pad.left + (points.length <= 1 ? plotW : plotW * idx / (points.length - 1)); const yFor = value => pad.top + plotH - ((value - min) / (max - min)) * plotH;
+  for (let i=0; i<=4; i++) {{ const value = max - ((max - min) * i / 4); ctx.fillText(cfg.fmt(value), 8, pad.top + (plotH * i / 4) + 4); }}
+  if (metric === 'current_price') drawSeries(ctx, points.filter(point => finiteNumber(point.target_price) !== null), 'target_price', 'rgba(53,212,154,.7)', xFor, yFor);
+  drawSeries(ctx, points, metric, cfg.color, xFor, yFor);
+  const latest = points[points.length - 1]; setText('chart-primary-label', cfg.label + ' ' + cfg.fmt(latest[metric])); setText('chart-summary', points.length + ' retained stream points · newest at ' + (latest.as_of || latest.recorded_at || '—'));
+}}
 function render(data) {{
   const stream = data.stream || {{}}; const p = stream.latest || {{}};
   setText('stream-status', 'stream: ' + (stream.running ? 'running' : 'stopped') + (stream.last_error ? ' / error' : ''));
@@ -476,9 +546,11 @@ function render(data) {{
   kpi('prob-edge', pct(p.best_edge), 'spread ' + pct(p.best_spread));
   setText('yes-bid', num(p.yes_bid)); setText('yes-ask', num(p.yes_ask)); setText('no-bid', num(p.no_bid)); setText('no-ask', num(p.no_ask)); setText('p-yes', num(p.probability_yes)); setText('p-no', num(p.probability_no));
   setText('liquidity', money(p.orderbook_liquidity)); setText('orderbook-valid', String(p.orderbook_valid ?? '—')); setText('events-seen', stream.events_seen ?? '0'); setText('staleness', seconds(stream.staleness_seconds)); setText('last-error', stream.last_error || '—');
-  setText('warnings-json', JSON.stringify(stream.warnings || [], null, 2)); setText('raw-json', JSON.stringify(p, null, 2));
+  setText('warnings-json', JSON.stringify(stream.warnings || [], null, 2)); setText('raw-json', JSON.stringify(p, null, 2)); renderChart(stream.history || []);
 }}
 async function refresh() {{ try {{ const r = await fetch(API_PATH + tokenQuery(), {{cache:'no-store'}}); if (!r.ok) throw new Error('HTTP ' + r.status); render(await r.json()); }} catch (err) {{ setText('last-error', String(err)); }} }}
+const chartSelect = document.getElementById('chart-metric'); if (chartSelect) chartSelect.addEventListener('change', () => renderChart((window.latestStreamData && window.latestStreamData.stream && window.latestStreamData.stream.history) || INITIAL_DATA.stream.history || []));
+const originalRender = render; render = function(data) {{ window.latestStreamData = data; originalRender(data); }};
 render(INITIAL_DATA); setInterval(refresh, POLL_MS); refresh();
 </script>
 </body>
@@ -685,6 +757,28 @@ def _service_status(name: str) -> dict[str, Any]:
             fields[key] = value
     fields["returncode"] = str(result.returncode)
     return fields
+
+
+def _stream_history_point(payload: Mapping[str, Any], recorded_at: datetime) -> dict[str, Any]:
+    return {
+        "recorded_at": recorded_at.isoformat(),
+        "as_of": payload.get("as_of") or payload.get("btc_ts") or recorded_at.isoformat(),
+        "market_ticker": payload.get("market_ticker"),
+        "current_price": _float_or_none(payload.get("current_price")),
+        "target_price": _float_or_none(payload.get("target_price")),
+        "probability_yes": _float_or_none(payload.get("probability_yes")),
+        "probability_no": _float_or_none(payload.get("probability_no")),
+        "yes_bid": _float_or_none(payload.get("yes_bid")),
+        "yes_ask": _float_or_none(payload.get("yes_ask")),
+        "no_bid": _float_or_none(payload.get("no_bid")),
+        "no_ask": _float_or_none(payload.get("no_ask")),
+        "best_ev_per_dollar": _float_or_none(payload.get("best_ev_per_dollar")),
+        "best_edge": _float_or_none(payload.get("best_edge")),
+        "best_spread": _float_or_none(payload.get("best_spread")),
+        "seconds_to_close": _float_or_none(payload.get("seconds_to_close")),
+        "decision": payload.get("decision"),
+        "monitor_action": payload.get("monitor_action"),
+    }
 
 
 def _json_safe_dict(payload: Mapping[str, Any]) -> dict[str, Any]:
