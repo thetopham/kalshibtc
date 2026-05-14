@@ -242,11 +242,6 @@ def build_realtime_state(
             market_implied_yes=market_implied_yes,
         )
     )
-    monitor_action = _monitor_action(
-        best_side=best_ev_side,
-        best_edge=best_edge,
-        best_ev_per_dollar=best_ev_per_dollar,
-    )
     decision = _stream_decision(
         best_ev_side=best_ev_side,
         best_ev_per_dollar=best_ev_per_dollar,
@@ -254,6 +249,16 @@ def build_realtime_state(
         best_spread=best_spread,
         warnings=warnings,
     )
+    monitor_action = (
+        _monitor_action(
+            best_side=best_ev_side,
+            best_edge=best_edge,
+            best_ev_per_dollar=best_ev_per_dollar,
+        )
+        if decision == "WATCH_ONLY_EV_SIGNAL"
+        else "NO_EDGE"
+    )
+    monitor_side = best_ev_side if monitor_action != "NO_EDGE" else "NONE"
     return {
         "event": "market_state",
         "as_of": now.isoformat(),
@@ -325,6 +330,7 @@ def build_realtime_state(
         "best_side": best_side,
         "best_edge": best_edge,
         "monitor_action": monitor_action,
+        "monitor_side": monitor_side,
         "decision": decision,
         "min_ev_per_dollar": MIN_EV_PER_DOLLAR,
         "min_probability_edge": MIN_PROB_EDGE,
@@ -515,7 +521,10 @@ def _clamp_probability(value: float) -> float:
 def format_realtime_state(payload: Mapping[str, Any]) -> str:
     close_seconds = _seconds_label(payload.get("seconds_to_close"))
     monitor_action = str(payload.get("monitor_action") or "NO_EDGE")
-    monitor_side = payload.get("best_ev_side") if monitor_action != "NO_EDGE" else "NONE"
+    monitor_side = str(
+        payload.get("monitor_side")
+        or (payload.get("best_ev_side") if monitor_action != "NO_EDGE" else "NONE")
+    )
     risk_dollars = float(payload.get("ev_reference_risk_dollars") or EV_REFERENCE_RISK_DOLLARS)
     risk_label = f"ev_${risk_dollars:.0f}"
     best_ev_side = payload.get("best_ev_side") or "NONE"

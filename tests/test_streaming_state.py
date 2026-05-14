@@ -265,8 +265,8 @@ def test_read_only_stream_format_uses_monitor_language_and_warns_on_direction_di
     assert "edge_direction_disagreement" in payload["warnings"]
 
     formatted = format_realtime_state(payload)
-    assert "monitor=EV_NO" in formatted
-    assert "ev_side=NO" in formatted
+    assert "monitor=NO_EDGE" in formatted
+    assert "ev_side=NONE" in formatted
     assert "prob_edge=" in formatted
     assert "ev_per_$=" in formatted
     assert "paper_action_ref" not in formatted
@@ -276,7 +276,7 @@ def test_read_only_stream_format_uses_monitor_language_and_warns_on_direction_di
     assert " stake=$" not in formatted
 
 
-def test_realtime_state_calculates_ev_dollars_and_watch_only_model_disagreement() -> None:
+def test_model_disagreement_keeps_raw_ev_visible_but_suppresses_monitor_signal() -> None:
     now = datetime(2026, 1, 4, 0, 9, tzinfo=UTC)
     base_market = market()
     test_market = KalshiMarket(
@@ -330,13 +330,14 @@ def test_realtime_state_calculates_ev_dollars_and_watch_only_model_disagreement(
     assert payload["best_ev_reference_profit_dollars"] == pytest.approx(
         25.0 * payload["ev_no_per_dollar"]
     )
-    assert payload["monitor_action"] == "EV_NO"
+    assert payload["monitor_action"] == "NO_EDGE"
+    assert payload["monitor_side"] == "NONE"
     assert payload["decision"] == "WATCH_ONLY_MODEL_DISAGREEMENT"
     assert "model_state_probability_gap" in payload["warnings"]
 
     formatted = format_realtime_state(payload)
-    assert "monitor=EV_NO" in formatted
-    assert "ev_side=NO" in formatted
+    assert "monitor=NO_EDGE" in formatted
+    assert "ev_side=NONE" in formatted
     assert "prob_edge=+0.054" in formatted
     assert "ev_per_$=+6.9%" in formatted
     assert "ev_$25=+$1.72" in formatted
@@ -373,7 +374,8 @@ def test_realtime_state_marks_positive_ev_below_buffer_as_watch_only_low_ev() ->
 
     assert payload["best_ev_side"] == "NO"
     assert payload["best_ev_per_dollar"] == pytest.approx(0.833 / 0.78 - 1.0)
-    assert payload["monitor_action"] == "EV_NO"
+    assert payload["monitor_action"] == "NO_EDGE"
+    assert payload["monitor_side"] == "NONE"
     assert payload["decision"] == "WATCH_ONLY_LOW_EV"
 
 
