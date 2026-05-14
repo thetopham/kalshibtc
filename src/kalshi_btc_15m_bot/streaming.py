@@ -6,7 +6,7 @@ import math
 import os
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
@@ -25,6 +25,16 @@ MIN_EV_PER_DOLLAR = 0.08
 MIN_PROB_EDGE = 0.03
 MAX_SPREAD = 0.04
 EV_REFERENCE_RISK_DOLLARS = 25.0
+EXECUTION_BASE_RISK_DOLLARS = 25.0
+EXECUTION_MAX_SIZE_DOLLARS = 25.0
+EXECUTION_MIN_SECONDS_TO_CLOSE = 45.0
+EXECUTION_STOP_LOSS_CENTS = 0.10
+EXECUTION_TAKE_PROFIT_CENTS = 0.12
+EXECUTION_TREND_VELOCITY_DOLLARS_PER_SECOND = 0.25
+EXECUTION_NEAR_STRIKE_DOLLARS = 25.0
+BTC_HISTORY_RETENTION_SECONDS = 180.0
+BTC_TICK_STALE_SECONDS = 5.0
+ORDERBOOK_STALE_SECONDS = 60.0
 ROLLOVER_REFRESH_LEAD_SECONDS = 30.0
 ROLLOVER_RETRY_BEFORE_CLOSE_SECONDS = 2.0
 ROLLOVER_RETRY_AFTER_CLOSE_SECONDS = 1.0
@@ -35,10 +45,39 @@ NO_TRADE_WARNING_DECISIONS = {
     "market_closed_pending_rollover": "NO_TRADE_ROLLOVER_UNSAFE",
     "market_rollover_refresh_failed": "NO_TRADE_ROLLOVER_UNSAFE",
     "invalid_orderbook_quotes": "WATCH_ONLY_INVALID_ORDERBOOK",
+    "btc_tick_stale": "WATCH_ONLY_STALE_MARKET_DATA",
+    "orderbook_quotes_stale": "WATCH_ONLY_STALE_MARKET_DATA",
+    "btc_ws_reconnect_failed": "WATCH_ONLY_STREAM_RECONNECTING",
+    "kalshi_ws_reconnect_failed": "WATCH_ONLY_STREAM_RECONNECTING",
+    "kalshi_ws_auth_reconnect_failed": "WATCH_ONLY_STREAM_RECONNECTING",
     "model_state_probability_gap": "WATCH_ONLY_MODEL_DISAGREEMENT",
     "market_probability_gap": "WATCH_ONLY_MARKET_DISAGREEMENT",
     "supabase_features_stale": "WATCH_ONLY_STALE_SUPABASE_FEATURES",
     "supabase_features_error": "WATCH_ONLY_SUPABASE_FEATURE_ERROR",
+}
+EXECUTION_BLOCKING_WARNINGS = {
+    "invalid_orderbook_quotes",
+    "market_near_close_pending_rollover",
+    "market_closed_pending_rollover",
+    "market_rollover_refresh_failed",
+    "btc_tick_stale",
+    "orderbook_quotes_stale",
+    "btc_ws_reconnect_failed",
+    "kalshi_ws_reconnect_failed",
+    "kalshi_ws_auth_reconnect_failed",
+    "supabase_features_stale",
+    "supabase_features_error",
+}
+STREAM_DATA_BLOCKING_WARNINGS = {
+    "invalid_orderbook_quotes",
+    "market_near_close_pending_rollover",
+    "market_closed_pending_rollover",
+    "market_rollover_refresh_failed",
+    "btc_tick_stale",
+    "orderbook_quotes_stale",
+    "btc_ws_reconnect_failed",
+    "kalshi_ws_reconnect_failed",
+    "kalshi_ws_auth_reconnect_failed",
 }
 
 
@@ -160,6 +199,8 @@ def build_realtime_state(
     rollover_status: str | None = None,
     rollover_old_ticker: str | None = None,
     rollover_retry_in_seconds: float | None = None,
+    btc_history: Sequence[BtcTick] | None = None,
+    stream_warnings: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     now = now or now_utc()
     quoted_market = orderbook.to_market(market)
@@ -178,9 +219,26 @@ def build_realtime_state(
     refresh_failed = bool(last_refresh_error)
     rollover_unsafe = rollover_window or refresh_failed
     orderbook_valid = not orderbook.is_crossed
+    btc_tick_age_seconds = _datetime_age_seconds(now=now, ts=btc.ts)
+    orderbook_age_seconds = _datetime_age_seconds(now=now, ts=orderbook.updated_at)
+    btc_tick_stale = (
+        btc_tick_age_seconds is not None and btc_tick_age_seconds > BTC_TICK_STALE_SECONDS
+    )
+    orderbook_stale = (
+        orderbook_age_seconds is not None and orderbook_age_seconds > ORDERBOOK_STALE_SECONDS
+    )
+    stream_warning_list = list(stream_warnings or [])
+    stream_reconnecting = any(warning in EXECUTION_BLOCKING_WARNINGS for warning in stream_warning_list)
+    market_data_stale = btc_tick_stale or orderbook_stale or stream_reconnecting
     distance_to_target, distance_to_target_pct, direction_state = _target_distance(
         current_price=btc.price,
         target_price=market.target_price,
+    )
+    velocity_features = _btc_velocity_features(
+        current=btc,
+        target_price=market.target_price,
+        history=btc_history or [],
+        now=now,
     )
     probability_yes, probability_source, volatility_15m, distance_z = _close_state_probability_yes(
         current_price=btc.price,
@@ -190,7 +248,8 @@ def build_realtime_state(
         fallback_probability_yes=prediction.probability_yes,
     )
     probability_no = 1.0 - probability_yes
-    quotes_usable = orderbook_valid and not rollover_unsafe
+    regime = _classify_execution_regime(velocity_features=velocity_features)
+    quotes_usable = orderbook_valid and not rollover_unsafe and not market_data_stale
     edge_yes = probability_yes - yes_ask if quotes_usable and 0.0 < yes_ask < 1.0 else None
     edge_no = probability_no - no_ask if quotes_usable and 0.0 < no_ask < 1.0 else None
     best_probability_edge_side, best_probability_edge = _best_side(edge_yes=edge_yes, edge_no=edge_no)
@@ -235,6 +294,11 @@ def build_realtime_state(
         warnings.append("market_rollover_refresh_failed")
     if not orderbook_valid:
         warnings.append("invalid_orderbook_quotes")
+    if btc_tick_stale:
+        warnings.append("btc_tick_stale")
+    if orderbook_stale:
+        warnings.append("orderbook_quotes_stale")
+    warnings.extend(stream_warning_list)
     warnings.extend(
         _state_warnings(
             direction_state=direction_state,
@@ -245,6 +309,9 @@ def build_realtime_state(
             market_implied_yes=market_implied_yes,
         )
     )
+    if "edge_direction_disagreement" in warnings and "countertrend_ev_watch" not in warnings:
+        warnings.append("countertrend_ev_watch")
+    warnings = _dedupe_preserving_order(warnings)
     decision = _stream_decision(
         best_ev_side=best_ev_side,
         best_ev_per_dollar=best_ev_per_dollar,
@@ -262,12 +329,26 @@ def build_realtime_state(
         else "NO_EDGE"
     )
     monitor_side = best_ev_side if monitor_action != "NO_EDGE" else "NONE"
+    execution_decision = _execution_decision(
+        current_price=btc.price,
+        target_price=market.target_price,
+        seconds_to_close=seconds_to_close,
+        yes_ask=yes_ask,
+        no_ask=no_ask,
+        yes_spread=_side_spread("YES", market=quoted_market),
+        no_spread=_side_spread("NO", market=quoted_market),
+        regime=regime,
+        warnings=warnings,
+        velocity_features=velocity_features,
+    )
     return {
         "event": "market_state",
         "as_of": now.isoformat(),
         "btc_source": btc.source,
         "btc_product": btc.product,
         "btc_ts": btc.ts.isoformat(),
+        "btc_tick_age_seconds": btc_tick_age_seconds,
+        "btc_tick_stale": btc_tick_stale,
         "current_price": btc.price,
         "btc_bid": btc.bid,
         "btc_ask": btc.ask,
@@ -293,6 +374,8 @@ def build_realtime_state(
         "distance_to_target": distance_to_target,
         "distance_to_target_pct": distance_to_target_pct,
         "direction_state": direction_state,
+        "btc_velocity_30s": velocity_features.get("btc_velocity_30s"),
+        "regime": regime,
         "probability_yes": probability_yes,
         "probability_no": probability_no,
         "probability_source": probability_source,
@@ -314,6 +397,9 @@ def build_realtime_state(
         "orderbook_liquidity": orderbook.visible_liquidity,
         "liquidity": quoted_market.liquidity,
         "orderbook_valid": orderbook_valid,
+        "orderbook_updated_at": orderbook.updated_at.isoformat() if orderbook.updated_at else None,
+        "orderbook_age_seconds": orderbook_age_seconds,
+        "orderbook_stale": orderbook_stale,
         "edge_yes": edge_yes,
         "edge_no": edge_no,
         "probability_edge_yes": edge_yes,
@@ -335,9 +421,12 @@ def build_realtime_state(
         "monitor_action": monitor_action,
         "monitor_side": monitor_side,
         "decision": decision,
+        "execution_decision": execution_decision,
         "min_ev_per_dollar": MIN_EV_PER_DOLLAR,
         "min_probability_edge": MIN_PROB_EDGE,
         "max_spread": MAX_SPREAD,
+        "stream_warnings": stream_warning_list,
+        "market_data_stale": market_data_stale,
         "warnings": warnings,
         "last_refresh_error": last_refresh_error,
         "prediction_action": prediction.action,
@@ -360,6 +449,229 @@ def _target_distance(*, current_price: float, target_price: float | None) -> tup
     else:
         direction = "BELOW_TARGET"
     return distance, distance_pct, direction
+
+
+def _datetime_age_seconds(*, now: datetime, ts: datetime | None) -> float | None:
+    if ts is None:
+        return None
+    return max(0.0, (now - ts).total_seconds())
+
+
+def _btc_velocity_features(
+    *,
+    current: BtcTick,
+    target_price: float | None,
+    history: Sequence[BtcTick],
+    now: datetime,
+) -> dict[str, Any]:
+    points = sorted(
+        [tick for tick in history if tick.ts <= current.ts and tick.price > 0],
+        key=lambda tick: tick.ts,
+    )
+    return {"btc_velocity_30s": _price_velocity(points, current=current, window_seconds=30.0)}
+
+
+def _prior_tick_for_window(
+    history: list[BtcTick],
+    *,
+    current: BtcTick,
+    window_seconds: float,
+) -> BtcTick | None:
+    if not history:
+        return None
+    cutoff = current.ts.timestamp() - window_seconds
+    older = [tick for tick in history if tick.ts.timestamp() <= cutoff]
+    if not older:
+        return None
+    return max(older, key=lambda tick: tick.ts)
+
+
+def _price_velocity(history: list[BtcTick], *, current: BtcTick, window_seconds: float) -> float | None:
+    prior = _prior_tick_for_window(history, current=current, window_seconds=window_seconds)
+    if prior is None:
+        return None
+    elapsed = (current.ts - prior.ts).total_seconds()
+    if elapsed <= 0:
+        return None
+    return (current.price - prior.price) / elapsed
+
+
+def _classify_execution_regime(*, velocity_features: Mapping[str, Any]) -> str:
+    """Classify the BTC tape using only the 30s slope."""
+    velocity = _primary_btc_velocity(velocity_features)
+    if velocity is None:
+        return "flat_chop"
+    if velocity >= EXECUTION_TREND_VELOCITY_DOLLARS_PER_SECOND:
+        return "uptrend"
+    if velocity <= -EXECUTION_TREND_VELOCITY_DOLLARS_PER_SECOND:
+        return "downtrend"
+    return "flat_chop"
+
+
+def _primary_btc_velocity(velocity_features: Mapping[str, Any]) -> float | None:
+    return _as_optional_float(velocity_features.get("btc_velocity_30s"))
+
+
+def _execution_decision(
+    *,
+    current_price: float,
+    target_price: float | None,
+    seconds_to_close: float | None,
+    yes_ask: float | None,
+    no_ask: float | None,
+    yes_spread: float | None,
+    no_spread: float | None,
+    regime: str,
+    warnings: list[str],
+    velocity_features: Mapping[str, Any],
+) -> dict[str, Any]:
+    """One-slope v1 decision: price vs strike + 30s BTC slope, then hard blockers."""
+
+    blocked_by: list[str] = []
+    side = "NONE"
+    entry_price: float | None = None
+    side_spread: float | None = None
+    velocity_30s = _as_optional_float(velocity_features.get("btc_velocity_30s"))
+
+    if target_price is None or not math.isfinite(target_price) or target_price <= 0:
+        blocked_by.append("missing_target_price")
+        distance_to_strike = None
+    else:
+        distance_to_strike = current_price - target_price
+        if abs(distance_to_strike) < EXECUTION_NEAR_STRIKE_DOLLARS:
+            blocked_by.append("chop_zone")
+
+    if velocity_30s is None:
+        blocked_by.append("missing_btc_velocity_30s")
+
+    if seconds_to_close is None:
+        blocked_by.append("missing_close_clock")
+    elif seconds_to_close < EXECUTION_MIN_SECONDS_TO_CLOSE:
+        blocked_by.append("too_close_to_expiry")
+
+    for warning in warnings:
+        if warning in EXECUTION_BLOCKING_WARNINGS:
+            blocked_by.append(warning)
+
+    if distance_to_strike is not None and velocity_30s is not None and "chop_zone" not in blocked_by:
+        if distance_to_strike > 0 and velocity_30s >= EXECUTION_TREND_VELOCITY_DOLLARS_PER_SECOND:
+            side = "YES"
+            entry_price = yes_ask
+            side_spread = yes_spread
+        elif distance_to_strike < 0 and velocity_30s <= -EXECUTION_TREND_VELOCITY_DOLLARS_PER_SECOND:
+            side = "NO"
+            entry_price = no_ask
+            side_spread = no_spread
+        else:
+            blocked_by.append("slope_not_aligned_with_strike")
+
+    if side in {"YES", "NO"}:
+        if entry_price is None or not (0.0 < entry_price < 1.0):
+            blocked_by.append("invalid_entry_price")
+        if side_spread is None or side_spread > MAX_SPREAD + 1e-9:
+            blocked_by.append("spread_too_wide")
+    elif not blocked_by:
+        blocked_by.append("slope_not_aligned_with_strike")
+
+    confidence = _slope_confidence(velocity_30s)
+    blocked_by = _dedupe_preserving_order(blocked_by)
+    if blocked_by:
+        return _no_trade_execution_decision(regime=regime, confidence=confidence, blocked_by=blocked_by)
+
+    action = f"BUY_{side}"
+    size_dollars = _execution_size()
+    return {
+        "action": action,
+        "side": side,
+        "size_dollars": size_dollars,
+        "entry_price": entry_price,
+        "stop_type": "probability",
+        "stop_price": _contract_stop_price(entry_price),
+        "take_profit_price": _contract_take_profit_price(entry_price),
+        "confidence": confidence,
+        "regime": regime,
+        "reason": _execution_reason(
+            side=side,
+            current_price=current_price,
+            target_price=target_price,
+            velocity_30s=velocity_30s,
+        ),
+        "blocked_by": [],
+    }
+
+
+def _no_trade_execution_decision(*, regime: str, confidence: float, blocked_by: list[str]) -> dict[str, Any]:
+    primary = blocked_by[0] if blocked_by else "no_trade"
+    return {
+        "action": "NO_TRADE",
+        "side": "NONE",
+        "size_dollars": 0.0,
+        "entry_price": None,
+        "stop_type": "none",
+        "stop_price": None,
+        "take_profit_price": None,
+        "confidence": confidence,
+        "regime": regime,
+        "reason": f"blocked by {primary}",
+        "blocked_by": blocked_by,
+    }
+
+
+def _slope_confidence(velocity_30s: float | None) -> float:
+    if velocity_30s is None:
+        return 0.0
+    strength = abs(velocity_30s) / (EXECUTION_TREND_VELOCITY_DOLLARS_PER_SECOND * 4.0)
+    return round(max(0.0, min(1.0, strength)), 4)
+
+
+def _execution_size() -> float:
+    return round(min(EXECUTION_BASE_RISK_DOLLARS, EXECUTION_MAX_SIZE_DOLLARS), 2)
+
+
+def _contract_stop_price(entry_price: float | None) -> float | None:
+    if entry_price is None or not (0.0 < entry_price < 1.0):
+        return None
+    return round(max(0.01, entry_price - EXECUTION_STOP_LOSS_CENTS), 4)
+
+
+def _contract_take_profit_price(entry_price: float | None) -> float | None:
+    if entry_price is None or not (0.0 < entry_price < 1.0):
+        return None
+    return round(min(0.99, entry_price + EXECUTION_TAKE_PROFIT_CENTS), 4)
+
+
+def _execution_reason(
+    *,
+    side: str,
+    current_price: float,
+    target_price: float | None,
+    velocity_30s: float | None,
+) -> str:
+    strike = "unknown strike" if target_price is None else f"strike={target_price:.2f}"
+    slope = "slope unavailable" if velocity_30s is None else f"slope_30s={velocity_30s:.2f}/s"
+    relation = "above" if target_price is not None and current_price > target_price else "below"
+    return f"{side}: price {relation} {strike}; {slope}"
+
+
+def _dedupe_preserving_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
+
+
+def _as_optional_float(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
 
 
 def _close_state_probability_yes(
@@ -430,18 +742,13 @@ def _side_value(side: str | None, *, yes: float | None, no: float | None) -> flo
     return None
 
 
-def _stream_paper_stake(paper_config: Any, *, probability: float, price: float) -> float:
-    if not (0.0 < price < 1.0):
+def _stream_execution_stake(paper_config: Any, *, execution_size: float) -> float:
+    max_position = _as_optional_float(getattr(paper_config, "max_position_dollars", 25.0))
+    if max_position is None or max_position <= 0:
         return 0.0
-    denominator = max(1.0 - price, 1e-6)
-    kelly = max(0.0, (probability - price) / denominator)
-    cap = max(float(getattr(paper_config, "kelly_fraction_cap", 0.10)), 1e-6)
-    scaled = min(1.0, kelly / cap)
-    if scaled <= 0:
+    if execution_size <= 0:
         return 0.0
-    max_position = float(getattr(paper_config, "max_position_dollars", 25.0))
-    stake = max_position * scaled
-    return float(round(min(max_position, max(1.0, stake)), 2))
+    return float(round(min(execution_size, max_position), 2))
 
 
 def _side_spread(side: str | None, *, market: KalshiMarket) -> float | None:
@@ -493,7 +800,7 @@ def _stream_decision(
     return "WATCH_ONLY_EV_SIGNAL"
 
 
-def _fail_closed_payload(payload: dict[str, Any], warning: str, decision: str) -> None:
+def _mark_research_warning(payload: dict[str, Any], warning: str, decision: str) -> None:
     warnings = payload.get("warnings")
     if isinstance(warnings, list):
         if warning not in warnings:
@@ -503,6 +810,20 @@ def _fail_closed_payload(payload: dict[str, Any], warning: str, decision: str) -
     payload["decision"] = decision
     payload["monitor_action"] = "NO_EDGE"
     payload["monitor_side"] = "NONE"
+
+
+def _force_no_trade_warning(payload: dict[str, Any], warning: str, decision: str) -> None:
+    _mark_research_warning(payload, warning, decision)
+    raw_execution = payload.get("execution_decision")
+    execution = raw_execution if isinstance(raw_execution, Mapping) else {}
+    raw_blockers = execution.get("blocked_by") if isinstance(execution, Mapping) else None
+    blockers = list(raw_blockers) if isinstance(raw_blockers, list) else []
+    blockers.append(warning)
+    payload["execution_decision"] = _no_trade_execution_decision(
+        regime=str(execution.get("regime") or payload.get("regime") or "flat_chop"),
+        confidence=_as_float(execution.get("confidence"), default=0.0),
+        blocked_by=_dedupe_preserving_order(blockers),
+    )
 
 
 def _feature_client_from_bot(bot: KalshiBTC15MBot) -> Any | None:
@@ -541,56 +862,30 @@ def _clamp_probability(value: float) -> float:
 
 
 def format_realtime_state(payload: Mapping[str, Any]) -> str:
-    close_seconds = _seconds_label(payload.get("seconds_to_close"))
-    monitor_action = str(payload.get("monitor_action") or "NO_EDGE")
-    monitor_side = str(
-        payload.get("monitor_side")
-        or (payload.get("best_ev_side") if monitor_action != "NO_EDGE" else "NONE")
-    )
-    risk_dollars = float(payload.get("ev_reference_risk_dollars") or EV_REFERENCE_RISK_DOLLARS)
-    risk_label = f"ev_${risk_dollars:.0f}"
-    best_ev_side = payload.get("best_ev_side") or "NONE"
+    raw_execution = payload.get("execution_decision")
+    execution: Mapping[str, Any] = raw_execution if isinstance(raw_execution, Mapping) else {}
+    action = str(execution.get("action") or "NO_TRADE")
+    raw_blocked_by = execution.get("blocked_by")
+    blocked_by = raw_blocked_by if isinstance(raw_blocked_by, list) else []
     lines = [
-        "BTC 15m Kalshi stream market_state",
+        "BTC 15m Kalshi execution_decision",
+        (
+            f"ACTION={action} side={execution.get('side', 'NONE')} "
+            f"size={_fmt_signed_money(execution.get('size_dollars'))} "
+            f"entry={_fmt_probability(execution.get('entry_price'))} "
+            f"stop={_fmt_probability(execution.get('stop_price'))} "
+            f"take_profit={_fmt_probability(execution.get('take_profit_price'))} "
+            f"confidence={_fmt_probability(execution.get('confidence'))} "
+            f"regime={execution.get('regime', payload.get('regime', 'flat_chop'))}"
+        ),
         (
             f"market={payload.get('market_ticker')} target={payload.get('target_price')} "
             f"btc={float(payload.get('current_price') or 0.0):.2f} "
-            f"closes_in={close_seconds}"
+            f"slope_30s={_fmt_velocity(payload.get('btc_velocity_30s'))} "
+            f"closes_in={_seconds_label(payload.get('seconds_to_close'))}"
         ),
-        (
-            f"direction={payload.get('direction_state', 'UNKNOWN')} "
-            f"distance={_fmt_dollars(payload.get('distance_to_target'))} "
-            f"distance_pct={_fmt_pct(payload.get('distance_to_target_pct'))}"
-        ),
-        (
-            f"prob_yes={float(payload.get('probability_yes') or 0.0):.3f} "
-            f"prob_no={float(payload.get('probability_no') or 0.0):.3f} "
-            f"source={payload.get('probability_source', 'unknown')} "
-            f"model_yes={float(payload.get('model_probability_yes') or 0.0):.3f} "
-            f"market_yes={_fmt_probability(payload.get('market_implied_yes'))}"
-        ),
-        (
-            f"book yes={float(payload.get('yes_bid') or 0.0):.3f}/"
-            f"{float(payload.get('yes_ask') or 0.0):.3f} "
-            f"no={float(payload.get('no_bid') or 0.0):.3f}/"
-            f"{float(payload.get('no_ask') or 0.0):.3f} "
-            f"prob_edge_yes={_fmt_edge(payload.get('edge_yes'))} "
-            f"prob_edge_no={_fmt_edge(payload.get('edge_no'))}"
-        ),
-        (
-            f"ev_yes={_fmt_ev_pct(payload.get('ev_yes_per_dollar'))} "
-            f"ev_no={_fmt_ev_pct(payload.get('ev_no_per_dollar'))} "
-            f"best_ev={best_ev_side} {_fmt_ev_pct(payload.get('best_ev_per_dollar'))}"
-        ),
-        (
-            f"monitor={monitor_action} "
-            f"ev_side={monitor_side} "
-            f"prob_edge={_fmt_edge(payload.get('best_edge'))} "
-            f"ev_per_$={_fmt_ev_pct(payload.get('best_ev_per_dollar'))} "
-            f"spread={_fmt_edge(payload.get('best_spread'))} "
-            f"{risk_label}={_fmt_signed_money(payload.get('best_ev_reference_profit_dollars'))} "
-            f"decision={payload.get('decision', 'WATCH_ONLY_UNKNOWN')}"
-        ),
+        f"reason={execution.get('reason', 'no execution decision')}",
+        "blocked_by=" + (",".join(str(item) for item in blocked_by) if blocked_by else "none"),
     ]
     warnings = payload.get("warnings")
     if isinstance(warnings, list) and warnings:
@@ -607,12 +902,14 @@ def format_realtime_state(payload: Mapping[str, Any]) -> str:
     if payload.get("stream_paper", {}).get("enabled"):
         trade_id = payload.get("paper_trade_id") or "none"
         skip = payload.get("paper_trade_skip_reason")
-        lines.append(
-            f"paper_trade_id={trade_id}"
-            + (f" skip={skip}" if skip else "")
-        )
+        lines.append(f"paper_trade_id={trade_id}" + (f" skip={skip}" if skip else ""))
     lines.append(f"boundary: {payload.get('boundary', 'read-only')}")
     return "\n".join(lines)
+
+
+def _fmt_velocity(value: Any) -> str:
+    numeric = _as_optional_float(value)
+    return "n/a" if numeric is None else f"{numeric:+.2f}/s"
 
 
 def kalshi_ws_url_from_rest_url(rest_url: str) -> str:
@@ -723,6 +1020,9 @@ class RealtimeStateStreamer:
         self._rollover_status: str | None = None
         self._rollover_old_ticker: str | None = None
         self._last_refresh_error: str | None = None
+        self._btc_history: list[BtcTick] = []
+        self._btc_stream_warning: str | None = None
+        self._kalshi_stream_warning: str | None = None
 
     def bootstrap(self) -> None:
         self.refresh_market(force=True)
@@ -741,6 +1041,7 @@ class RealtimeStateStreamer:
             ask=None,
             ts=self.clock(),
         )
+        self._record_btc_tick(self.btc)
         self.emit_state(force=True)
 
     def refresh_market(
@@ -888,8 +1189,15 @@ class RealtimeStateStreamer:
         return self.refresh_market(rollover=True, seconds_to_close=seconds_to_close)
 
     def apply_btc_tick(self, tick: BtcTick) -> None:
+        self._btc_stream_warning = None
         self.btc = tick
+        self._record_btc_tick(tick)
         self.emit_state()
+
+    def _record_btc_tick(self, tick: BtcTick) -> None:
+        self._btc_history.append(tick)
+        cutoff = tick.ts.timestamp() - BTC_HISTORY_RETENTION_SECONDS
+        self._btc_history = [item for item in self._btc_history if item.ts.timestamp() >= cutoff]
 
     def apply_kalshi_message(self, message: Mapping[str, Any]) -> None:
         if self.orderbook is None:
@@ -904,6 +1212,7 @@ class RealtimeStateStreamer:
             self.orderbook.apply_delta(msg)
         else:
             return
+        self._kalshi_stream_warning = None
         seq = message.get("seq")
         if isinstance(seq, int):
             self.orderbook.last_seq = seq
@@ -957,6 +1266,8 @@ class RealtimeStateStreamer:
             rollover_status=self._rollover_status,
             rollover_old_ticker=self._rollover_old_ticker,
             rollover_retry_in_seconds=self._rollover_retry_in_seconds(),
+            btc_history=self._btc_history,
+            stream_warnings=self._active_stream_warnings(),
         )
         self._attach_supabase_features(payload, supabase_features, supabase_feature_error)
         if self.paper_trading:
@@ -964,6 +1275,10 @@ class RealtimeStateStreamer:
         self.emit(dump_json(payload) if self.json_output else format_realtime_state(payload))
         self._last_emit_monotonic = now_monotonic
         self._emitted += 1
+
+    def _active_stream_warnings(self) -> list[str]:
+        warnings = [self._btc_stream_warning, self._kalshi_stream_warning]
+        return [warning for warning in warnings if warning]
 
     def _fetch_supabase_features(
         self,
@@ -1000,13 +1315,21 @@ class RealtimeStateStreamer:
             payload["feature_stale"] = bool(supabase_features.stale)
             payload["supabase_features"] = supabase_features.to_jsonable()
             if supabase_features.stale:
-                _fail_closed_payload(payload, "supabase_features_stale", "WATCH_ONLY_STALE_SUPABASE_FEATURES")
+                _force_no_trade_warning(
+                    payload,
+                    "supabase_features_stale",
+                    "WATCH_ONLY_STALE_SUPABASE_FEATURES",
+                )
             return
         if supabase_feature_error:
             payload["feature_source"] = "supabase_tv_datafeed"
             payload["feature_stale"] = True
             payload["supabase_feature_error"] = supabase_feature_error
-            _fail_closed_payload(payload, "supabase_features_error", "WATCH_ONLY_SUPABASE_FEATURE_ERROR")
+            _force_no_trade_warning(
+                payload,
+                "supabase_features_error",
+                "WATCH_ONLY_SUPABASE_FEATURE_ERROR",
+            )
 
     def _apply_stream_paper(
         self,
@@ -1030,37 +1353,43 @@ class RealtimeStateStreamer:
             "managed_positions": [],
         }
 
-        decision = str(payload.get("decision") or "WATCH_ONLY_UNKNOWN")
-        if payload.get("orderbook_valid") is not True:
-            payload["paper_trade_skip_reason"] = f"stream_decision: {decision}"
+        execution = payload.get("execution_decision") if isinstance(payload.get("execution_decision"), Mapping) else {}
+        execution_action = str(execution.get("action") or "NO_TRADE") if isinstance(execution, Mapping) else "NO_TRADE"
+        raw_blocked_by = execution.get("blocked_by") if isinstance(execution, Mapping) else None
+        execution_blockers = list(raw_blocked_by) if isinstance(raw_blocked_by, list) else []
+        if payload.get("orderbook_valid") is not True or payload.get("market_rollover_unsafe") is True:
+            blockers = ",".join(str(item) for item in execution_blockers) if execution_blockers else "none"
+            payload["paper_trade_skip_reason"] = f"execution_decision: {execution_action} blocked_by={blockers}"
             return
-        if payload.get("market_rollover_unsafe") is True:
-            payload["paper_trade_skip_reason"] = f"stream_decision: {decision}"
+        if any(blocker in STREAM_DATA_BLOCKING_WARNINGS for blocker in execution_blockers):
+            blockers = ",".join(str(item) for item in execution_blockers) if execution_blockers else "none"
+            payload["paper_trade_skip_reason"] = f"execution_decision: {execution_action} blocked_by={blockers}"
             return
 
         payload["stream_paper"]["managed_positions"] = self._manage_stream_paper_positions(
             quoted_market,
             now=now,
         )
-        if decision != "WATCH_ONLY_EV_SIGNAL":
-            payload["paper_trade_skip_reason"] = f"stream_decision: {decision}"
+        if execution_action not in {"BUY_YES", "BUY_NO"}:
+            blocked_by = execution.get("blocked_by") if isinstance(execution, Mapping) else None
+            blockers = ",".join(str(item) for item in blocked_by) if isinstance(blocked_by, list) else "none"
+            payload["paper_trade_skip_reason"] = f"execution_decision: {execution_action} blocked_by={blockers}"
             return
 
-        side = str(payload.get("best_ev_side") or "")
+        side = str(execution.get("side") or execution_action.removeprefix("BUY_")) if isinstance(execution, Mapping) else ""
         if side not in {"YES", "NO"}:
-            payload["paper_trade_skip_reason"] = "stream_signal_missing_side"
+            payload["paper_trade_skip_reason"] = "execution_signal_missing_side"
             return
         ask = quoted_market.yes_ask if side == "YES" else quoted_market.no_ask
-        probability = (
-            _as_float(payload.get("probability_yes"), default=0.5)
-            if side == "YES"
-            else _as_float(payload.get("probability_no"), default=0.5)
-        )
         if not (0.0 < ask < 1.0):
-            payload["paper_trade_skip_reason"] = "stream_signal_invalid_ask"
+            payload["paper_trade_skip_reason"] = "execution_signal_invalid_ask"
             return
 
-        stake = _stream_paper_stake(self.bot.config.paper, probability=probability, price=ask)
+        execution_size = _as_float(execution.get("size_dollars"), default=0.0) if isinstance(execution, Mapping) else 0.0
+        stake = _stream_execution_stake(self.bot.config.paper, execution_size=execution_size)
+        if stake <= 0:
+            payload["paper_trade_skip_reason"] = "execution_signal_zero_size"
+            return
         paper_prediction = replace(
             prediction,
             prediction_id=f"stream-{uuid.uuid4()}",
@@ -1072,13 +1401,14 @@ class RealtimeStateStreamer:
             action=f"BUY_{side}",
             side=side,
             edge=_as_float(payload.get("best_edge"), default=0.0),
-            confidence=_as_float(payload.get("confidence"), default=prediction.confidence),
+            confidence=_as_float(execution.get("confidence"), default=prediction.confidence) if isinstance(execution, Mapping) else prediction.confidence,
             stake_dollars=stake,
             reasons=[
                 *prediction.reasons,
                 (
-                    "stream_paper_signal: "
-                    f"decision={decision}; side={side}; "
+                    "stream_paper_execution: "
+                    f"action={execution_action}; side={side}; "
+                    f"size={stake:.2f}; regime={execution.get('regime') if isinstance(execution, Mapping) else 'unknown'}; "
                     f"edge={_fmt_edge(payload.get('best_edge'))}; "
                     f"ev_per_dollar={_fmt_ev_pct(payload.get('best_ev_per_dollar'))}"
                 ),
@@ -1137,34 +1467,50 @@ class RealtimeStateStreamer:
     async def _btc_ws_loop(self, stop: asyncio.Event) -> None:
         websockets = _import_websockets()
         url = btc_ws_url_from_bot(self.bot)
-        async with websockets.connect(url) as ws:
-            if self.bot.config.market_data.provider.lower() == "coinbase":
-                await ws.send(
-                    json.dumps(
-                        {
-                            "type": "subscribe",
-                            "product_ids": [self.bot.config.market_data.product_id],
-                            "channels": ["ticker"],
-                        }
-                    )
+        reconnect_backoff_seconds = 1.0
+        while not stop.is_set():
+            try:
+                async with websockets.connect(url) as ws:
+                    reconnect_backoff_seconds = 1.0
+                    if self.bot.config.market_data.provider.lower() == "coinbase":
+                        await ws.send(
+                            json.dumps(
+                                {
+                                    "type": "subscribe",
+                                    "product_ids": [self.bot.config.market_data.product_id],
+                                    "channels": ["ticker"],
+                                }
+                            )
+                        )
+                    while not stop.is_set():
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                        except TimeoutError:
+                            continue
+                        data = json.loads(raw)
+                        try:
+                            tick = (
+                                parse_binance_book_ticker(data)
+                                if self.bot.config.market_data.provider.lower() == "binance"
+                                else parse_coinbase_ticker(data)
+                            )
+                        except ValueError:
+                            continue
+                        self.apply_btc_tick(tick)
+                        if self._max_events_reached():
+                            stop.set()
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:  # noqa: BLE001 - BTC websocket drops are transient; keep dashboard alive.
+                if stop.is_set():
+                    break
+                self._emit_reconnect_warning(
+                    warning="btc_ws_reconnect_failed",
+                    error=exc,
+                    retry_in_seconds=reconnect_backoff_seconds,
                 )
-            while not stop.is_set():
-                try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
-                except TimeoutError:
-                    continue
-                data = json.loads(raw)
-                try:
-                    tick = (
-                        parse_binance_book_ticker(data)
-                        if self.bot.config.market_data.provider.lower() == "binance"
-                        else parse_coinbase_ticker(data)
-                    )
-                except ValueError:
-                    continue
-                self.apply_btc_tick(tick)
-                if self._max_events_reached():
-                    stop.set()
+                await asyncio.sleep(reconnect_backoff_seconds)
+                reconnect_backoff_seconds = min(reconnect_backoff_seconds * 2.0, 30.0)
 
     async def _kalshi_ws_loop(self, stop: asyncio.Event) -> None:
         websockets = _import_websockets()
@@ -1231,6 +1577,10 @@ class RealtimeStateStreamer:
                 reconnect_backoff_seconds = min(reconnect_backoff_seconds * 2.0, 30.0)
 
     def _emit_reconnect_warning(self, *, warning: str, error: Exception, retry_in_seconds: float) -> None:
+        if warning.startswith("btc_"):
+            self._btc_stream_warning = warning
+        elif warning.startswith("kalshi_"):
+            self._kalshi_stream_warning = warning
         if self.json_output:
             self.emit(
                 dump_json(
@@ -1241,11 +1591,12 @@ class RealtimeStateStreamer:
                     }
                 )
             )
-            return
-        self.emit(
-            f"warning={warning} error={_fmt_error(error)} "
-            f"retry_in={retry_in_seconds:.0f}s"
-        )
+        else:
+            self.emit(
+                f"warning={warning} error={_fmt_error(error)} "
+                f"retry_in={retry_in_seconds:.0f}s"
+            )
+        self.emit_state(force=True)
 
     def _kalshi_rest_url_for_ws(self) -> str:
         if self.bot.config.is_live_mode:

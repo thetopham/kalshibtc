@@ -99,7 +99,7 @@ kbtc15 --config configs/default.toml backtest
 
 ## Dashboard
 
-The dashboard is read-only. With `--stream`, it starts the same websocket BTC/orderbook state collector used by `stream-state`, keeps the latest payload in memory, and serves a live browser dashboard at `/` plus JSON at `/api/stream`. The old ledger/account status page remains available at `/status` and `/api/dashboard`. No dashboard route can scan, submit, cancel, or exit orders.
+The dashboard is read-only. With `--stream`, it starts the same websocket BTC/orderbook state collector used by `stream-state`, keeps the latest payload in memory, and serves a live browser dashboard at `/` plus JSON at `/api/stream`. BTC and Kalshi websocket drops are expected in long sessions; the stream loop reconnects, and the dashboard collector restarts itself after fatal stream errors while surfacing staleness/error text in the Execution Decision card. The old ledger/account status page remains available at `/status` and `/api/dashboard`. No dashboard route can scan, submit, cancel, or exit orders.
 
 ```bash
 # Local-only dashboard, no token required because it binds to loopback
@@ -118,7 +118,27 @@ PY
 kbtc15 --config configs/live-prod.local.toml dashboard --host 0.0.0.0 --port 8792 --scan-interval-seconds 60 --stream --stream-emit-min-interval-seconds 1
 ```
 
-The stream page shows current BTC price, market ticker, target, time to close/expiration, YES/NO top-of-book, state/model probabilities, decision, monitor gate, best EV, probability edge, rollover status, collector warnings, a browser canvas graph of recent BTC price / YES probability / EV / probability edge, and the raw latest stream payload. The `/status` page still shows live account balance/portfolio when the selected config has live credentials loaded, paper and live PnL from the local SQLite ledger, latest predictions, live orders/fills, open positions, service status, and the active safety boundary.
+The stream page now defaults to a single Execution Decision v1 card: `ACTION` (`BUY_YES`, `BUY_NO`, or `NO_TRADE`), position size, entry, suggested stop, suggested take-profit, confidence, regime, reason, and blockers. The older probability model, EV calculations, YES/NO order book, warnings, raw payload, and prediction reasons are still retained under collapsible debug internals for replay and research. The `/status` page still shows live account balance/portfolio when the selected config has live credentials loaded, paper and live PnL from the local SQLite ledger, latest predictions, live orders/fills, open positions, service status, and the active safety boundary.
+
+## Execution Decision v1
+
+The realtime stream now has one deliberately simple operator answer: `execution_decision`. The v1 edge is only:
+
+- BTC above strike + 30s BTC slope above threshold => `BUY_YES`.
+- BTC below strike + 30s BTC slope below negative threshold => `BUY_NO`.
+- Near strike, flat/missing slope, wrong-way slope, bad market data, wide spread, or final seconds => `NO_TRADE`.
+
+The regime label is only a slope label:
+
+- `uptrend`: 30s BTC slope is positive enough.
+- `downtrend`: 30s BTC slope is negative enough.
+- `flat_chop`: 30s BTC slope is missing or too small.
+
+Kalshi probability, EV, model probability, order-book details, and prediction reasons remain in the raw/debug payload for replay, but they do **not** create a competing operator-facing action. A countertrend EV can still be logged as `countertrend_ev_watch`; it does not override price relative to strike plus 30s slope.
+
+Default hard blockers are intentionally few: invalid/crossed order book, spread too wide, too close to expiry, missing close clock, missing target, missing 30s slope, and the configured chop zone around the strike. Doji/wick/trap language is treated as later analysis vocabulary, not a v1 regime ontology.
+
+Sizing is risk-capped and fixed at the configured reference size for allowed paper decisions; `NO_TRADE` always has size 0. Stops and take-profit values are simple suggestions in the payload/UI first. Live orders remain guarded and disabled by default; paper-test the one-slope loop before enabling any live path.
 
 To run the dashboard as a user service:
 

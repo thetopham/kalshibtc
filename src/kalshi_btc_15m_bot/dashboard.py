@@ -7,7 +7,8 @@ import json
 import os
 import subprocess
 import threading
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -390,6 +391,9 @@ def render_stream_dashboard_html(data: Mapping[str, Any], *, api_path: str = "/a
     strategy = _mapping(data.get("strategy"))
     stream = _mapping(data.get("stream"))
     latest = _mapping(stream.get("latest"))
+    execution = _execution_from_payload(latest)
+    execution_blocked_by = execution.get("blocked_by") if isinstance(execution.get("blocked_by"), Sequence) and not isinstance(execution.get("blocked_by"), str) else []
+    execution_blocked_by_text = ", ".join(str(item) for item in execution_blocked_by) if execution_blocked_by else "—"
     boundary = str(data.get("boundary") or latest.get("boundary") or "unknown")
     generated_at = str(data.get("generated_at") or "unknown")
     initial_json = _json_for_script(data)
@@ -416,6 +420,12 @@ def render_stream_dashboard_html(data: Mapping[str, Any], *, api_path: str = "/a
     .grid {{ display:grid; gap:14px; }} .hero {{ grid-template-columns:1.2fr .8fr; }} .kpis {{ grid-template-columns:repeat(4,minmax(0,1fr)); }} .two {{ grid-template-columns:1fr 1fr; margin-top:14px; }}
     .panel {{ background:linear-gradient(180deg, rgba(16,24,38,.94), rgba(8,12,20,.94)); border:1px solid var(--line); border-radius:22px; padding:16px; box-shadow:0 24px 70px rgba(0,0,0,.32); }}
     .big {{ font-size:clamp(38px, 7vw, 78px); font-weight:900; letter-spacing:-.07em; line-height:.92; }}
+    .execution-card {{ border-color:rgba(103,183,255,.45); background:linear-gradient(145deg, rgba(16,24,38,.98), rgba(10,18,30,.98)); }}
+    .execution-action {{ font-size:clamp(44px, 8vw, 94px); font-weight:950; letter-spacing:-.08em; line-height:.9; margin:8px 0 14px; }}
+    .execution-action.buy_yes {{ color:var(--green); }} .execution-action.buy_no {{ color:var(--red); }} .execution-action.no_trade {{ color:var(--yellow); }}
+    .execution-grid {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:12px; }}
+    .execution-item {{ background:rgba(21,31,48,.65); border:1px solid var(--line); border-radius:16px; padding:12px; }}
+    details.debug {{ margin-top:14px; }} details.debug summary {{ cursor:pointer; color:var(--blue); font-weight:800; margin-bottom:10px; }}
     .label {{ color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.09em; }}
     .value {{ font-size:26px; font-weight:800; letter-spacing:-.04em; margin-top:7px; }}
     .hint {{ color:var(--muted); font-size:13px; margin-top:7px; }}
@@ -433,7 +443,7 @@ def render_stream_dashboard_html(data: Mapping[str, Any], *, api_path: str = "/a
     .green {{ color:var(--green); }} .red {{ color:var(--red); }} .yellow {{ color:var(--yellow); }} .blue {{ color:var(--blue); }} .purple {{ color:var(--purple); }}
     pre {{ white-space:pre-wrap; overflow-wrap:anywhere; color:var(--muted); background:#080f1b; border:1px solid var(--line); padding:12px; border-radius:14px; max-height:260px; overflow:auto; }}
     footer {{ color:var(--muted); margin-top:18px; font-size:12px; }}
-    @media (max-width:950px) {{ .hero,.kpis,.two {{ grid-template-columns:1fr; }} main {{ padding:14px; }} }}
+    @media (max-width:950px) {{ .hero,.kpis,.two,.execution-grid {{ grid-template-columns:1fr; }} main {{ padding:14px; }} }}
   </style>
 </head>
 <body>
@@ -452,78 +462,98 @@ def render_stream_dashboard_html(data: Mapping[str, Any], *, api_path: str = "/a
     </div>
   </header>
 
-  <section class="grid hero">
-    <div class="panel">
-      <div class="label">BTC current price</div>
-      <div id="btc-price" class="big">{_money_or_dash(latest.get('current_price'))}</div>
-      <div class="pillrow" style="margin-top:12px">
-        <span class="pill">source: <span id="btc-source">{esc(latest.get('btc_source'))}</span></span>
-        <span class="pill">product: <span id="btc-product">{esc(latest.get('btc_product'))}</span></span>
-        <span class="pill">as_of: <span id="as-of">{esc(latest.get('as_of'))}</span></span>
-      </div>
-      <div class="hint">{esc(boundary)}</div>
+  <section class="panel execution-card">
+    <h2>Execution Decision v1</h2>
+    <div class="label">ACTION</div>
+    <div id="execution-action" class="execution-action {_execution_action_class(execution.get('action'))}">{esc(execution.get('action') or 'NO_TRADE')}</div>
+    <div class="execution-grid">
+      <div class="execution-item"><div class="label">Size</div><div id="execution-size" class="value">{_money_or_dash(execution.get('size_dollars'))}</div></div>
+      <div class="execution-item"><div class="label">Entry</div><div id="execution-entry" class="value">{_num(execution.get('entry_price'), 3)}</div></div>
+      <div class="execution-item"><div class="label">Stop</div><div id="execution-stop" class="value">{_num(execution.get('stop_price'), 3)}</div><div class="hint">type <span id="execution-stop-type">{esc(execution.get('stop_type') or 'none')}</span></div></div>
+      <div class="execution-item"><div class="label">Take profit</div><div id="execution-take-profit" class="value">{_num(execution.get('take_profit_price'), 3)}</div></div>
+      <div class="execution-item"><div class="label">Confidence</div><div id="execution-confidence" class="value">{_pct_or_dash(execution.get('confidence'))}</div></div>
+      <div class="execution-item"><div class="label">Regime</div><div id="execution-regime" class="value">{esc(execution.get('regime') or 'unknown')}</div></div>
+      <div class="execution-item" style="grid-column:span 2"><div class="label">Blocked by</div><div id="execution-blocked-by" class="value">{esc(execution_blocked_by_text)}</div></div>
     </div>
-    <div class="panel">
-      <h2>Market clock</h2>
-      <div class="row"><span class="muted">ticker</span><strong id="market-ticker" class="mono">{esc(latest.get('market_ticker'))}</strong></div>
-      <div class="row"><span class="muted">target</span><strong id="target-price">{_money_or_dash(latest.get('target_price'))}</strong></div>
-      <div class="row"><span class="muted">time till close</span><strong id="seconds-to-close">{_format_seconds(latest.get('seconds_to_close'))}</strong></div>
-      <div class="row"><span class="muted">direction</span><strong id="direction-state">{esc(latest.get('direction_state'))}</strong></div>
-      <div class="row"><span class="muted">rollover</span><strong id="rollover-state">{_rollover_text(latest)}</strong></div>
-    </div>
+    <div class="row" style="margin-top:14px"><span class="muted">Reason</span><strong id="execution-reason">{esc(execution.get('reason') or 'waiting for state')}</strong></div>
+    <div class="hint" id="stream-health">stream {_stream_status_label(stream)} · last update {_format_seconds(stream.get('staleness_seconds'))} · error {esc(stream.get('last_error') or '—')}</div>
+    <div class="hint">{esc(boundary)}</div>
   </section>
 
-  <section class="grid kpis" style="margin-top:14px">
-    {_stream_kpi('Decision', latest.get('decision') or '—', 'Only WATCH_ONLY_EV_SIGNAL is actionable', 'decision')}
-    {_stream_kpi('Monitor', latest.get('monitor_action') or 'NO_EDGE', 'Signal output after all gates', 'monitor')}
-    {_stream_kpi('best_ev', _pct_or_dash(latest.get('best_ev_per_dollar')), f"side {latest.get('best_ev_side') or 'NONE'} · $25 EV {_signed_money_or_dash(latest.get('best_ev_reference_profit_dollars'))}", 'best-ev')}
-    {_stream_kpi('prob_edge', _pct_or_dash(latest.get('best_edge')), f"spread {_pct_or_dash(latest.get('best_spread'))}", 'prob-edge')}
-  </section>
-
-  <section class="panel" style="margin-top:14px">
-    <div class="chart-head">
+  <details class="panel debug">
+    <summary>Debug internals</summary>
+    <section class="grid hero">
       <div>
-        <h2>Live graph</h2>
-        <div id="chart-summary" class="hint">{esc(len(stream.get('history') or []))} retained stream points · newest at {esc(latest.get('as_of'))}</div>
+        <h2>BTC / contract state</h2>
+        <div class="row"><span class="muted">BTC current price</span><strong id="btc-price">{_money_or_dash(latest.get('current_price'))}</strong></div>
+        <div class="row"><span class="muted">source</span><strong id="btc-source">{esc(latest.get('btc_source'))}</strong></div>
+        <div class="row"><span class="muted">product</span><strong id="btc-product">{esc(latest.get('btc_product'))}</strong></div>
+        <div class="row"><span class="muted">as_of</span><strong id="as-of" class="mono">{esc(latest.get('as_of'))}</strong></div>
       </div>
-      <label class="chart-controls" for="chart-metric">metric
-        <select id="chart-metric" aria-label="Chart metric">
-          <option value="current_price">BTC price</option>
-          <option value="probability_yes">YES probability</option>
-          <option value="best_ev_per_dollar">best EV / $</option>
-          <option value="best_edge">prob edge</option>
-        </select>
-      </label>
-    </div>
-    <div class="chart-wrap"><canvas id="stream-chart" width="1100" height="260" aria-label="Live stream history chart"></canvas></div>
-    <div class="chart-legend">
-      <span><span class="legend-dot" style="background:var(--blue)"></span><span id="chart-primary-label">selected metric</span></span>
-      <span><span class="legend-dot" style="background:rgba(53,212,154,.7)"></span>target line when charting BTC price</span>
-    </div>
-  </section>
-
-  <section class="grid two">
-    <div class="panel">
-      <h2>YES / NO orderbook</h2>
-      <div class="quotegrid">
-        <div class="quote yes"><div class="label">YES</div><div class="value">bid <span id="yes-bid">{_num(latest.get('yes_bid'), 3)}</span> / ask <span id="yes-ask">{_num(latest.get('yes_ask'), 3)}</span></div><div class="hint">p_yes <span id="p-yes">{_num(latest.get('probability_yes'), 3)}</span></div></div>
-        <div class="quote no"><div class="label">NO</div><div class="value">bid <span id="no-bid">{_num(latest.get('no_bid'), 3)}</span> / ask <span id="no-ask">{_num(latest.get('no_ask'), 3)}</span></div><div class="hint">p_no <span id="p-no">{_num(latest.get('probability_no'), 3)}</span></div></div>
+      <div>
+        <h2>Market clock</h2>
+        <div class="row"><span class="muted">ticker</span><strong id="market-ticker" class="mono">{esc(latest.get('market_ticker'))}</strong></div>
+        <div class="row"><span class="muted">target</span><strong id="target-price">{_money_or_dash(latest.get('target_price'))}</strong></div>
+        <div class="row"><span class="muted">time till close</span><strong id="seconds-to-close">{_format_seconds(latest.get('seconds_to_close'))}</strong></div>
+        <div class="row"><span class="muted">direction</span><strong id="direction-state">{esc(latest.get('direction_state'))}</strong></div>
+        <div class="row"><span class="muted">rollover</span><strong id="rollover-state">{_rollover_text(latest)}</strong></div>
       </div>
-      <div class="hint">liquidity <span id="liquidity">{_money_or_dash(latest.get('orderbook_liquidity'))}</span> · valid <span id="orderbook-valid">{esc(latest.get('orderbook_valid'))}</span></div>
-    </div>
-    <div class="panel">
-      <h2>Warnings / collector</h2>
-      <div class="row"><span class="muted">events seen</span><strong id="events-seen">{esc(stream.get('events_seen'))}</strong></div>
-      <div class="row"><span class="muted">last update age</span><strong id="staleness">{_format_seconds(stream.get('staleness_seconds'))}</strong></div>
-      <div class="row"><span class="muted">last error</span><strong id="last-error">{esc(stream.get('last_error'))}</strong></div>
-      <pre id="warnings-json">{esc(json.dumps(stream.get('warnings') or [], indent=2, default=str))}</pre>
-    </div>
-  </section>
+    </section>
 
-  <section class="panel" style="margin-top:14px">
-    <h2>Raw latest payload</h2>
-    <pre id="raw-json">{esc(json.dumps(latest or {}, indent=2, sort_keys=True, default=str))}</pre>
-  </section>
+    <section class="grid kpis" style="margin-top:14px">
+      {_stream_kpi('old probability model', _pct_or_dash(latest.get('probability_yes')), f"model {_pct_or_dash(latest.get('model_probability_yes'))} · market {_pct_or_dash(latest.get('market_implied_yes'))}", 'old-probability-model')}
+      {_stream_kpi('best_ev', _pct_or_dash(latest.get('best_ev_per_dollar')), f"side {latest.get('best_ev_side') or 'NONE'} · $25 EV {_signed_money_or_dash(latest.get('best_ev_reference_profit_dollars'))}", 'best-ev')}
+      {_stream_kpi('prob_edge', _pct_or_dash(latest.get('best_edge')), f"spread {_pct_or_dash(latest.get('best_spread'))}", 'prob-edge')}
+      {_stream_kpi('legacy monitor', latest.get('monitor_action') or 'NO_EDGE', f"legacy decision {latest.get('decision') or '—'}", 'monitor')}
+    </section>
+
+    <section style="margin-top:14px">
+      <div class="chart-head">
+        <div>
+          <h2>Live graph</h2>
+          <div id="chart-summary" class="hint">{esc(len(stream.get('history') or []))} retained stream points · newest at {esc(latest.get('as_of'))}</div>
+        </div>
+        <label class="chart-controls" for="chart-metric">metric
+          <select id="chart-metric" aria-label="Chart metric">
+            <option value="current_price">BTC price</option>
+            <option value="probability_yes">YES probability</option>
+            <option value="best_ev_per_dollar">best EV / $</option>
+            <option value="best_edge">prob edge</option>
+          </select>
+        </label>
+      </div>
+      <div class="chart-wrap"><canvas id="stream-chart" width="1100" height="260" aria-label="Live stream history chart"></canvas></div>
+      <div class="chart-legend">
+        <span><span class="legend-dot" style="background:var(--blue)"></span><span id="chart-primary-label">selected metric</span></span>
+        <span><span class="legend-dot" style="background:rgba(53,212,154,.7)"></span>target line when charting BTC price</span>
+      </div>
+    </section>
+
+    <section class="grid two">
+      <div>
+        <h2>YES / NO orderbook</h2>
+        <div class="quotegrid">
+          <div class="quote yes"><div class="label">YES</div><div class="value">bid <span id="yes-bid">{_num(latest.get('yes_bid'), 3)}</span> / ask <span id="yes-ask">{_num(latest.get('yes_ask'), 3)}</span></div><div class="hint">p_yes <span id="p-yes">{_num(latest.get('probability_yes'), 3)}</span></div></div>
+          <div class="quote no"><div class="label">NO</div><div class="value">bid <span id="no-bid">{_num(latest.get('no_bid'), 3)}</span> / ask <span id="no-ask">{_num(latest.get('no_ask'), 3)}</span></div><div class="hint">p_no <span id="p-no">{_num(latest.get('probability_no'), 3)}</span></div></div>
+        </div>
+        <div class="hint">liquidity <span id="liquidity">{_money_or_dash(latest.get('orderbook_liquidity'))}</span> · valid <span id="orderbook-valid">{esc(latest.get('orderbook_valid'))}</span></div>
+      </div>
+      <div>
+        <h2>Warnings / collector</h2>
+        <div class="row"><span class="muted">events seen</span><strong id="events-seen">{esc(stream.get('events_seen'))}</strong></div>
+        <div class="row"><span class="muted">last update age</span><strong id="staleness">{_format_seconds(stream.get('staleness_seconds'))}</strong></div>
+        <div class="row"><span class="muted">last error</span><strong id="last-error">{esc(stream.get('last_error'))}</strong></div>
+        <pre id="warnings-json">{esc(json.dumps(stream.get('warnings') or [], indent=2, default=str))}</pre>
+      </div>
+    </section>
+
+    <section style="margin-top:14px">
+      <h2>Prediction reasons</h2>
+      <pre id="prediction-reasons-json">{esc(json.dumps(latest.get('reasons') or [], indent=2, default=str))}</pre>
+      <h2>Raw latest payload</h2>
+      <pre id="raw-json">{esc(json.dumps(latest or {}, indent=2, sort_keys=True, default=str))}</pre>
+    </section>
+  </details>
   <footer>Read-only stream dashboard; no live orders submitted. The collector uses the same stream-state path and never calls scan, submit, cancel, or live order routes. Status dashboard: <a class="blue" href="/status">/status</a>.</footer>
 </main>
 <script>
@@ -573,18 +603,24 @@ function renderChart(history) {{
   drawSeries(ctx, points, metric, cfg.color, xFor, yFor);
   const latest = points[points.length - 1]; setText('chart-primary-label', cfg.label + ' ' + cfg.fmt(latest[metric])); setText('chart-summary', points.length + ' retained stream points · newest at ' + (latest.as_of || latest.recorded_at || '—'));
 }}
+function actionClass(action) {{ return String(action || 'NO_TRADE').toLowerCase(); }}
 function render(data) {{
-  const stream = data.stream || {{}}; const p = stream.latest || {{}};
+  const stream = data.stream || {{}}; const p = stream.latest || {{}}; const execution = p.execution_decision || {{action:'NO_TRADE', blocked_by:[]}};
   setText('stream-status', 'stream: ' + (stream.running ? 'running' : 'stopped') + (stream.last_error ? ' / error' : ''));
+  setText('stream-health', 'stream ' + (stream.running ? 'running' : 'stopped') + ' · last update ' + seconds(stream.staleness_seconds) + ' · error ' + (stream.last_error || '—'));
+  const actionEl = document.getElementById('execution-action');
+  if (actionEl) {{ actionEl.textContent = execution.action || 'NO_TRADE'; actionEl.className = 'execution-action ' + actionClass(execution.action); }}
+  setText('execution-size', money(execution.size_dollars)); setText('execution-entry', num(execution.entry_price)); setText('execution-stop', num(execution.stop_price)); setText('execution-stop-type', execution.stop_type || 'none'); setText('execution-take-profit', num(execution.take_profit_price));
+  setText('execution-confidence', pct(execution.confidence)); setText('execution-regime', execution.regime || 'unknown'); setText('execution-reason', execution.reason || 'waiting for state'); setText('execution-blocked-by', (execution.blocked_by || []).length ? execution.blocked_by.join(', ') : '—');
   setText('btc-price', money(p.current_price)); setText('btc-source', p.btc_source || '—'); setText('btc-product', p.btc_product || '—'); setText('as-of', p.as_of || '—');
   setText('market-ticker', p.market_ticker || '—'); setText('target-price', money(p.target_price)); setText('seconds-to-close', seconds(p.seconds_to_close)); setText('direction-state', p.direction_state || '—');
   setText('rollover-state', p.rollover_status || (p.market_rollover_unsafe ? 'unsafe' : 'clear'));
-  kpi('decision', p.decision || '—', 'Only WATCH_ONLY_EV_SIGNAL is actionable'); kpi('monitor', p.monitor_action || 'NO_EDGE', 'side ' + (p.monitor_side || 'NONE'));
+  kpi('old-probability-model', pct(p.probability_yes), 'model ' + pct(p.model_probability_yes) + ' · market ' + pct(p.market_implied_yes)); kpi('monitor', p.monitor_action || 'NO_EDGE', 'legacy decision ' + (p.decision || '—'));
   kpi('best-ev', pct(p.best_ev_per_dollar), 'side ' + (p.best_ev_side || 'NONE') + ' · $25 EV ' + signedMoney(p.best_ev_reference_profit_dollars));
   kpi('prob-edge', pct(p.best_edge), 'spread ' + pct(p.best_spread));
   setText('yes-bid', num(p.yes_bid)); setText('yes-ask', num(p.yes_ask)); setText('no-bid', num(p.no_bid)); setText('no-ask', num(p.no_ask)); setText('p-yes', num(p.probability_yes)); setText('p-no', num(p.probability_no));
   setText('liquidity', money(p.orderbook_liquidity)); setText('orderbook-valid', String(p.orderbook_valid ?? '—')); setText('events-seen', stream.events_seen ?? '0'); setText('staleness', seconds(stream.staleness_seconds)); setText('last-error', stream.last_error || '—');
-  setText('warnings-json', JSON.stringify(stream.warnings || [], null, 2)); setText('raw-json', JSON.stringify(p, null, 2)); renderChart(stream.history || []);
+  setText('warnings-json', JSON.stringify(stream.warnings || [], null, 2)); setText('prediction-reasons-json', JSON.stringify(p.reasons || [], null, 2)); setText('raw-json', JSON.stringify(p, null, 2)); renderChart(stream.history || []);
 }}
 async function refresh() {{ try {{ const r = await fetch(API_PATH + tokenQuery(), {{cache:'no-store'}}); if (!r.ok) throw new Error('HTTP ' + r.status); render(await r.json()); }} catch (err) {{ setText('last-error', String(err)); }} }}
 const chartSelect = document.getElementById('chart-metric'); if (chartSelect) chartSelect.addEventListener('change', () => renderChart((window.latestStreamData && window.latestStreamData.stream && window.latestStreamData.stream.history) || INITIAL_DATA.stream.history || []));
@@ -593,6 +629,62 @@ render(INITIAL_DATA); setInterval(refresh, POLL_MS); refresh();
 </script>
 </body>
 </html>"""
+
+
+def _run_stream_collector_once(
+    bot: KalshiBTC15MBot,
+    stream_store: StreamSnapshotStore,
+    *,
+    emit_min_interval_seconds: float,
+) -> int:
+    from .streaming import RealtimeStateStreamer
+
+    streamer = RealtimeStateStreamer(
+        bot,
+        json_output=True,
+        emit=stream_store.record_line,
+        emit_min_interval_seconds=emit_min_interval_seconds,
+    )
+    return asyncio.run(streamer.run())
+
+
+def _stream_collector_loop(
+    bot: KalshiBTC15MBot,
+    stream_store: StreamSnapshotStore,
+    *,
+    emit_min_interval_seconds: float,
+    run_once: Callable[..., int] = _run_stream_collector_once,
+    sleep: Callable[[float], None] = time.sleep,
+    initial_backoff_seconds: float = 1.0,
+    max_backoff_seconds: float = 30.0,
+    max_attempts: int | None = None,
+) -> None:
+    attempts = 0
+    reconnect_backoff_seconds = initial_backoff_seconds
+    while max_attempts is None or attempts < max_attempts:
+        attempts += 1
+        stream_store.mark_running(True)
+        try:
+            exit_code = run_once(
+                bot,
+                stream_store,
+                emit_min_interval_seconds=emit_min_interval_seconds,
+            )
+            stream_store.record_warning(
+                {
+                    "warning": "stream_collector_stopped",
+                    "exit_code": exit_code,
+                    "retry_in_seconds": reconnect_backoff_seconds,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - dashboard must display and recover stream failures.
+            stream_store.record_error(exc)
+        finally:
+            stream_store.mark_running(False)
+        if max_attempts is not None and attempts >= max_attempts:
+            break
+        sleep(reconnect_backoff_seconds)
+        reconnect_backoff_seconds = min(reconnect_backoff_seconds * 2.0, max_backoff_seconds)
 
 
 def start_stream_collector(
@@ -604,24 +696,16 @@ def start_stream_collector(
     if emit_min_interval_seconds <= 0:
         raise ValueError("stream_emit_min_interval_seconds must be greater than zero")
 
-    def worker() -> None:
-        stream_store.mark_running(True)
-        try:
-            from .streaming import RealtimeStateStreamer
-
-            streamer = RealtimeStateStreamer(
-                bot,
-                json_output=True,
-                emit=stream_store.record_line,
-                emit_min_interval_seconds=emit_min_interval_seconds,
-            )
-            asyncio.run(streamer.run())
-        except Exception as exc:  # noqa: BLE001 - dashboard must display stream failures.
-            stream_store.record_error(exc)
-        finally:
-            stream_store.mark_running(False)
-
-    thread = threading.Thread(target=worker, name="kbtc15-stream-dashboard", daemon=True)
+    thread = threading.Thread(
+        target=_stream_collector_loop,
+        kwargs={
+            "bot": bot,
+            "stream_store": stream_store,
+            "emit_min_interval_seconds": emit_min_interval_seconds,
+        },
+        name="kbtc15-stream-dashboard",
+        daemon=True,
+    )
     thread.start()
     return thread
 
@@ -715,11 +799,11 @@ def serve_dashboard(
                 return
             self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
-        def log_message(self, fmt: str, *args: Any) -> None:
+        def log_message(self, format: str, *args: Any) -> None:
             # Avoid logging query strings because tokenized URLs may use ?token=.
             parsed = urlparse(self.path)
             safe_path = parsed.path or "/"
-            message = fmt % args
+            message = _sanitize_dashboard_log_message(self.path, format % args)
             print(f"dashboard {self.address_string()} {safe_path} {message}", flush=True)
 
         def _send_json(self, data: Mapping[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
@@ -730,22 +814,28 @@ def serve_dashboard(
             )
 
         def _send(self, body: bytes, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
-            self.send_response(status)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
         def _send_auth_required(self) -> None:
             body = b"dashboard token required\n"
-            self.send_response(HTTPStatus.UNAUTHORIZED)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("WWW-Authenticate", 'Bearer realm="kbtc15-dashboard"')
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(HTTPStatus.UNAUTHORIZED)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("WWW-Authenticate", 'Bearer realm="kbtc15-dashboard"')
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
     httpd = ThreadingHTTPServer((host, port), DashboardHandler)
     print(
@@ -784,6 +874,12 @@ def _is_loopback_bind_host(host: str) -> bool:
         return ipaddress.ip_address(normalized).is_loopback
     except ValueError:
         return False
+
+
+def _sanitize_dashboard_log_message(path: str, message: str) -> str:
+    parsed = urlparse(path)
+    safe_path = parsed.path or "/"
+    return message.replace(path, safe_path)
 
 
 def _is_authorized(token: str | None, query: str, authorization: str | None) -> bool:
@@ -830,6 +926,7 @@ def _service_status(name: str) -> dict[str, Any]:
 
 
 def _stream_history_point(payload: Mapping[str, Any], recorded_at: datetime) -> dict[str, Any]:
+    execution = _execution_from_payload(payload)
     return {
         "recorded_at": recorded_at.isoformat(),
         "as_of": payload.get("as_of") or payload.get("btc_ts") or recorded_at.isoformat(),
@@ -846,6 +943,10 @@ def _stream_history_point(payload: Mapping[str, Any], recorded_at: datetime) -> 
         "best_edge": _float_or_none(payload.get("best_edge")),
         "best_spread": _float_or_none(payload.get("best_spread")),
         "seconds_to_close": _float_or_none(payload.get("seconds_to_close")),
+        "execution_action": execution.get("action"),
+        "execution_side": execution.get("side"),
+        "execution_confidence": _float_or_none(execution.get("confidence")),
+        "execution_regime": execution.get("regime"),
         "decision": payload.get("decision"),
         "monitor_action": payload.get("monitor_action"),
         "feature_source": payload.get("feature_source"),
@@ -901,6 +1002,49 @@ def _rollover_text(latest: Mapping[str, Any]) -> str:
             parts.append(f"retry {_format_seconds(retry)}")
         return " · ".join(parts)
     return "unsafe" if latest.get("market_rollover_unsafe") else "clear"
+
+
+def _execution_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    raw = payload.get("execution_decision")
+    if isinstance(raw, Mapping):
+        blocked_by_raw = raw.get("blocked_by")
+        blocked_by = (
+            [str(item) for item in blocked_by_raw]
+            if isinstance(blocked_by_raw, Sequence) and not isinstance(blocked_by_raw, str)
+            else []
+        )
+        return {
+            "action": str(raw.get("action") or "NO_TRADE"),
+            "side": str(raw.get("side") or "NONE"),
+            "size_dollars": _float_or_none(raw.get("size_dollars")) or 0.0,
+            "entry_price": _float_or_none(raw.get("entry_price")),
+            "stop_type": str(raw.get("stop_type") or "none"),
+            "stop_price": _float_or_none(raw.get("stop_price")),
+            "take_profit_price": _float_or_none(raw.get("take_profit_price")),
+            "confidence": _float_or_none(raw.get("confidence")) or 0.0,
+            "regime": str(raw.get("regime") or payload.get("regime") or "unknown"),
+            "reason": str(raw.get("reason") or "waiting for execution decision"),
+            "blocked_by": blocked_by,
+        }
+    decision = str(payload.get("decision") or "legacy_state")
+    return {
+        "action": "NO_TRADE",
+        "side": "NONE",
+        "size_dollars": 0.0,
+        "entry_price": None,
+        "stop_type": "none",
+        "stop_price": None,
+        "take_profit_price": None,
+        "confidence": 0.0,
+        "regime": str(payload.get("regime") or "unknown"),
+        "reason": f"legacy payload without execution_decision ({decision})",
+        "blocked_by": ["missing_execution_decision"],
+    }
+
+
+def _execution_action_class(action: Any) -> str:
+    normalized = str(action or "NO_TRADE").lower()
+    return normalized if normalized in {"buy_yes", "buy_no", "no_trade"} else "no_trade"
 
 
 def _stream_kpi(label: str, value: Any, hint: Any, field_id: str) -> str:

@@ -9,6 +9,8 @@ import pytest
 from kalshi_btc_15m_bot.dashboard import (
     StreamSnapshotStore,
     _is_authorized,
+    _sanitize_dashboard_log_message,
+    _stream_collector_loop,
     _validate_dashboard_auth,
     collect_dashboard_data,
     collect_stream_dashboard_data,
@@ -154,6 +156,19 @@ def _sample_stream_payload(**overrides: object) -> dict[str, object]:
         "monitor_action": "NO_EDGE",
         "monitor_side": "NONE",
         "decision": "WATCH_ONLY_MODEL_DISAGREEMENT",
+        "execution_decision": {
+            "action": "NO_TRADE",
+            "side": "NONE",
+            "size_dollars": 0.0,
+            "entry_price": None,
+            "stop_type": "none",
+            "stop_price": None,
+            "take_profit_price": None,
+            "confidence": 0.20,
+            "regime": "flat_chop",
+            "reason": "model/market disagreement blocks execution",
+            "blocked_by": ["model_state_probability_gap"],
+        },
         "warnings": ["model_state_probability_gap"],
         "boundary": "read-only websocket market-state stream; no orders submitted",
     }
@@ -283,8 +298,23 @@ def test_render_stream_dashboard_html_includes_live_stream_shell_and_latest_stat
     assert "Kalshi BTC Stream" in text
     assert "/api/stream" in text
     assert "KXBTC15M-TEST" in text
-    assert "WATCH_ONLY_MODEL_DISAGREEMENT" in text
-    assert "NO_EDGE" in text
+    assert "Execution Decision v1" in text
+    assert "ACTION" in text
+    assert "NO_TRADE" in text
+    assert "id=\"execution-action\"" in text
+    assert "id=\"execution-size\"" in text
+    assert "id=\"execution-entry\"" in text
+    assert "id=\"execution-stop\"" in text
+    assert "id=\"execution-take-profit\"" in text
+    assert "id=\"execution-confidence\"" in text
+    assert "id=\"execution-regime\"" in text
+    assert "id=\"execution-reason\"" in text
+    assert "id=\"execution-blocked-by\"" in text
+    assert "id=\"stream-health\"" in text
+    assert "model/market disagreement blocks execution" in text
+    assert "Debug internals" in text
+    assert "Prediction reasons" in text
+    assert "old probability model" in text
     assert "best_ev" in text
     assert "prob_edge" in text
     assert "Live graph" in text
@@ -294,6 +324,45 @@ def test_render_stream_dashboard_html_includes_live_stream_shell_and_latest_stat
     assert "stream.history" in text
     assert "no live orders submitted" in text
     assert "KALSHI_API_KEY" not in text
+
+
+def test_stream_collector_loop_restarts_after_transient_failure() -> None:
+    store = StreamSnapshotStore()
+    attempts: list[float] = []
+    sleeps: list[float] = []
+
+    def run_once(_bot: FakeBot, stream_store: StreamSnapshotStore, *, emit_min_interval_seconds: float) -> int:
+        attempts.append(emit_min_interval_seconds)
+        if len(attempts) == 1:
+            raise RuntimeError("no close frame received or sent")
+        stream_store.record_line(json.dumps(_sample_stream_payload(as_of="2026-05-14T17:01:03+00:00")))
+        return 0
+
+    _stream_collector_loop(
+        FakeBot(),
+        store,
+        emit_min_interval_seconds=0.5,
+        run_once=run_once,
+        sleep=sleeps.append,
+        max_attempts=2,
+    )
+
+    snapshot = store.snapshot()
+    assert attempts == [0.5, 0.5]
+    assert sleeps == [pytest.approx(1.0)]
+    assert snapshot["events_seen"] == 1
+    assert snapshot["latest"]["as_of"] == "2026-05-14T17:01:03+00:00"
+    assert snapshot["running"] is False
+    assert snapshot["warnings"][0]["warning"] == "stream_collector_error"
+
+
+def test_dashboard_log_sanitizer_removes_query_token() -> None:
+    message = '"GET /api/stream?token=secret-token HTTP/1.1" 200 -'
+
+    sanitized = _sanitize_dashboard_log_message("/api/stream?token=secret-token", message)
+
+    assert "secret-token" not in sanitized
+    assert sanitized == '"GET /api/stream HTTP/1.1" 200 -'
 
 
 def test_dashboard_auth_requires_token_for_public_bind() -> None:
