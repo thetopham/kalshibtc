@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from kalshi_btc_15m_bot.config import BotConfig
+from kalshi_btc_15m_bot.ledger import PaperLedger
 from kalshi_btc_15m_bot.models import KalshiMarket, ModelInfo, Prediction
 from kalshi_btc_15m_bot.streaming import (
     BtcTick,
@@ -508,11 +510,67 @@ def test_invalid_crossed_orderbook_suppresses_monitor_edges() -> None:
     assert payload["edge_no"] is None
     assert payload["ev_yes_per_dollar"] is None
     assert payload["ev_no_per_dollar"] is None
+    assert payload["best_ev_side"] is None
+    assert payload["best_ev_per_dollar"] is None
     assert payload["monitor_action"] == "NO_EDGE"
-    assert "invalid_crossed_orderbook" in payload["warnings"]
+    assert payload["decision"] == "WATCH_ONLY_INVALID_ORDERBOOK"
+    assert "invalid_orderbook_quotes" in payload["warnings"]
     formatted = format_realtime_state(payload)
+    assert "ev_yes=n/a ev_no=n/a best_ev=NONE n/a" in formatted
     assert "monitor=NO_EDGE ev_side=NONE" in formatted
-    assert "warnings=invalid_crossed_orderbook" in formatted
+    assert "warnings=invalid_orderbook_quotes" in formatted
+
+
+def test_observed_inverted_orderbook_blocks_ev_and_monitor_signal() -> None:
+    test_market = market()
+    book = KalshiOrderBook.from_snapshot(
+        test_market.ticker,
+        {
+            "yes_dollars_fp": [["0.9990", "2.00"]],
+            "no_dollars_fp": [["0.3400", "3.00"]],
+        },
+    )
+    btc = BtcTick(
+        source="coinbase_ws",
+        product="BTC-USD",
+        price=100_153.0,
+        bid=100_152.0,
+        ask=100_154.0,
+        ts=datetime(2026, 1, 4, 0, 9, 7, tzinfo=UTC),
+    )
+
+    payload = build_realtime_state(
+        prediction(test_market, probability_yes=0.99, feature_snapshot={"vol_16": 0.001}),
+        market=test_market,
+        orderbook=book,
+        btc=btc,
+        now=datetime(2026, 1, 4, 0, 9, 7, tzinfo=UTC),
+    )
+
+    assert payload["yes_bid"] == pytest.approx(0.999)
+    assert payload["yes_ask"] == pytest.approx(0.660)
+    assert payload["no_bid"] == pytest.approx(0.340)
+    assert payload["no_ask"] == pytest.approx(0.001)
+    assert payload["market_implied_yes"] is None
+    assert payload["best_spread"] is None
+    assert payload["orderbook_valid"] is False
+    assert payload["edge_yes"] is None
+    assert payload["edge_no"] is None
+    assert payload["ev_yes_per_dollar"] is None
+    assert payload["ev_no_per_dollar"] is None
+    assert payload["best_ev_side"] is None
+    assert payload["best_ev_per_dollar"] is None
+    assert payload["monitor_action"] == "NO_EDGE"
+    assert payload["decision"] == "WATCH_ONLY_INVALID_ORDERBOOK"
+    assert payload["warnings"] == ["invalid_orderbook_quotes"]
+
+    formatted = format_realtime_state(payload)
+    assert "book yes=0.999/0.660 no=0.340/0.001" in formatted
+    assert "prob_edge_yes=n/a prob_edge_no=n/a" in formatted
+    assert "ev_yes=n/a ev_no=n/a best_ev=NONE n/a" in formatted
+    assert "monitor=NO_EDGE ev_side=NONE prob_edge=n/a ev_per_$=n/a spread=n/a ev_$25=n/a" in formatted
+    assert "decision=WATCH_ONLY_INVALID_ORDERBOOK" in formatted
+    assert "warnings=invalid_orderbook_quotes" in formatted
 
 
 def test_closed_contract_suppresses_monitor_edges_until_rollover() -> None:
@@ -554,6 +612,184 @@ def test_closed_contract_suppresses_monitor_edges_until_rollover() -> None:
     assert payload["monitor_action"] == "NO_EDGE"
     assert payload["decision"] == "NO_TRADE_ROLLOVER_UNSAFE"
     assert "market_closed_pending_rollover" in payload["warnings"]
+
+
+def test_stream_paper_opens_local_paper_trade_on_realtime_ev_signal(tmp_path) -> None:
+    test_market = market()
+    config = replace(BotConfig(), data_dir=tmp_path)
+    emitted: list[str] = []
+
+    class FakePredictor:
+        def predict(self, frame, *, market: KalshiMarket, current_price: float, now: datetime) -> Prediction:
+            return prediction(market, probability_yes=0.82, feature_snapshot={})
+
+    ledger = PaperLedger(config.ledger_path, config.paper)
+    fake_bot = SimpleNamespace(
+        config=config,
+        predictor=FakePredictor(),
+        ledger=ledger,
+    )
+    streamer = RealtimeStateStreamer(
+        fake_bot,
+        json_output=True,
+        emit=emitted.append,
+        emit_min_interval_seconds=0,
+        clock=lambda: datetime(2026, 1, 4, 0, 5, tzinfo=UTC),
+        paper_trading=True,
+    )
+    streamer.market = test_market
+    streamer.orderbook = KalshiOrderBook.from_snapshot(
+        test_market.ticker,
+        {
+            "yes_dollars_fp": [["0.7300", "10.00"]],
+            "no_dollars_fp": [["0.2500", "10.00"]],
+        },
+    )
+    streamer.btc = BtcTick(
+        source="coinbase_ws",
+        product="BTC-USD",
+        price=100_100.0,
+        bid=100_099.0,
+        ask=100_101.0,
+        ts=datetime(2026, 1, 4, 0, 5, tzinfo=UTC),
+    )
+    streamer.frame = object()
+
+    streamer.emit_state(force=True)
+
+    assert len(emitted) == 1
+    payload = json.loads(emitted[0])
+    assert payload["decision"] == "WATCH_ONLY_EV_SIGNAL"
+    assert payload["paper_trade_id"].startswith("paper-")
+    assert payload["paper_trade_skip_reason"] is None
+    assert payload["boundary"] == "websocket paper trader; local paper ledger only; no live orders submitted"
+    assert payload["stream_paper"]["enabled"] is True
+    assert payload["stream_paper"]["opened_side"] == "YES"
+
+    trade = ledger.latest_trades(limit=1)[0]
+    assert trade["status"] == "OPEN"
+    assert trade["side"] == "YES"
+    assert trade["entry_price"] == pytest.approx(0.75)
+    assert trade["notional"] == pytest.approx(config.paper.max_position_dollars)
+
+    recorded = ledger.latest_predictions(limit=1)[0]
+    assert recorded["action"] == "BUY_YES"
+    assert recorded["side"] == "YES"
+    assert recorded["edge"] == pytest.approx(0.07)
+
+
+def test_stream_paper_does_not_trade_invalid_orderbook(tmp_path) -> None:
+    test_market = market()
+    config = replace(BotConfig(), data_dir=tmp_path)
+    emitted: list[str] = []
+
+    class FakePredictor:
+        def predict(self, frame, *, market: KalshiMarket, current_price: float, now: datetime) -> Prediction:
+            return prediction(market, probability_yes=0.99, feature_snapshot={})
+
+    ledger = PaperLedger(config.ledger_path, config.paper)
+    fake_bot = SimpleNamespace(
+        config=config,
+        predictor=FakePredictor(),
+        ledger=ledger,
+    )
+    streamer = RealtimeStateStreamer(
+        fake_bot,
+        json_output=True,
+        emit=emitted.append,
+        emit_min_interval_seconds=0,
+        clock=lambda: datetime(2026, 1, 4, 0, 5, tzinfo=UTC),
+        paper_trading=True,
+    )
+    streamer.market = test_market
+    streamer.orderbook = KalshiOrderBook.from_snapshot(
+        test_market.ticker,
+        {
+            "yes_dollars_fp": [["0.9990", "10.00"]],
+            "no_dollars_fp": [["0.3400", "10.00"]],
+        },
+    )
+    streamer.btc = BtcTick(
+        source="coinbase_ws",
+        product="BTC-USD",
+        price=100_100.0,
+        bid=100_099.0,
+        ask=100_101.0,
+        ts=datetime(2026, 1, 4, 0, 5, tzinfo=UTC),
+    )
+    streamer.frame = object()
+
+    streamer.emit_state(force=True)
+
+    payload = json.loads(emitted[0])
+    assert payload["decision"] == "WATCH_ONLY_INVALID_ORDERBOOK"
+    assert payload["paper_trade_id"] is None
+    assert payload["paper_trade_skip_reason"] == "stream_decision: WATCH_ONLY_INVALID_ORDERBOOK"
+    assert payload["stream_paper"]["opened_side"] is None
+    assert ledger.latest_trades(limit=1) == []
+
+
+def test_stream_paper_does_not_manage_existing_trade_with_invalid_orderbook(tmp_path) -> None:
+    test_market = replace(market(), yes_bid=0.55, yes_ask=0.61, no_bid=0.39, no_ask=0.45)
+    config = replace(BotConfig(), data_dir=tmp_path)
+    emitted: list[str] = []
+
+    class FakePredictor:
+        def predict(self, frame, *, market: KalshiMarket, current_price: float, now: datetime) -> Prediction:
+            return prediction(market, probability_yes=0.99, feature_snapshot={})
+
+    ledger = PaperLedger(config.ledger_path, config.paper)
+    open_prediction = prediction(
+        test_market,
+        action="BUY_YES",
+        stake_dollars=config.paper.max_position_dollars,
+    )
+    ledger.record_prediction(open_prediction)
+    trade_id = ledger.maybe_open_paper_trade(open_prediction)
+    assert trade_id is not None
+
+    fake_bot = SimpleNamespace(
+        config=config,
+        predictor=FakePredictor(),
+        ledger=ledger,
+    )
+    streamer = RealtimeStateStreamer(
+        fake_bot,
+        json_output=True,
+        emit=emitted.append,
+        emit_min_interval_seconds=0,
+        clock=lambda: datetime(2026, 1, 4, 0, 5, tzinfo=UTC),
+        paper_trading=True,
+    )
+    streamer.market = test_market
+    streamer.orderbook = KalshiOrderBook.from_snapshot(
+        test_market.ticker,
+        {
+            "yes_dollars_fp": [["0.9990", "10.00"]],
+            "no_dollars_fp": [["0.3400", "10.00"]],
+        },
+    )
+    streamer.btc = BtcTick(
+        source="coinbase_ws",
+        product="BTC-USD",
+        price=100_100.0,
+        bid=100_099.0,
+        ask=100_101.0,
+        ts=datetime(2026, 1, 4, 0, 5, tzinfo=UTC),
+    )
+    streamer.frame = object()
+
+    streamer.emit_state(force=True)
+
+    payload = json.loads(emitted[0])
+    assert payload["decision"] == "WATCH_ONLY_INVALID_ORDERBOOK"
+    assert payload["stream_paper"]["managed_positions"] == []
+    assert payload["paper_trade_skip_reason"] == "stream_decision: WATCH_ONLY_INVALID_ORDERBOOK"
+    trade = ledger.latest_trades(limit=1)[0]
+    assert trade["id"] == trade_id
+    assert trade["status"] == "OPEN"
+    assert trade["exit_price"] is None
+    assert trade["exit_reason"] is None
 
 
 def test_streamer_refreshes_market_after_contract_close() -> None:
@@ -938,6 +1174,92 @@ def test_kalshi_ws_loop_resubscribes_when_btc_tick_rolls_market(
     asyncio.run(run_loop())
 
     assert subscriptions == [old_market.ticker, new_market.ticker]
+
+
+def test_kalshi_ws_loop_refreshes_auth_and_retries_after_401(monkeypatch: pytest.MonkeyPatch) -> None:
+    test_market = market()
+    emitted: list[str] = []
+    auth_headers: list[dict[str, str]] = []
+    sleep_delays: list[float] = []
+    stop_holder: dict[str, asyncio.Event] = {}
+
+    fake_bot = SimpleNamespace(
+        kalshi=SimpleNamespace(),
+        config=SimpleNamespace(
+            kalshi=SimpleNamespace(
+                base_url="https://external-api.kalshi.com/trade-api/v2",
+                series_ticker="KXBTC15M",
+                market_status="open",
+            ),
+            market_data=SimpleNamespace(request_timeout_seconds=20),
+            is_live_mode=False,
+        ),
+    )
+    streamer = RealtimeStateStreamer(fake_bot, json_output=True, emit=emitted.append)
+    streamer.market = test_market
+    streamer.orderbook = KalshiOrderBook.from_snapshot(
+        test_market.ticker,
+        {"yes_dollars_fp": [["0.5000", "1.00"]], "no_dollars_fp": [["0.4000", "1.00"]]},
+    )
+
+    class Http401(Exception):
+        status_code = 401
+
+    class FakeWs:
+        async def __aenter__(self) -> FakeWs:
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def send(self, raw: str) -> None:
+            message = json.loads(raw)
+            assert message["params"]["market_tickers"] == [test_market.ticker]
+            stop_holder["stop"].set()
+
+        async def recv(self) -> str:
+            raise AssertionError("recv should not run after stop is set by subscribe")
+
+    class FakeWebsockets:
+        def __init__(self) -> None:
+            self.connect_calls = 0
+
+        def connect(self, url: str, *, additional_headers: dict[str, str]):
+            self.connect_calls += 1
+            assert url == "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
+            auth_headers.append(additional_headers)
+            if self.connect_calls == 1:
+                raise Http401("server rejected WebSocket connection: HTTP 401")
+            return FakeWs()
+
+    fake_websockets = FakeWebsockets()
+
+    def fake_auth_headers(_rest_base_url: str, _timeout_seconds: int) -> dict[str, str]:
+        return {"KALSHI-ACCESS-KEY": f"key-{len(auth_headers) + 1}"}
+
+    async def fake_sleep(seconds: float) -> None:
+        sleep_delays.append(seconds)
+
+    monkeypatch.setattr("kalshi_btc_15m_bot.streaming._import_websockets", lambda: fake_websockets)
+    monkeypatch.setattr("kalshi_btc_15m_bot.streaming._kalshi_ws_auth_headers", fake_auth_headers)
+    monkeypatch.setattr("kalshi_btc_15m_bot.streaming.asyncio.sleep", fake_sleep)
+
+    async def run_loop() -> None:
+        stop = asyncio.Event()
+        stop_holder["stop"] = stop
+        await asyncio.wait_for(streamer._kalshi_ws_loop(stop), timeout=1.0)
+
+    asyncio.run(run_loop())
+
+    assert auth_headers == [
+        {"KALSHI-ACCESS-KEY": "key-1"},
+        {"KALSHI-ACCESS-KEY": "key-2"},
+    ]
+    assert sleep_delays == [pytest.approx(1.0)]
+    warning = json.loads(emitted[0])
+    assert warning["warning"] == "kalshi_ws_auth_reconnect_failed"
+    assert "HTTP 401" in warning["error"]
+    assert warning["retry_in_seconds"] == pytest.approx(1.0)
 
 
 def test_websocket_url_and_public_btc_ticker_parsers() -> None:

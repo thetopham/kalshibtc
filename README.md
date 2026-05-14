@@ -68,6 +68,10 @@ kbtc15 --config configs/default.toml run --interval-seconds 60
 # Kalshi WebSocket requires KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY_FILE even when not submitting orders.
 kbtc15 --config configs/default.toml stream-state --emit-min-interval-seconds 1
 
+# Websocket paper trader; same realtime BTC/orderbook state, but opens/closes only local SQLite paper trades
+# Boundary remains paper-only: no Kalshi live orders are submitted by this command.
+kbtc15 --config configs/default.toml stream-paper --emit-min-interval-seconds 1
+
 # Bounded loop for smoke testing service behavior
 kbtc15 --config configs/default.toml run --interval-seconds 1 --max-scans 2
 
@@ -216,8 +220,10 @@ kbtc15 --config configs/default.toml report
 timeout 5s env KALSHI_BTC15M_DASHBOARD_TOKEN=test-token kbtc15 --config configs/default.toml dashboard --host 127.0.0.1 --port 8792 || test $? -eq 124
 kbtc15 --config configs/default.toml live-status
 kbtc15 --config configs/default.toml stream-state --help
+kbtc15 --config configs/default.toml stream-paper --help
 # With Kalshi WebSocket credentials configured outside the repo:
 # kbtc15 --config configs/default.toml stream-state --max-events 3
+# kbtc15 --config configs/default.toml stream-paper --max-events 3
 # With demo credentials configured outside the repo:
 # kbtc15 --config configs/live-demo.local.toml auth-check
 ```

@@ -5,6 +5,7 @@ import json
 import math
 import os
 import time
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -13,6 +14,7 @@ from urllib.parse import urlparse
 
 from .bot import KalshiBTC15MBot, dump_json
 from .kalshi_client import KalshiPublicClient
+from .ledger import evaluate_paper_exit, mark_open_trade_to_market, row_to_dict
 from .live import KalshiAuthenticatedClient, KalshiCredentialError
 from .market_data import candles_to_frame
 from .models import KalshiMarket, Prediction, now_utc, parse_ts
@@ -29,7 +31,7 @@ NO_TRADE_WARNING_DECISIONS = {
     "market_near_close_pending_rollover": "NO_TRADE_ROLLOVER_UNSAFE",
     "market_closed_pending_rollover": "NO_TRADE_ROLLOVER_UNSAFE",
     "market_rollover_refresh_failed": "NO_TRADE_ROLLOVER_UNSAFE",
-    "invalid_crossed_orderbook": "WATCH_ONLY_INVALID_ORDERBOOK",
+    "invalid_orderbook_quotes": "WATCH_ONLY_INVALID_ORDERBOOK",
     "model_state_probability_gap": "WATCH_ONLY_MODEL_DISAGREEMENT",
     "market_probability_gap": "WATCH_ONLY_MARKET_DISAGREEMENT",
 }
@@ -222,7 +224,7 @@ def build_realtime_state(
     if refresh_failed:
         warnings.append("market_rollover_refresh_failed")
     if not orderbook_valid:
-        warnings.append("invalid_crossed_orderbook")
+        warnings.append("invalid_orderbook_quotes")
     warnings.extend(
         _state_warnings(
             direction_state=direction_state,
@@ -407,6 +409,20 @@ def _side_value(side: str | None, *, yes: float | None, no: float | None) -> flo
     return None
 
 
+def _stream_paper_stake(paper_config: Any, *, probability: float, price: float) -> float:
+    if not (0.0 < price < 1.0):
+        return 0.0
+    denominator = max(1.0 - price, 1e-6)
+    kelly = max(0.0, (probability - price) / denominator)
+    cap = max(float(getattr(paper_config, "kelly_fraction_cap", 0.10)), 1e-6)
+    scaled = min(1.0, kelly / cap)
+    if scaled <= 0:
+        return 0.0
+    max_position = float(getattr(paper_config, "max_position_dollars", 25.0))
+    stake = max_position * scaled
+    return float(round(min(max_position, max(1.0, stake)), 2))
+
+
 def _side_spread(side: str | None, *, market: KalshiMarket) -> float | None:
     if side == "YES" and 0.0 < market.yes_bid < market.yes_ask < 1.0:
         return market.yes_ask - market.yes_bid
@@ -538,6 +554,13 @@ def format_realtime_state(payload: Mapping[str, Any]) -> str:
         lines.append(f"warnings={','.join(str(warning) for warning in warnings)}")
     if payload.get("last_refresh_error"):
         lines.append(f"last_refresh_error={_fmt_error(payload.get('last_refresh_error'))}")
+    if payload.get("stream_paper", {}).get("enabled"):
+        trade_id = payload.get("paper_trade_id") or "none"
+        skip = payload.get("paper_trade_skip_reason")
+        lines.append(
+            f"paper_trade_id={trade_id}"
+            + (f" skip={skip}" if skip else "")
+        )
     lines.append(f"boundary: {payload.get('boundary', 'read-only')}")
     return "\n".join(lines)
 
@@ -621,6 +644,7 @@ class RealtimeStateStreamer:
         emit_min_interval_seconds: float = 1.0,
         emit: Callable[[str], None] | None = None,
         clock: Callable[[], datetime] = now_utc,
+        paper_trading: bool = False,
     ) -> None:
         if emit_min_interval_seconds < 0:
             raise ValueError("emit_min_interval_seconds must be >= 0")
@@ -632,6 +656,7 @@ class RealtimeStateStreamer:
         self.emit_min_interval_seconds = emit_min_interval_seconds
         self.emit = emit or (lambda text: print(text, flush=True))
         self.clock = clock
+        self.paper_trading = paper_trading
         self.market: KalshiMarket | None = None
         self.orderbook: KalshiOrderBook | None = None
         self.btc: BtcTick | None = None
@@ -769,9 +794,123 @@ class RealtimeStateStreamer:
             now=now,
             last_refresh_error=self._last_refresh_error,
         )
+        if self.paper_trading:
+            self._apply_stream_paper(prediction, quoted_market=quoted_market, payload=payload, now=now)
         self.emit(dump_json(payload) if self.json_output else format_realtime_state(payload))
         self._last_emit_monotonic = now_monotonic
         self._emitted += 1
+
+    def _apply_stream_paper(
+        self,
+        prediction: Prediction,
+        *,
+        quoted_market: KalshiMarket,
+        payload: dict[str, Any],
+        now: datetime,
+    ) -> None:
+        """Apply local paper-ledger actions to a freshly computed realtime state.
+
+        This is deliberately paper-only. It records a synthetic prediction and
+        opens/closes local ledger rows; it never touches the live-order adapter.
+        """
+        payload["boundary"] = "websocket paper trader; local paper ledger only; no live orders submitted"
+        payload["paper_trade_id"] = None
+        payload["paper_trade_skip_reason"] = None
+        payload["stream_paper"] = {
+            "enabled": True,
+            "opened_side": None,
+            "managed_positions": [],
+        }
+
+        decision = str(payload.get("decision") or "WATCH_ONLY_UNKNOWN")
+        if payload.get("orderbook_valid") is not True:
+            payload["paper_trade_skip_reason"] = f"stream_decision: {decision}"
+            return
+
+        payload["stream_paper"]["managed_positions"] = self._manage_stream_paper_positions(
+            quoted_market,
+            now=now,
+        )
+        if decision != "WATCH_ONLY_EV_SIGNAL":
+            payload["paper_trade_skip_reason"] = f"stream_decision: {decision}"
+            return
+
+        side = str(payload.get("best_ev_side") or "")
+        if side not in {"YES", "NO"}:
+            payload["paper_trade_skip_reason"] = "stream_signal_missing_side"
+            return
+        ask = quoted_market.yes_ask if side == "YES" else quoted_market.no_ask
+        probability = (
+            _as_float(payload.get("probability_yes"), default=0.5)
+            if side == "YES"
+            else _as_float(payload.get("probability_no"), default=0.5)
+        )
+        if not (0.0 < ask < 1.0):
+            payload["paper_trade_skip_reason"] = "stream_signal_invalid_ask"
+            return
+
+        stake = _stream_paper_stake(self.bot.config.paper, probability=probability, price=ask)
+        paper_prediction = replace(
+            prediction,
+            prediction_id=f"stream-{uuid.uuid4()}",
+            created_at=now,
+            market=quoted_market,
+            current_price=float(payload.get("current_price") or prediction.current_price),
+            probability_yes=_as_float(payload.get("probability_yes"), default=prediction.probability_yes),
+            probability_no=_as_float(payload.get("probability_no"), default=prediction.probability_no),
+            action=f"BUY_{side}",
+            side=side,
+            edge=_as_float(payload.get("best_edge"), default=0.0),
+            confidence=_as_float(payload.get("confidence"), default=prediction.confidence),
+            stake_dollars=stake,
+            reasons=[
+                *prediction.reasons,
+                (
+                    "stream_paper_signal: "
+                    f"decision={decision}; side={side}; "
+                    f"edge={_fmt_edge(payload.get('best_edge'))}; "
+                    f"ev_per_dollar={_fmt_ev_pct(payload.get('best_ev_per_dollar'))}"
+                ),
+            ],
+        )
+        self.bot.ledger.record_prediction(paper_prediction)
+        trade_id = self.bot.ledger.maybe_open_paper_trade(paper_prediction)
+        if trade_id is None:
+            payload["paper_trade_skip_reason"] = (
+                self.bot.ledger.paper_entry_skip_reason(paper_prediction) or "paper_entry_rejected"
+            )
+            return
+        payload["paper_trade_id"] = trade_id
+        payload["stream_paper"]["opened_side"] = side
+
+    def _manage_stream_paper_positions(self, quoted_market: KalshiMarket, *, now: datetime) -> list[dict[str, Any]]:
+        managed: list[dict[str, Any]] = []
+        for row in self.bot.ledger.open_trades():
+            data = row_to_dict(row)
+            if data["market_ticker"] != quoted_market.ticker:
+                continue
+            try:
+                mark = mark_open_trade_to_market(data, quoted_market)
+                exit_signal = evaluate_paper_exit(data, mark, self.bot.config.paper, now=now)
+                mark["exit_signal"] = exit_signal or "hold"
+                if exit_signal:
+                    mark["paper_closed"] = bool(
+                        self.bot.ledger.close_paper_trade(
+                            data["id"],
+                            exit_price=float(mark["mark_price"]),
+                            exit_reason=f"stream_{exit_signal}",
+                            closed_at=now,
+                        )
+                    )
+                else:
+                    mark["paper_closed"] = False
+                managed.append(mark)
+            except Exception as exc:  # noqa: BLE001 - keep the stream alive and auditable.
+                data["quote_error"] = _fmt_error(exc)
+                data["exit_signal"] = "unknown"
+                data["paper_closed"] = False
+                managed.append(data)
+        return managed
 
     async def run(self) -> int:
         self.bootstrap()
@@ -820,7 +959,7 @@ class RealtimeStateStreamer:
         websockets = _import_websockets()
         rest_base_url = self._kalshi_rest_url_for_ws()
         url = kalshi_ws_url_from_rest_url(rest_base_url)
-        headers = _kalshi_ws_auth_headers(rest_base_url, self.bot.config.market_data.request_timeout_seconds)
+        reconnect_backoff_seconds = 1.0
         while not stop.is_set():
             if self.market is None:
                 self.refresh_market()
@@ -828,34 +967,74 @@ class RealtimeStateStreamer:
                 await asyncio.sleep(1.0)
                 continue
             subscribed_ticker = self.market.ticker
-            connect = _websockets_connect(websockets, url, headers=headers)
-            async with connect as ws:
-                await ws.send(
-                    json.dumps(
-                        {
-                            "id": 1,
-                            "cmd": "subscribe",
-                            "params": {
-                                "channels": ["orderbook_delta"],
-                                "market_tickers": [subscribed_ticker],
-                            },
-                        }
-                    )
+            try:
+                headers = _kalshi_ws_auth_headers(
+                    rest_base_url,
+                    self.bot.config.market_data.request_timeout_seconds,
                 )
-                while not stop.is_set():
-                    if self.market is not None and self.market.ticker != subscribed_ticker:
-                        break
-                    if self.refresh_market_if_closed(now=self.clock()):
+                connect = _websockets_connect(websockets, url, headers=headers)
+                async with connect as ws:
+                    reconnect_backoff_seconds = 1.0
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "id": 1,
+                                "cmd": "subscribe",
+                                "params": {
+                                    "channels": ["orderbook_delta"],
+                                    "market_tickers": [subscribed_ticker],
+                                },
+                            }
+                        )
+                    )
+                    while not stop.is_set():
                         if self.market is not None and self.market.ticker != subscribed_ticker:
                             break
-                    try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
-                    except TimeoutError:
-                        continue
-                    data = json.loads(raw)
-                    self.apply_kalshi_message(data)
-                    if self._max_events_reached():
-                        stop.set()
+                        if self.refresh_market_if_closed(now=self.clock()):
+                            if self.market is not None and self.market.ticker != subscribed_ticker:
+                                break
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                        except TimeoutError:
+                            continue
+                        data = json.loads(raw)
+                        self.apply_kalshi_message(data)
+                        if self._max_events_reached():
+                            stop.set()
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:  # noqa: BLE001 - websocket loops must reconnect after transient/auth failures.
+                if stop.is_set():
+                    break
+                warning = (
+                    "kalshi_ws_auth_reconnect_failed"
+                    if _is_kalshi_auth_error(exc)
+                    else "kalshi_ws_reconnect_failed"
+                )
+                self._emit_reconnect_warning(
+                    warning=warning,
+                    error=exc,
+                    retry_in_seconds=reconnect_backoff_seconds,
+                )
+                await asyncio.sleep(reconnect_backoff_seconds)
+                reconnect_backoff_seconds = min(reconnect_backoff_seconds * 2.0, 30.0)
+
+    def _emit_reconnect_warning(self, *, warning: str, error: Exception, retry_in_seconds: float) -> None:
+        if self.json_output:
+            self.emit(
+                dump_json(
+                    {
+                        "warning": warning,
+                        "error": _fmt_error(error),
+                        "retry_in_seconds": retry_in_seconds,
+                    }
+                )
+            )
+            return
+        self.emit(
+            f"warning={warning} error={_fmt_error(error)} "
+            f"retry_in={retry_in_seconds:.0f}s"
+        )
 
     def _kalshi_rest_url_for_ws(self) -> str:
         if self.bot.config.is_live_mode:
@@ -883,6 +1062,23 @@ async def run_realtime_state_stream(
         json_output=json_output,
         max_events=max_events,
         emit_min_interval_seconds=emit_min_interval_seconds,
+    )
+    return await streamer.run()
+
+
+async def run_realtime_paper_stream(
+    bot: KalshiBTC15MBot,
+    *,
+    json_output: bool = False,
+    max_events: int | None = None,
+    emit_min_interval_seconds: float = 1.0,
+) -> int:
+    streamer = RealtimeStateStreamer(
+        bot,
+        json_output=json_output,
+        max_events=max_events,
+        emit_min_interval_seconds=emit_min_interval_seconds,
+        paper_trading=True,
     )
     return await streamer.run()
 
@@ -982,6 +1178,14 @@ def _as_float(value: Any, *, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _is_kalshi_auth_error(exc: Exception) -> bool:
+    status_code = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    if status_code == 401:
+        return True
+    text = str(exc).lower()
+    return "401" in text or "unauthorized" in text
 
 
 def _fmt_error(value: Any) -> str:

@@ -45,6 +45,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Stop after N emitted state payloads; useful for smoke tests",
     )
+    stream_paper = sub.add_parser(
+        "stream-paper",
+        help="Websocket paper trader; refreshes BTC/orderbook continuously and writes only local paper trades",
+    )
+    stream_paper.add_argument(
+        "--emit-min-interval-seconds",
+        type=float,
+        default=1.0,
+        help="Minimum seconds between emitted state lines (default: 1.0)",
+    )
+    stream_paper.add_argument(
+        "--max-events",
+        type=int,
+        default=None,
+        help="Stop after N emitted state payloads; useful for smoke tests",
+    )
     run = sub.add_parser("run", help="Continuously run paper scans until stopped")
     run.add_argument(
         "--interval-seconds",
@@ -182,6 +198,18 @@ def main(argv: list[str] | None = None) -> int:
 
             return asyncio.run(
                 run_realtime_state_stream(
+                    bot,
+                    json_output=args.json,
+                    max_events=args.max_events,
+                    emit_min_interval_seconds=args.emit_min_interval_seconds,
+                )
+            )
+
+        if args.command == "stream-paper":
+            from .streaming import run_realtime_paper_stream
+
+            return asyncio.run(
+                run_realtime_paper_stream(
                     bot,
                     json_output=args.json,
                     max_events=args.max_events,
