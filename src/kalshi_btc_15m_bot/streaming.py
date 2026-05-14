@@ -22,9 +22,14 @@ MIN_EV_PER_DOLLAR = 0.08
 MIN_PROB_EDGE = 0.03
 MAX_SPREAD = 0.04
 EV_REFERENCE_RISK_DOLLARS = 25.0
+ROLLOVER_REFRESH_LEAD_SECONDS = 5.0
+INITIAL_MARKET_REFRESH_BACKOFF_SECONDS = 2.0
+MAX_MARKET_REFRESH_BACKOFF_SECONDS = 30.0
 NO_TRADE_WARNING_DECISIONS = {
+    "market_near_close_pending_rollover": "NO_TRADE_ROLLOVER_UNSAFE",
+    "market_closed_pending_rollover": "NO_TRADE_ROLLOVER_UNSAFE",
+    "market_rollover_refresh_failed": "NO_TRADE_ROLLOVER_UNSAFE",
     "invalid_crossed_orderbook": "WATCH_ONLY_INVALID_ORDERBOOK",
-    "market_closed_pending_rollover": "WATCH_ONLY_MARKET_CLOSED",
     "model_state_probability_gap": "WATCH_ONLY_MODEL_DISAGREEMENT",
     "market_probability_gap": "WATCH_ONLY_MARKET_DISAGREEMENT",
 }
@@ -143,6 +148,7 @@ def build_realtime_state(
     orderbook: KalshiOrderBook,
     btc: BtcTick,
     now: datetime | None = None,
+    last_refresh_error: str | None = None,
 ) -> dict[str, Any]:
     now = now or now_utc()
     quoted_market = orderbook.to_market(market)
@@ -154,6 +160,11 @@ def build_realtime_state(
     )
     seconds_to_close = market.seconds_to_close(now)
     market_closed = seconds_to_close is not None and seconds_to_close <= 0
+    rollover_window = (
+        seconds_to_close is not None and seconds_to_close <= ROLLOVER_REFRESH_LEAD_SECONDS
+    )
+    refresh_failed = bool(last_refresh_error)
+    rollover_unsafe = rollover_window or refresh_failed
     orderbook_valid = not orderbook.is_crossed
     distance_to_target, distance_to_target_pct, direction_state = _target_distance(
         current_price=btc.price,
@@ -167,7 +178,7 @@ def build_realtime_state(
         fallback_probability_yes=prediction.probability_yes,
     )
     probability_no = 1.0 - probability_yes
-    quotes_usable = orderbook_valid and not market_closed
+    quotes_usable = orderbook_valid and not rollover_unsafe
     edge_yes = probability_yes - yes_ask if quotes_usable and 0.0 < yes_ask < 1.0 else None
     edge_no = probability_no - no_ask if quotes_usable and 0.0 < no_ask < 1.0 else None
     best_probability_edge_side, best_probability_edge = _best_side(edge_yes=edge_yes, edge_no=edge_no)
@@ -204,10 +215,14 @@ def build_realtime_state(
     )
     market_implied_yes = _market_implied_yes(quoted_market) if quotes_usable else None
     warnings: list[str] = []
+    if rollover_window:
+        warnings.append(
+            "market_closed_pending_rollover" if market_closed else "market_near_close_pending_rollover"
+        )
+    if refresh_failed:
+        warnings.append("market_rollover_refresh_failed")
     if not orderbook_valid:
         warnings.append("invalid_crossed_orderbook")
-    if market_closed:
-        warnings.append("market_closed_pending_rollover")
     warnings.extend(
         _state_warnings(
             direction_state=direction_state,
@@ -251,6 +266,8 @@ def build_realtime_state(
         "seconds_to_probability_cutoff": seconds_to_close,
         "probability_cutoff": "contract_close",
         "market_closed": market_closed,
+        "market_rollover_unsafe": rollover_unsafe,
+        "rollover_refresh_lead_seconds": ROLLOVER_REFRESH_LEAD_SECONDS,
         "distance_to_target": distance_to_target,
         "distance_to_target_pct": distance_to_target_pct,
         "direction_state": direction_state,
@@ -299,6 +316,7 @@ def build_realtime_state(
         "min_probability_edge": MIN_PROB_EDGE,
         "max_spread": MAX_SPREAD,
         "warnings": warnings,
+        "last_refresh_error": last_refresh_error,
         "prediction_action": prediction.action,
         "prediction_side": prediction.side,
         "stake_dollars": prediction.stake_dollars,
@@ -518,6 +536,8 @@ def format_realtime_state(payload: Mapping[str, Any]) -> str:
     warnings = payload.get("warnings")
     if isinstance(warnings, list) and warnings:
         lines.append(f"warnings={','.join(str(warning) for warning in warnings)}")
+    if payload.get("last_refresh_error"):
+        lines.append(f"last_refresh_error={_fmt_error(payload.get('last_refresh_error'))}")
     lines.append(f"boundary: {payload.get('boundary', 'read-only')}")
     return "\n".join(lines)
 
@@ -618,6 +638,9 @@ class RealtimeStateStreamer:
         self.frame = None
         self._last_emit_monotonic = 0.0
         self._emitted = 0
+        self._next_market_refresh_monotonic = 0.0
+        self._market_refresh_backoff_seconds = INITIAL_MARKET_REFRESH_BACKOFF_SECONDS
+        self._last_refresh_error: str | None = None
 
     def bootstrap(self) -> None:
         self.refresh_market(force=True)
@@ -643,25 +666,59 @@ class RealtimeStateStreamer:
 
         Returns True when the streamer moved to a different market ticker, or
         when a forced initial refresh populated the market for the first time.
+        Refresh failures are process-fail-open but signal-fail-closed: keep the
+        previous market/book so the websocket loop stays alive, record the
+        error for operator output, suppress edge output, and schedule
+        exponential backoff.
         """
-        previous_ticker = self.market.ticker if self.market is not None else None
-        market = self.bot.kalshi.current_btc15m_market(
-            self.bot.config.kalshi.series_ticker,
-            status=self.bot.config.kalshi.market_status,
-        )
-        if not force and previous_ticker == market.ticker:
+        now_monotonic = time.monotonic()
+        if not force and now_monotonic < self._next_market_refresh_monotonic:
             return False
+
+        previous_ticker = self.market.ticker if self.market is not None else None
+        try:
+            market = self.bot.kalshi.current_btc15m_market(
+                self.bot.config.kalshi.series_ticker,
+                status=self.bot.config.kalshi.market_status,
+            )
+        except Exception as exc:
+            self._schedule_market_refresh_backoff(now_monotonic, exc)
+            return False
+
+        if not force and previous_ticker == market.ticker:
+            self._last_refresh_error = None
+            self._market_refresh_backoff_seconds = INITIAL_MARKET_REFRESH_BACKOFF_SECONDS
+            self._next_market_refresh_monotonic = now_monotonic + INITIAL_MARKET_REFRESH_BACKOFF_SECONDS
+            return False
+
+        try:
+            orderbook = _rest_orderbook(self.bot.kalshi, market.ticker)
+        except Exception as exc:
+            self._schedule_market_refresh_backoff(now_monotonic, exc)
+            return False
+
         self.market = market
-        self.orderbook = _rest_orderbook(self.bot.kalshi, market.ticker)
+        self.orderbook = orderbook
         self._last_emit_monotonic = 0.0
+        self._next_market_refresh_monotonic = 0.0
+        self._market_refresh_backoff_seconds = INITIAL_MARKET_REFRESH_BACKOFF_SECONDS
+        self._last_refresh_error = None
         return force or previous_ticker != market.ticker
 
+    def _schedule_market_refresh_backoff(self, now_monotonic: float, exc: Exception) -> None:
+        self._last_refresh_error = _fmt_error(exc)
+        self._next_market_refresh_monotonic = now_monotonic + self._market_refresh_backoff_seconds
+        self._market_refresh_backoff_seconds = min(
+            self._market_refresh_backoff_seconds * 2.0,
+            MAX_MARKET_REFRESH_BACKOFF_SECONDS,
+        )
+
     def refresh_market_if_closed(self, *, now: datetime | None = None) -> bool:
-        """Roll to the next Kalshi contract as soon as the current contract closes."""
+        """Roll to the next Kalshi contract shortly before the current contract closes."""
         if self.market is None:
-            return self.refresh_market(force=True)
+            return self.refresh_market()
         seconds_to_close = self.market.seconds_to_close(now or self.clock())
-        if seconds_to_close is None or seconds_to_close > 0:
+        if seconds_to_close is None or seconds_to_close > ROLLOVER_REFRESH_LEAD_SECONDS:
             return False
         return self.refresh_market()
 
@@ -710,6 +767,7 @@ class RealtimeStateStreamer:
             orderbook=self.orderbook,
             btc=self.btc,
             now=now,
+            last_refresh_error=self._last_refresh_error,
         )
         self.emit(dump_json(payload) if self.json_output else format_realtime_state(payload))
         self._last_emit_monotonic = now_monotonic
@@ -765,9 +823,10 @@ class RealtimeStateStreamer:
         headers = _kalshi_ws_auth_headers(rest_base_url, self.bot.config.market_data.request_timeout_seconds)
         while not stop.is_set():
             if self.market is None:
-                self.refresh_market(force=True)
+                self.refresh_market()
             if self.market is None:
-                return
+                await asyncio.sleep(1.0)
+                continue
             subscribed_ticker = self.market.ticker
             connect = _websockets_connect(websockets, url, headers=headers)
             async with connect as ws:
@@ -784,6 +843,8 @@ class RealtimeStateStreamer:
                     )
                 )
                 while not stop.is_set():
+                    if self.market is not None and self.market.ticker != subscribed_ticker:
+                        break
                     if self.refresh_market_if_closed(now=self.clock()):
                         if self.market is not None and self.market.ticker != subscribed_ticker:
                             break
@@ -921,6 +982,13 @@ def _as_float(value: Any, *, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _fmt_error(value: Any) -> str:
+    text = str(value).replace("\n", " ").replace("\r", " ").strip()
+    if len(text) > 200:
+        return text[:197] + "..."
+    return text or "unknown"
 
 
 def _seconds_label(value: Any) -> str:

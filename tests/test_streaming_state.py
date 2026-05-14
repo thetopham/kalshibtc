@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -549,7 +552,7 @@ def test_closed_contract_suppresses_monitor_edges_until_rollover() -> None:
     assert payload["ev_yes_per_dollar"] is None
     assert payload["ev_no_per_dollar"] is None
     assert payload["monitor_action"] == "NO_EDGE"
-    assert payload["decision"] == "WATCH_ONLY_MARKET_CLOSED"
+    assert payload["decision"] == "NO_TRADE_ROLLOVER_UNSAFE"
     assert "market_closed_pending_rollover" in payload["warnings"]
 
 
@@ -611,6 +614,330 @@ def test_streamer_refreshes_market_after_contract_close() -> None:
     assert streamer.orderbook is not None
     assert streamer.orderbook.market_ticker == new_market.ticker
     assert fake_kalshi.market_refreshes == 1
+
+
+def test_streamer_starts_rollover_refresh_inside_five_second_window() -> None:
+    old_market = market()
+    new_market = replace(
+        old_market,
+        ticker="KXBTC15M-TEST-60",
+        event_ticker="KXBTC15M-TEST-NEXT",
+        target_price=100_250.0,
+        open_time=datetime(2026, 1, 4, 0, 10, tzinfo=UTC),
+        close_time=datetime(2026, 1, 4, 0, 25, tzinfo=UTC),
+        expected_expiration_time=datetime(2026, 1, 4, 0, 30, tzinfo=UTC),
+        raw={},
+    )
+
+    class FakeKalshi:
+        def __init__(self) -> None:
+            self.market_refreshes = 0
+
+        def current_btc15m_market(self, series_ticker: str, status: str) -> KalshiMarket:
+            self.market_refreshes += 1
+            assert series_ticker == "KXBTC15M"
+            assert status == "open"
+            return new_market
+
+        def get_orderbook(self, ticker: str, *, depth: int | None = None) -> dict:
+            assert ticker == new_market.ticker
+            assert depth == 100
+            return {
+                "orderbook_fp": {
+                    "yes_dollars_fp": [["0.4000", "1.00"]],
+                    "no_dollars_fp": [["0.5000", "1.00"]],
+                }
+            }
+
+    fake_kalshi = FakeKalshi()
+    fake_bot = SimpleNamespace(
+        kalshi=fake_kalshi,
+        config=SimpleNamespace(
+            kalshi=SimpleNamespace(series_ticker="KXBTC15M", market_status="open"),
+            market_data=SimpleNamespace(request_timeout_seconds=20),
+            is_live_mode=False,
+        ),
+    )
+    streamer = RealtimeStateStreamer(fake_bot, emit=lambda _: None)
+    streamer.market = old_market
+    streamer.orderbook = KalshiOrderBook.from_snapshot(
+        old_market.ticker,
+        {"yes_dollars_fp": [["0.5000", "1.00"]], "no_dollars_fp": [["0.4000", "1.00"]]},
+    )
+
+    refreshed = streamer.refresh_market_if_closed(now=datetime(2026, 1, 4, 0, 9, 56, tzinfo=UTC))
+
+    assert refreshed is True
+    assert streamer.market == new_market
+    assert streamer.orderbook is not None
+    assert streamer.orderbook.market_ticker == new_market.ticker
+    assert fake_kalshi.market_refreshes == 1
+
+
+def test_streamer_refresh_rate_limit_error_keeps_stale_market_and_backs_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monotonic_now = 100.0
+    monkeypatch.setattr("kalshi_btc_15m_bot.streaming.time.monotonic", lambda: monotonic_now)
+    old_market = market()
+    old_book = KalshiOrderBook.from_snapshot(
+        old_market.ticker,
+        {"yes_dollars_fp": [["0.5000", "1.00"]], "no_dollars_fp": [["0.4000", "1.00"]]},
+    )
+
+    class RateLimitedKalshi:
+        def __init__(self) -> None:
+            self.market_refreshes = 0
+
+        def current_btc15m_market(self, series_ticker: str, status: str) -> KalshiMarket:
+            self.market_refreshes += 1
+            assert series_ticker == "KXBTC15M"
+            assert status == "open"
+            raise RuntimeError("429 Client Error: Too Many Requests")
+
+        def get_orderbook(self, ticker: str, *, depth: int | None = None) -> dict:
+            raise AssertionError("orderbook should not be fetched when market refresh is rate-limited")
+
+    fake_kalshi = RateLimitedKalshi()
+    fake_bot = SimpleNamespace(
+        kalshi=fake_kalshi,
+        config=SimpleNamespace(
+            kalshi=SimpleNamespace(series_ticker="KXBTC15M", market_status="open"),
+            market_data=SimpleNamespace(request_timeout_seconds=20),
+            is_live_mode=False,
+        ),
+    )
+    streamer = RealtimeStateStreamer(fake_bot, emit=lambda _: None)
+    streamer.market = old_market
+    streamer.orderbook = old_book
+
+    refreshed = streamer.refresh_market_if_closed(now=datetime(2026, 1, 4, 0, 10, 1, tzinfo=UTC))
+
+    assert refreshed is False
+    assert streamer.market == old_market
+    assert streamer.orderbook is old_book
+    assert streamer._last_refresh_error == "429 Client Error: Too Many Requests"
+    assert streamer._next_market_refresh_monotonic == pytest.approx(102.0)
+    assert streamer._market_refresh_backoff_seconds == pytest.approx(4.0)
+    assert fake_kalshi.market_refreshes == 1
+
+    monotonic_now = 101.0
+    refreshed = streamer.refresh_market_if_closed(now=datetime(2026, 1, 4, 0, 10, 2, tzinfo=UTC))
+
+    assert refreshed is False
+    assert fake_kalshi.market_refreshes == 1
+
+    monotonic_now = 103.0
+    refreshed = streamer.refresh_market_if_closed(now=datetime(2026, 1, 4, 0, 10, 3, tzinfo=UTC))
+
+    assert refreshed is False
+    assert fake_kalshi.market_refreshes == 2
+    assert streamer._next_market_refresh_monotonic == pytest.approx(107.0)
+    assert streamer._market_refresh_backoff_seconds == pytest.approx(8.0)
+
+
+def test_streamer_orderbook_refresh_error_keeps_previous_market_and_backs_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("kalshi_btc_15m_bot.streaming.time.monotonic", lambda: 200.0)
+    old_market = market()
+    new_market = replace(
+        old_market,
+        ticker="KXBTC15M-TEST-60",
+        event_ticker="KXBTC15M-TEST-NEXT",
+        close_time=datetime(2026, 1, 4, 0, 25, tzinfo=UTC),
+    )
+    old_book = KalshiOrderBook.from_snapshot(
+        old_market.ticker,
+        {"yes_dollars_fp": [["0.5000", "1.00"]], "no_dollars_fp": [["0.4000", "1.00"]]},
+    )
+
+    class OrderbookRateLimitedKalshi:
+        def current_btc15m_market(self, series_ticker: str, status: str) -> KalshiMarket:
+            assert series_ticker == "KXBTC15M"
+            assert status == "open"
+            return new_market
+
+        def get_orderbook(self, ticker: str, *, depth: int | None = None) -> dict:
+            assert ticker == new_market.ticker
+            assert depth == 100
+            raise RuntimeError("429 Client Error: orderbook rate limited")
+
+    fake_bot = SimpleNamespace(
+        kalshi=OrderbookRateLimitedKalshi(),
+        config=SimpleNamespace(
+            kalshi=SimpleNamespace(series_ticker="KXBTC15M", market_status="open"),
+            market_data=SimpleNamespace(request_timeout_seconds=20),
+            is_live_mode=False,
+        ),
+    )
+    streamer = RealtimeStateStreamer(fake_bot, emit=lambda _: None)
+    streamer.market = old_market
+    streamer.orderbook = old_book
+
+    refreshed = streamer.refresh_market_if_closed(now=datetime(2026, 1, 4, 0, 10, 1, tzinfo=UTC))
+
+    assert refreshed is False
+    assert streamer.market == old_market
+    assert streamer.orderbook is old_book
+    assert streamer._last_refresh_error == "429 Client Error: orderbook rate limited"
+    assert streamer._next_market_refresh_monotonic == pytest.approx(202.0)
+    assert streamer._market_refresh_backoff_seconds == pytest.approx(4.0)
+
+
+def test_realtime_state_exposes_rollover_refresh_error_and_suppresses_edges() -> None:
+    test_market = market()
+    book = KalshiOrderBook.from_snapshot(
+        test_market.ticker,
+        {
+            "yes_dollars_fp": [["0.5500", "2.00"]],
+            "no_dollars_fp": [["0.3500", "3.00"]],
+        },
+    )
+    btc = BtcTick(
+        source="coinbase_ws",
+        product="BTC-USD",
+        price=100_100.0,
+        bid=100_099.0,
+        ask=100_101.0,
+        ts=datetime(2026, 1, 4, 0, 9, 56, tzinfo=UTC),
+    )
+
+    payload = build_realtime_state(
+        prediction(test_market, probability_yes=0.91, feature_snapshot={"vol_16": 0.001}),
+        market=test_market,
+        orderbook=book,
+        btc=btc,
+        now=datetime(2026, 1, 4, 0, 9, 56, tzinfo=UTC),
+        last_refresh_error="429 Client Error: Too Many Requests",
+    )
+
+    assert payload["last_refresh_error"] == "429 Client Error: Too Many Requests"
+    assert payload["market_closed"] is False
+    assert payload["edge_yes"] is None
+    assert payload["edge_no"] is None
+    assert payload["ev_yes_per_dollar"] is None
+    assert payload["ev_no_per_dollar"] is None
+    assert payload["monitor_action"] == "NO_EDGE"
+    assert payload["decision"] == "NO_TRADE_ROLLOVER_UNSAFE"
+    assert "market_near_close_pending_rollover" in payload["warnings"]
+    assert "market_rollover_refresh_failed" in payload["warnings"]
+
+    formatted = format_realtime_state(payload)
+    assert "decision=NO_TRADE_ROLLOVER_UNSAFE" in formatted
+    assert "warnings=market_near_close_pending_rollover,market_rollover_refresh_failed" in formatted
+    assert "last_refresh_error=429 Client Error: Too Many Requests" in formatted
+
+
+def test_kalshi_ws_loop_resubscribes_when_btc_tick_rolls_market(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_market = market()
+    new_market = replace(
+        old_market,
+        ticker="KXBTC15M-TEST-60",
+        event_ticker="KXBTC15M-TEST-NEXT",
+        target_price=100_250.0,
+        open_time=datetime(2026, 1, 4, 0, 10, tzinfo=UTC),
+        close_time=datetime(2026, 1, 4, 0, 25, tzinfo=UTC),
+        expected_expiration_time=datetime(2026, 1, 4, 0, 30, tzinfo=UTC),
+        raw={},
+    )
+    subscriptions: list[str] = []
+
+    fake_bot = SimpleNamespace(
+        kalshi=SimpleNamespace(),
+        config=SimpleNamespace(
+            kalshi=SimpleNamespace(
+                base_url="https://external-api.kalshi.com/trade-api/v2",
+                series_ticker="KXBTC15M",
+                market_status="open",
+            ),
+            market_data=SimpleNamespace(request_timeout_seconds=20),
+            is_live_mode=False,
+        ),
+    )
+    streamer = RealtimeStateStreamer(
+        fake_bot,
+        emit=lambda _: None,
+        clock=lambda: datetime(2026, 1, 4, 0, 0, tzinfo=UTC),
+    )
+    streamer.market = old_market
+    streamer.orderbook = KalshiOrderBook.from_snapshot(
+        old_market.ticker,
+        {"yes_dollars_fp": [["0.5000", "1.00"]], "no_dollars_fp": [["0.4000", "1.00"]]},
+    )
+
+    stop_holder: dict[str, asyncio.Event] = {}
+
+    class FakeWs:
+        def __init__(self, ticker: str) -> None:
+            self.ticker = ticker
+            self.recv_count = 0
+
+        async def __aenter__(self) -> FakeWs:
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def send(self, raw: str) -> None:
+            message = json.loads(raw)
+            subscriptions.append(message["params"]["market_tickers"][0])
+            if len(subscriptions) >= 2:
+                stop_holder["stop"].set()
+
+        async def recv(self) -> str:
+            self.recv_count += 1
+            if self.ticker == old_market.ticker and self.recv_count == 1:
+                streamer.market = new_market
+                streamer.orderbook = KalshiOrderBook.from_snapshot(
+                    new_market.ticker,
+                    {
+                        "yes_dollars_fp": [["0.4000", "1.00"]],
+                        "no_dollars_fp": [["0.5000", "1.00"]],
+                    },
+                )
+                return json.dumps(
+                    {
+                        "type": "orderbook_delta",
+                        "msg": {
+                            "market_ticker": old_market.ticker,
+                            "side": "yes",
+                            "price_dollars": "0.5500",
+                            "delta_fp": "1.00",
+                        },
+                    }
+                )
+            stop_holder["stop"].set()
+            return json.dumps(
+                {
+                    "type": "orderbook_delta",
+                    "msg": {
+                        "market_ticker": self.ticker,
+                        "side": "yes",
+                        "price_dollars": "0.5500",
+                        "delta_fp": "1.00",
+                    },
+                }
+            )
+
+    class FakeWebsockets:
+        def connect(self, url: str, *, additional_headers: dict[str, str]) -> FakeWs:
+            assert url == "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
+            assert additional_headers == {}
+            assert streamer.market is not None
+            return FakeWs(streamer.market.ticker)
+
+    monkeypatch.setattr("kalshi_btc_15m_bot.streaming._import_websockets", lambda: FakeWebsockets())
+    monkeypatch.setattr("kalshi_btc_15m_bot.streaming._kalshi_ws_auth_headers", lambda *_args, **_kwargs: {})
+
+    async def run_loop() -> None:
+        stop = asyncio.Event()
+        stop_holder["stop"] = stop
+        await asyncio.wait_for(streamer._kalshi_ws_loop(stop), timeout=1.0)
+
+    asyncio.run(run_loop())
+
+    assert subscriptions == [old_market.ticker, new_market.ticker]
 
 
 def test_websocket_url_and_public_btc_ticker_parsers() -> None:
