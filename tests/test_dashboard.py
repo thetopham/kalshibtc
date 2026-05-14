@@ -12,6 +12,7 @@ from kalshi_btc_15m_bot.dashboard import (
     _validate_dashboard_auth,
     collect_dashboard_data,
     collect_stream_dashboard_data,
+    dashboard_health_response,
     render_dashboard_html,
     render_stream_dashboard_html,
 )
@@ -225,6 +226,48 @@ def test_collect_stream_dashboard_data_projects_latest_stream_state() -> None:
     assert data["stream"]["history"][-1]["current_price"] == 64321.5
 
 
+def test_collect_stream_dashboard_data_projects_supabase_and_stream_paper_fields() -> None:
+    store = StreamSnapshotStore()
+    store.record_line(
+        json.dumps(
+            _sample_stream_payload(
+                feature_source="supabase_tv_datafeed",
+                feature_stale=False,
+                supabase_features={
+                    "source": "supabase_tv_datafeed",
+                    "symbol": "BTCUSD",
+                    "timeframe": 1,
+                    "feature_age_seconds": 12.0,
+                    "stale": False,
+                    "atr": 120.0,
+                },
+                stream_paper={
+                    "enabled": True,
+                    "opened_side": "YES",
+                    "managed_positions": [
+                        {
+                            "trade_id": "paper-test",
+                            "mark_price": 0.73,
+                            "exit_signal": "hold",
+                            "paper_closed": False,
+                        }
+                    ],
+                },
+            )
+        )
+    )
+
+    data = collect_stream_dashboard_data(FakeBot(), store, include_service_status=False)
+
+    latest = data["stream"]["latest"]
+    assert latest["feature_source"] == "supabase_tv_datafeed"
+    assert latest["feature_stale"] is False
+    assert latest["supabase_features"]["atr"] == pytest.approx(120.0)
+    assert latest["stream_paper"]["managed_positions"][0]["trade_id"] == "paper-test"
+    assert data["stream"]["history"][-1]["feature_stale"] is False
+    assert data["stream"]["history"][-1]["feature_age_seconds"] == pytest.approx(12.0)
+
+
 def test_render_stream_dashboard_html_includes_live_stream_shell_and_latest_state() -> None:
     store = StreamSnapshotStore()
     store.record_line(json.dumps(_sample_stream_payload()))
@@ -258,6 +301,36 @@ def test_dashboard_auth_requires_token_for_public_bind() -> None:
         _validate_dashboard_auth("0.0.0.0", None)
     _validate_dashboard_auth("127.0.0.1", None)
     _validate_dashboard_auth("0.0.0.0", "secret-token")
+
+
+def test_dashboard_health_response_is_ok_without_stream() -> None:
+    payload, status = dashboard_health_response(stream_enabled=False, stream_snapshot=None)
+
+    assert status.value == 200
+    assert payload["ok"] is True
+    assert payload["reasons"] == []
+
+
+def test_dashboard_health_response_returns_503_for_stream_failures() -> None:
+    payload, status = dashboard_health_response(
+        stream_enabled=True,
+        stream_snapshot={
+            "running": False,
+            "events_seen": 2,
+            "updated_at": "2026-05-14T17:01:02+00:00",
+            "staleness_seconds": 99.0,
+            "latest": {"market_ticker": "KXBTC15M-TEST"},
+            "last_error": "kalshi_ws_auth_reconnect_failed",
+        },
+        max_staleness_seconds=10.0,
+    )
+
+    assert status.value == 503
+    assert payload["ok"] is False
+    assert "stream_not_running" in payload["reasons"]
+    assert "stream_latest_stale" in payload["reasons"]
+    assert "stream_last_error" in payload["reasons"]
+    assert payload["stream"]["staleness_seconds"] == 99.0
 
 
 def test_dashboard_auth_accepts_bearer_or_query_token() -> None:

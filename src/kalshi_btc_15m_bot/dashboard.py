@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import ipaddress
 import json
 import os
 import subprocess
@@ -25,6 +26,7 @@ DEFAULT_SERVICE_NAMES = (
 )
 STREAM_WARNING_HISTORY_LIMIT = 8
 STREAM_CHART_HISTORY_LIMIT = 900
+STREAM_HEALTH_MAX_STALENESS_SECONDS = 15.0
 
 
 class StreamSnapshotStore:
@@ -348,6 +350,42 @@ def collect_stream_dashboard_data(
     }
 
 
+def dashboard_health_response(
+    *,
+    stream_enabled: bool,
+    stream_snapshot: Mapping[str, Any] | None,
+    max_staleness_seconds: float = STREAM_HEALTH_MAX_STALENESS_SECONDS,
+) -> tuple[dict[str, Any], HTTPStatus]:
+    """Build the dashboard healthz JSON body and HTTP status."""
+    reasons: list[str] = []
+    snapshot = _mapping(stream_snapshot)
+    stream_summary: dict[str, Any] = {
+        "enabled": stream_enabled,
+        "running": bool(snapshot.get("running")) if stream_enabled else False,
+        "events_seen": _int_or_none(snapshot.get("events_seen")),
+        "updated_at": snapshot.get("updated_at"),
+        "staleness_seconds": _float_or_none(snapshot.get("staleness_seconds")),
+        "max_staleness_seconds": max_staleness_seconds,
+        "last_error": snapshot.get("last_error"),
+    }
+    if stream_enabled:
+        if not snapshot.get("running"):
+            reasons.append("stream_not_running")
+        if not snapshot.get("latest"):
+            reasons.append("stream_latest_missing")
+        staleness_seconds = _float_or_none(snapshot.get("staleness_seconds"))
+        if staleness_seconds is not None and staleness_seconds > max_staleness_seconds:
+            reasons.append("stream_latest_stale")
+        if snapshot.get("last_error"):
+            reasons.append("stream_last_error")
+    payload = {
+        "ok": not reasons,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "reasons": reasons,
+        "stream": stream_summary,
+    }
+    return payload, HTTPStatus.OK if not reasons else HTTPStatus.SERVICE_UNAVAILABLE
+
 def render_stream_dashboard_html(data: Mapping[str, Any], *, api_path: str = "/api/stream") -> str:
     strategy = _mapping(data.get("strategy"))
     stream = _mapping(data.get("stream"))
@@ -599,7 +637,7 @@ def serve_dashboard(
     stream: bool = False,
     stream_emit_min_interval_seconds: float = 1.0,
 ) -> None:
-    token = token or os.getenv("KALSHI_BTC15M_DASHBOARD_TOKEN") or os.getenv("DASHBOARD_AUTH_TOKEN")
+    token = _dashboard_token_from_env(token)
     _validate_dashboard_auth(host, token)
     if port < 1 or port > 65535:
         raise ValueError("dashboard port must be between 1 and 65535")
@@ -624,6 +662,13 @@ def serve_dashboard(
             path = parsed.path.rstrip("/") or "/"
             if path == "/health":
                 self._send_json({"ok": True, "generated_at": datetime.now(UTC).isoformat()})
+                return
+            if path == "/healthz":
+                data, status = dashboard_health_response(
+                    stream_enabled=stream,
+                    stream_snapshot=stream_store.snapshot(),
+                )
+                self._send_json(data, status=status)
                 return
             if not _is_authorized(token, parsed.query, self.headers.get("Authorization")):
                 self._send_auth_required()
@@ -677,8 +722,12 @@ def serve_dashboard(
             message = fmt % args
             print(f"dashboard {self.address_string()} {safe_path} {message}", flush=True)
 
-        def _send_json(self, data: Mapping[str, Any]) -> None:
-            self._send(json.dumps(data, sort_keys=True, indent=2, default=str).encode("utf-8"), "application/json; charset=utf-8")
+        def _send_json(self, data: Mapping[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
+            self._send(
+                json.dumps(data, sort_keys=True, indent=2, default=str).encode("utf-8"),
+                "application/json; charset=utf-8",
+                status=status,
+            )
 
         def _send(self, body: bytes, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
             self.send_response(status)
@@ -708,12 +757,33 @@ def serve_dashboard(
     httpd.serve_forever()
 
 
+def _dashboard_token_from_env(
+    token: str | None,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> str | None:
+    values = os.environ if env is None else env
+    return token or values.get("KALSHI_BTC15M_DASHBOARD_TOKEN") or values.get("DASHBOARD_AUTH_TOKEN")
+
+
 def _validate_dashboard_auth(host: str, token: str | None) -> None:
-    public_hosts = {"0.0.0.0", "::", ""}
-    if host in public_hosts and not token:
+    if not _is_loopback_bind_host(host) and not token:
         raise ValueError(
-            "Dashboard bound to a public/LAN host requires KALSHI_BTC15M_DASHBOARD_TOKEN or --token."
+            "Dashboard bound to a non-loopback host requires "
+            "KALSHI_BTC15M_DASHBOARD_TOKEN or --token."
         )
+
+
+def _is_loopback_bind_host(host: str) -> bool:
+    normalized = (host or "").strip().lower()
+    if normalized in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    if normalized in {"", "0.0.0.0", "::"}:
+        return False
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
 
 
 def _is_authorized(token: str | None, query: str, authorization: str | None) -> bool:
@@ -778,7 +848,17 @@ def _stream_history_point(payload: Mapping[str, Any], recorded_at: datetime) -> 
         "seconds_to_close": _float_or_none(payload.get("seconds_to_close")),
         "decision": payload.get("decision"),
         "monitor_action": payload.get("monitor_action"),
+        "feature_source": payload.get("feature_source"),
+        "feature_stale": payload.get("feature_stale"),
+        "feature_age_seconds": _feature_age_seconds(payload),
     }
+
+
+def _feature_age_seconds(payload: Mapping[str, Any]) -> float | None:
+    features = payload.get("supabase_features")
+    if isinstance(features, Mapping):
+        return _float_or_none(features.get("feature_age_seconds"))
+    return _float_or_none(payload.get("feature_age_seconds"))
 
 
 def _json_safe_dict(payload: Mapping[str, Any]) -> dict[str, Any]:

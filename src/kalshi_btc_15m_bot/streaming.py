@@ -18,6 +18,7 @@ from .ledger import evaluate_paper_exit, mark_open_trade_to_market, row_to_dict
 from .live import KalshiAuthenticatedClient, KalshiCredentialError
 from .market_data import candles_to_frame
 from .models import KalshiMarket, Prediction, now_utc, parse_ts
+from .supabase_features import feature_client_from_config
 
 MIN_MONITOR_EDGE = 0.01
 MIN_EV_PER_DOLLAR = 0.08
@@ -36,6 +37,8 @@ NO_TRADE_WARNING_DECISIONS = {
     "invalid_orderbook_quotes": "WATCH_ONLY_INVALID_ORDERBOOK",
     "model_state_probability_gap": "WATCH_ONLY_MODEL_DISAGREEMENT",
     "market_probability_gap": "WATCH_ONLY_MARKET_DISAGREEMENT",
+    "supabase_features_stale": "WATCH_ONLY_STALE_SUPABASE_FEATURES",
+    "supabase_features_error": "WATCH_ONLY_SUPABASE_FEATURE_ERROR",
 }
 
 
@@ -490,6 +493,25 @@ def _stream_decision(
     return "WATCH_ONLY_EV_SIGNAL"
 
 
+def _fail_closed_payload(payload: dict[str, Any], warning: str, decision: str) -> None:
+    warnings = payload.get("warnings")
+    if isinstance(warnings, list):
+        if warning not in warnings:
+            warnings.append(warning)
+    else:
+        payload["warnings"] = [warning]
+    payload["decision"] = decision
+    payload["monitor_action"] = "NO_EDGE"
+    payload["monitor_side"] = "NONE"
+
+
+def _feature_client_from_bot(bot: KalshiBTC15MBot) -> Any | None:
+    try:
+        return feature_client_from_config(bot.config)
+    except AttributeError:
+        return None
+
+
 def _state_warnings(
     *,
     direction_state: str,
@@ -673,6 +695,7 @@ class RealtimeStateStreamer:
         emit: Callable[[str], None] | None = None,
         clock: Callable[[], datetime] = now_utc,
         paper_trading: bool = False,
+        feature_client: Any | None = None,
     ) -> None:
         if emit_min_interval_seconds < 0:
             raise ValueError("emit_min_interval_seconds must be >= 0")
@@ -685,6 +708,7 @@ class RealtimeStateStreamer:
         self.emit = emit or (lambda text: print(text, flush=True))
         self.clock = clock
         self.paper_trading = paper_trading
+        self.feature_client = feature_client if feature_client is not None else _feature_client_from_bot(bot)
         self.market: KalshiMarket | None = None
         self.orderbook: KalshiOrderBook | None = None
         self.btc: BtcTick | None = None
@@ -902,6 +926,26 @@ class RealtimeStateStreamer:
             current_price=self.btc.price,
             now=now,
         )
+        supabase_features, supabase_feature_error = self._fetch_supabase_features(
+            now=now,
+            quoted_market=quoted_market,
+        )
+        if supabase_features is not None:
+            prediction = replace(
+                prediction,
+                feature_snapshot={
+                    **prediction.feature_snapshot,
+                    **supabase_features.to_feature_snapshot(),
+                },
+                reasons=[
+                    *prediction.reasons,
+                    (
+                        "supabase_features: "
+                        f"age={_seconds_label(supabase_features.feature_age_seconds)}; "
+                        f"stale={supabase_features.stale}"
+                    ),
+                ],
+            )
         payload = build_realtime_state(
             prediction,
             market=quoted_market,
@@ -914,11 +958,55 @@ class RealtimeStateStreamer:
             rollover_old_ticker=self._rollover_old_ticker,
             rollover_retry_in_seconds=self._rollover_retry_in_seconds(),
         )
+        self._attach_supabase_features(payload, supabase_features, supabase_feature_error)
         if self.paper_trading:
             self._apply_stream_paper(prediction, quoted_market=quoted_market, payload=payload, now=now)
         self.emit(dump_json(payload) if self.json_output else format_realtime_state(payload))
         self._last_emit_monotonic = now_monotonic
         self._emitted += 1
+
+    def _fetch_supabase_features(
+        self,
+        *,
+        now: datetime,
+        quoted_market: KalshiMarket,
+    ) -> tuple[Any | None, str | None]:
+        if self.feature_client is None:
+            return None, None
+        try:
+            return (
+                self.feature_client.fetch_latest_btc_1m(
+                    now=now,
+                    current_price=self.btc.price if self.btc is not None else 0.0,
+                    target_price=quoted_market.target_price,
+                    seconds_to_close=quoted_market.seconds_to_close(now),
+                ),
+                None,
+            )
+        except Exception as exc:  # noqa: BLE001 - stream should stay alive and fail closed.
+            return None, _fmt_error(exc)
+
+    def _attach_supabase_features(
+        self,
+        payload: dict[str, Any],
+        supabase_features: Any | None,
+        supabase_feature_error: str | None,
+    ) -> None:
+        payload.setdefault("feature_source", "model_features")
+        payload.setdefault("feature_stale", False)
+        payload.setdefault("supabase_features", None)
+        if supabase_features is not None:
+            payload["feature_source"] = "supabase_tv_datafeed"
+            payload["feature_stale"] = bool(supabase_features.stale)
+            payload["supabase_features"] = supabase_features.to_jsonable()
+            if supabase_features.stale:
+                _fail_closed_payload(payload, "supabase_features_stale", "WATCH_ONLY_STALE_SUPABASE_FEATURES")
+            return
+        if supabase_feature_error:
+            payload["feature_source"] = "supabase_tv_datafeed"
+            payload["feature_stale"] = True
+            payload["supabase_feature_error"] = supabase_feature_error
+            _fail_closed_payload(payload, "supabase_features_error", "WATCH_ONLY_SUPABASE_FEATURE_ERROR")
 
     def _apply_stream_paper(
         self,

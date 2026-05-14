@@ -5,6 +5,7 @@ import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -21,6 +22,7 @@ from kalshi_btc_15m_bot.streaming import (
     parse_binance_book_ticker,
     parse_coinbase_ticker,
 )
+from kalshi_btc_15m_bot.supabase_features import TradingViewBtcFeatures
 
 
 def market() -> KalshiMarket:
@@ -77,6 +79,114 @@ def prediction(
         ),
         feature_snapshot=feature_snapshot or {},
     )
+
+
+def tv_features(*, now: datetime, age_seconds: float = 10.0, is_fresh: bool = True) -> TradingViewBtcFeatures:
+    return TradingViewBtcFeatures(
+        symbol="BTCUSD",
+        timeframe=1,
+        ts=now - timedelta(seconds=age_seconds),
+        o=100_000.0,
+        h=100_250.0,
+        l=99_850.0,
+        c=100_100.0,
+        v=123.45,
+        atr=120.0,
+        rsi=56.7,
+        feature_age_seconds=age_seconds,
+        max_feature_age_seconds=90.0,
+        is_fresh=is_fresh,
+        current_price=100_100.0,
+        target_price=100_000.0,
+        seconds_to_close=300.0,
+        distance_to_target=100.0,
+        abs_distance_to_target=100.0,
+        atr_distance=100.0 / 120.0,
+        atr_to_close_estimate=120.0 * (300.0 / 60.0) ** 0.5,
+        target_z=100.0 / 300.0,
+    )
+
+
+class StaticPredictor:
+    def __init__(self, probability_yes: float = 0.82, feature_snapshot: dict[str, float] | None = None) -> None:
+        self.probability_yes = probability_yes
+        self.feature_snapshot = feature_snapshot or {}
+
+    def predict(self, frame: Any, *, market: KalshiMarket, current_price: float, now: datetime) -> Prediction:
+        return prediction(market, probability_yes=self.probability_yes, feature_snapshot=self.feature_snapshot)
+
+
+class FakeFeatureClient:
+    def __init__(self, features: TradingViewBtcFeatures | None) -> None:
+        self.features = features
+        self.calls: list[dict[str, Any]] = []
+
+    def fetch_latest_btc_1m(
+        self,
+        *,
+        now: datetime,
+        current_price: float,
+        target_price: float | None,
+        seconds_to_close: float | None,
+    ) -> TradingViewBtcFeatures | None:
+        self.calls.append(
+            {
+                "now": now,
+                "current_price": current_price,
+                "target_price": target_price,
+                "seconds_to_close": seconds_to_close,
+            }
+        )
+        return self.features
+
+
+def make_test_streamer(
+    tmp_path,
+    *,
+    feature_client: FakeFeatureClient | None = None,
+    probability_yes: float = 0.82,
+    test_market: KalshiMarket | None = None,
+    orderbook_snapshot: dict[str, object] | None = None,
+    now: datetime | None = None,
+) -> tuple[RealtimeStateStreamer, PaperLedger, list[str]]:
+    now = now or datetime(2026, 1, 4, 0, 5, tzinfo=UTC)
+    test_market = test_market or market()
+    config = replace(BotConfig(), data_dir=tmp_path)
+    ledger = PaperLedger(config.ledger_path, config.paper)
+    emitted: list[str] = []
+    fake_bot = SimpleNamespace(
+        config=config,
+        predictor=StaticPredictor(probability_yes=probability_yes),
+        ledger=ledger,
+    )
+    streamer = RealtimeStateStreamer(
+        fake_bot,
+        json_output=True,
+        emit=emitted.append,
+        emit_min_interval_seconds=0,
+        clock=lambda: now,
+        paper_trading=True,
+        feature_client=feature_client,
+    )
+    streamer.market = test_market
+    streamer.orderbook = KalshiOrderBook.from_snapshot(
+        test_market.ticker,
+        orderbook_snapshot
+        or {
+            "yes_dollars_fp": [["0.7300", "10.00"]],
+            "no_dollars_fp": [["0.2500", "10.00"]],
+        },
+    )
+    streamer.btc = BtcTick(
+        source="coinbase_ws",
+        product="BTC-USD",
+        price=100_100.0,
+        bid=100_099.0,
+        ask=100_101.0,
+        ts=now,
+    )
+    streamer.frame = object()
+    return streamer, ledger, emitted
 
 
 def test_kalshi_orderbook_snapshot_and_deltas_drive_top_of_book() -> None:
@@ -614,6 +724,110 @@ def test_closed_contract_suppresses_monitor_edges_until_rollover() -> None:
     assert payload["monitor_action"] == "NO_EDGE"
     assert payload["decision"] == "NO_TRADE_ROLLOVER_UNSAFE"
     assert "market_closed_pending_rollover" in payload["warnings"]
+
+
+def test_streamer_merges_fresh_supabase_features_into_payload_and_paper_ledger(tmp_path) -> None:
+    now = datetime(2026, 1, 4, 0, 5, tzinfo=UTC)
+    feature_client = FakeFeatureClient(tv_features(now=now, age_seconds=12.0, is_fresh=True))
+    streamer, ledger, emitted = make_test_streamer(tmp_path, feature_client=feature_client, now=now)
+
+    streamer.emit_state(force=True)
+
+    payload = json.loads(emitted[0])
+    assert feature_client.calls == [
+        {
+            "now": now,
+            "current_price": 100_100.0,
+            "target_price": 100_000.0,
+            "seconds_to_close": pytest.approx(300.0),
+        }
+    ]
+    assert payload["feature_source"] == "supabase_tv_datafeed"
+    assert payload["feature_stale"] is False
+    assert payload["supabase_features"]["atr"] == pytest.approx(120.0)
+    assert payload["supabase_features"]["feature_age_seconds"] == pytest.approx(12.0)
+    assert payload["paper_trade_id"].startswith("paper-")
+
+    recorded = ledger.latest_predictions(limit=1)[0]
+    feature_snapshot = json.loads(recorded["features_json"])
+    assert feature_snapshot["tv_atr"] == pytest.approx(120.0)
+    assert feature_snapshot["tv_stale"] == pytest.approx(0.0)
+
+
+def test_streamer_stale_supabase_features_fail_closed_and_do_not_paper_trade(tmp_path) -> None:
+    now = datetime(2026, 1, 4, 0, 5, tzinfo=UTC)
+    feature_client = FakeFeatureClient(tv_features(now=now, age_seconds=120.0, is_fresh=False))
+    streamer, ledger, emitted = make_test_streamer(tmp_path, feature_client=feature_client, now=now)
+
+    streamer.emit_state(force=True)
+
+    payload = json.loads(emitted[0])
+    assert payload["feature_source"] == "supabase_tv_datafeed"
+    assert payload["feature_stale"] is True
+    assert payload["supabase_features"]["stale"] is True
+    assert "supabase_features_stale" in payload["warnings"]
+    assert payload["decision"] == "WATCH_ONLY_STALE_SUPABASE_FEATURES"
+    assert payload["paper_trade_id"] is None
+    assert payload["paper_trade_skip_reason"] == "stream_decision: WATCH_ONLY_STALE_SUPABASE_FEATURES"
+    assert ledger.latest_trades(limit=10) == []
+
+
+def test_stream_paper_rejects_duplicate_market_trade_but_marks_existing_position(tmp_path) -> None:
+    streamer, ledger, emitted = make_test_streamer(tmp_path)
+
+    streamer.emit_state(force=True)
+    first_payload = json.loads(emitted[-1])
+    first_trade_id = first_payload["paper_trade_id"]
+
+    streamer.emit_state(force=True)
+
+    second_payload = json.loads(emitted[-1])
+    trades = ledger.latest_trades(limit=10)
+    assert len(trades) == 1
+    assert trades[0]["id"] == first_trade_id
+    assert second_payload["paper_trade_id"] is None
+    assert second_payload["paper_trade_skip_reason"] == "one_trade_per_market: already traded this market"
+    assert second_payload["stream_paper"]["managed_positions"][0]["trade_id"] == first_trade_id
+    assert second_payload["stream_paper"]["managed_positions"][0]["mark_price"] == pytest.approx(0.73)
+    assert second_payload["stream_paper"]["managed_positions"][0]["exit_signal"] == "hold"
+    assert second_payload["stream_paper"]["managed_positions"][0]["paper_closed"] is False
+
+
+def test_stream_paper_marks_and_closes_position_on_take_profit(tmp_path) -> None:
+    test_market = replace(market(), yes_bid=0.42, yes_ask=0.58, no_bid=0.38, no_ask=0.62)
+    now = datetime(2026, 1, 4, 0, 5, tzinfo=UTC)
+    streamer, ledger, emitted = make_test_streamer(
+        tmp_path,
+        test_market=test_market,
+        probability_yes=0.50,
+        orderbook_snapshot={
+            "yes_dollars_fp": [["0.8200", "10.00"]],
+            "no_dollars_fp": [["0.1700", "10.00"]],
+        },
+        now=now,
+    )
+    opening = prediction(
+        test_market,
+        action="BUY_YES",
+        stake_dollars=streamer.bot.config.paper.max_position_dollars,
+    )
+    ledger.record_prediction(opening)
+    trade_id = ledger.maybe_open_paper_trade(opening)
+    assert trade_id is not None
+
+    streamer.emit_state(force=True)
+
+    payload = json.loads(emitted[-1])
+    managed = payload["stream_paper"]["managed_positions"][0]
+    assert managed["trade_id"] == trade_id
+    assert managed["mark_price"] == pytest.approx(0.82)
+    assert managed["exit_signal"] == "take_profit"
+    assert managed["paper_closed"] is True
+
+    closed_trade = ledger.latest_trades(limit=1)[0]
+    assert closed_trade["status"] == "CLOSED"
+    assert closed_trade["exit_price"] == pytest.approx(0.82)
+    assert closed_trade["exit_reason"] == "stream_take_profit"
 
 
 def test_stream_paper_opens_local_paper_trade_on_realtime_ev_signal(tmp_path) -> None:

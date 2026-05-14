@@ -99,6 +99,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser("resolve", help="Try to settle open paper trades from Kalshi market results")
     sub.add_parser("markets", help="List current KXBTC15M markets from Kalshi")
+    doctor = sub.add_parser("doctor", help="Run read-only operator diagnostics; submits no orders")
+    doctor.add_argument(
+        "--dashboard-host",
+        default="127.0.0.1",
+        help="Dashboard bind host to validate for token safety (default: 127.0.0.1)",
+    )
+    doctor.add_argument(
+        "--dashboard-token",
+        default=None,
+        help="Optional dashboard token presence for safety validation; prefer env tokens",
+    )
     dashboard = sub.add_parser("dashboard", help="Start a read-only web dashboard; never submits orders")
     dashboard.add_argument("--host", default="127.0.0.1", help="Dashboard bind host (default: 127.0.0.1)")
     dashboard.add_argument("--port", type=int, default=8792, help="Dashboard port (default: 8792)")
@@ -196,6 +207,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "doctor":
+            from .doctor import run_doctor
+
+            return run_doctor(
+                config_path=args.config,
+                dashboard_host=args.dashboard_host,
+                dashboard_token=args.dashboard_token,
+                json_output=args.json,
+            )
+
         config = load_config(args.config)
         bot = KalshiBTC15MBot(config)
 
@@ -270,11 +291,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "markets":
-            payload = bot.markets()
+            markets_payload = bot.markets()
             if args.json:
-                print(dump_json(payload))
+                print(dump_json(markets_payload))
             else:
-                for market in payload:
+                for market in markets_payload:
                     print(
                         f"{market['ticker']} close={market.get('close_time')} "
                         f"target={market.get('target_price')} yes={market.get('yes_bid')}/{market.get('yes_ask')} "

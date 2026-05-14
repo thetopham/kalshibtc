@@ -28,6 +28,18 @@ class MarketDataConfig:
 
 
 @dataclass(frozen=True)
+class SupabaseFeatureConfig:
+    enabled: bool = False
+    url: str = ""
+    api_key: str = ""
+    table: str = "tv_datafeed_btc"
+    symbol: str = "BTCUSD"
+    timeframe: int = 1
+    max_feature_age_seconds: float = 90.0
+    request_timeout_seconds: float = 10.0
+
+
+@dataclass(frozen=True)
 class PredictorConfig:
     min_confidence: float = 0.54
     min_edge: float = 0.035
@@ -92,6 +104,7 @@ class BotConfig:
     data_dir: Path = Path("data")
     kalshi: KalshiConfig = KalshiConfig()
     market_data: MarketDataConfig = MarketDataConfig()
+    supabase_features: SupabaseFeatureConfig = SupabaseFeatureConfig()
     predictor: PredictorConfig = PredictorConfig()
     paper: PaperConfig = PaperConfig()
     live: LiveConfig = LiveConfig()
@@ -157,6 +170,46 @@ def load_config(path: str | Path | None = None) -> BotConfig:
             lookback_days=int(_deep_get(raw, "market_data", "lookback_days", MarketDataConfig.lookback_days)),
             request_timeout_seconds=int(
                 _deep_get(raw, "market_data", "request_timeout_seconds", MarketDataConfig.request_timeout_seconds)
+            ),
+        ),
+        supabase_features=SupabaseFeatureConfig(
+            enabled=bool(_deep_get(raw, "supabase_features", "enabled", SupabaseFeatureConfig.enabled)),
+            url=str(
+                _deep_get(
+                    raw,
+                    "supabase_features",
+                    "url",
+                    os.getenv("KALSHI_BTC15M_SUPABASE_URL") or os.getenv("SUPABASE_URL") or "",
+                )
+            ),
+            api_key=str(
+                _deep_get(
+                    raw,
+                    "supabase_features",
+                    "api_key",
+                    os.getenv("KALSHI_BTC15M_SUPABASE_API_KEY")
+                    or os.getenv("SUPABASE_ANON_KEY")
+                    or "",
+                )
+            ),
+            table=str(_deep_get(raw, "supabase_features", "table", SupabaseFeatureConfig.table)),
+            symbol=str(_deep_get(raw, "supabase_features", "symbol", SupabaseFeatureConfig.symbol)),
+            timeframe=int(_deep_get(raw, "supabase_features", "timeframe", SupabaseFeatureConfig.timeframe)),
+            max_feature_age_seconds=float(
+                _deep_get(
+                    raw,
+                    "supabase_features",
+                    "max_feature_age_seconds",
+                    SupabaseFeatureConfig.max_feature_age_seconds,
+                )
+            ),
+            request_timeout_seconds=float(
+                _deep_get(
+                    raw,
+                    "supabase_features",
+                    "request_timeout_seconds",
+                    SupabaseFeatureConfig.request_timeout_seconds,
+                )
             ),
         ),
         predictor=PredictorConfig(
@@ -297,8 +350,27 @@ def _validate_config(cfg: BotConfig) -> None:
         raise ValueError("trading_mode='live' requires enable_live_orders=true.")
     if cfg.market_data.granularity_seconds != 900:
         raise ValueError("This bot is intentionally scoped to 15-minute BTC markets (900-second candles).")
+    if cfg.supabase_features.enabled:
+        _validate_supabase_feature_config(cfg.supabase_features)
     if cfg.is_live_mode:
         _validate_live_config(cfg.live)
+
+
+def _validate_supabase_feature_config(config: SupabaseFeatureConfig) -> None:
+    if not config.url.startswith("https://"):
+        raise ValueError("supabase_features.url must be an HTTPS Supabase project URL when enabled.")
+    if not config.api_key:
+        raise ValueError("supabase_features.api_key is required when supabase_features.enabled=true.")
+    if not config.table:
+        raise ValueError("supabase_features.table is required when supabase_features.enabled=true.")
+    if not config.symbol:
+        raise ValueError("supabase_features.symbol is required when supabase_features.enabled=true.")
+    if config.timeframe < 1:
+        raise ValueError("supabase_features.timeframe must be at least 1 minute.")
+    if config.max_feature_age_seconds <= 0:
+        raise ValueError("supabase_features.max_feature_age_seconds must be greater than zero.")
+    if config.request_timeout_seconds <= 0:
+        raise ValueError("supabase_features.request_timeout_seconds must be greater than zero.")
 
 
 def _validate_live_config(live: LiveConfig) -> None:
