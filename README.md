@@ -84,8 +84,8 @@ kbtc15 --config configs/default.toml status
 # Operator report with equity, PnL, win rate, expectancy, and open-position exit signals
 kbtc15 --config configs/default.toml report
 
-# Read-only dashboard; local-only by default and never submits orders
-kbtc15 --config configs/default.toml dashboard --host 127.0.0.1 --port 8792
+# Read-only stream dashboard; local-only by default and never submits orders
+kbtc15 --config configs/default.toml dashboard --host 127.0.0.1 --port 8792 --stream --stream-emit-min-interval-seconds 1
 
 # Try settling open paper trades from public Kalshi results
 kbtc15 --config configs/default.toml resolve
@@ -99,11 +99,11 @@ kbtc15 --config configs/default.toml backtest
 
 ## Dashboard
 
-The dashboard is read-only. It calls status surfaces only and has no route that can scan, submit, cancel, or exit orders.
+The dashboard is read-only. With `--stream`, it starts the same websocket BTC/orderbook state collector used by `stream-state`, keeps the latest payload in memory, and serves a live browser dashboard at `/` plus JSON at `/api/stream`. The old ledger/account status page remains available at `/status` and `/api/dashboard`. No dashboard route can scan, submit, cancel, or exit orders.
 
 ```bash
 # Local-only dashboard, no token required because it binds to loopback
-kbtc15 --config configs/default.toml dashboard --host 127.0.0.1 --port 8792
+kbtc15 --config configs/default.toml dashboard --host 127.0.0.1 --port 8792 --stream --stream-emit-min-interval-seconds 1
 
 # LAN/tailnet dashboard must use a token
 mkdir -p ~/.config/kalshibtc
@@ -115,10 +115,10 @@ path.write_text(f"KALSHI_BTC15M_DASHBOARD_TOKEN={secrets.token_urlsafe(32)}\n")
 path.chmod(0o600)
 print(path)
 PY
-kbtc15 --config configs/live-prod.local.toml dashboard --host 0.0.0.0 --port 8792 --scan-interval-seconds 60
+kbtc15 --config configs/live-prod.local.toml dashboard --host 0.0.0.0 --port 8792 --scan-interval-seconds 60 --stream --stream-emit-min-interval-seconds 1
 ```
 
-The page shows live account balance/portfolio when the selected config has live credentials loaded, paper and live PnL from the local SQLite ledger, latest predictions, live orders/fills, open positions, service status, and the active safety boundary.
+The stream page shows current BTC price, market ticker, target, time to close/expiration, YES/NO top-of-book, state/model probabilities, decision, monitor gate, best EV, probability edge, rollover status, collector warnings, and the raw latest stream payload. The `/status` page still shows live account balance/portfolio when the selected config has live credentials loaded, paper and live PnL from the local SQLite ledger, latest predictions, live orders/fills, open positions, service status, and the active safety boundary.
 
 To run the dashboard as a user service:
 
@@ -130,7 +130,7 @@ systemctl --user enable --now kalshi-btc15m-dashboard.service
 systemctl --user status kalshi-btc15m-dashboard.service --no-pager
 ```
 
-The dashboard service template uses `--scan-interval-seconds 60` because the live production bot service processes once per minute with `run --interval-seconds 60`. The market itself is still a 15-minute Kalshi market using 900-second BTC candles.
+The dashboard service template uses `--stream --stream-emit-min-interval-seconds 1`, so `/` is the websocket stream dashboard and `/api/stream` is the latest state JSON. `/status` remains the ledger/account dashboard. The market itself is still a 15-minute Kalshi market using 900-second BTC candles.
 
 ## Guarded demo/live trading
 
@@ -217,7 +217,7 @@ kbtc15 --config configs/default.toml run --interval-seconds 1 --max-scans 1
 kbtc15 --config configs/default.toml scan
 kbtc15 --config configs/default.toml status
 kbtc15 --config configs/default.toml report
-timeout 5s env KALSHI_BTC15M_DASHBOARD_TOKEN=test-token kbtc15 --config configs/default.toml dashboard --host 127.0.0.1 --port 8792 || test $? -eq 124
+timeout 5s env KALSHI_BTC15M_DASHBOARD_TOKEN=test-token kbtc15 --config configs/default.toml dashboard --host 127.0.0.1 --port 8792 --stream || test $? -eq 124
 kbtc15 --config configs/default.toml live-status
 kbtc15 --config configs/default.toml stream-state --help
 kbtc15 --config configs/default.toml stream-paper --help

@@ -8,7 +8,7 @@ Type=simple
 WorkingDirectory=/home/matt/workspace/kalshi-btc-15m-bot
 EnvironmentFile=%h/.config/kalshibtc/kalshibtc-prod.env
 EnvironmentFile=%h/.config/kalshibtc/kalshibtc-dashboard.env
-ExecStart=/home/matt/workspace/kalshi-btc-15m-bot/.venv/bin/kbtc15 --config configs/live-prod.local.toml dashboard --host 0.0.0.0 --port 8792 --refresh-seconds 10 --scan-interval-seconds 60
+ExecStart=/home/matt/workspace/kalshi-btc-15m-bot/.venv/bin/kbtc15 --config configs/live-prod.local.toml dashboard --host 0.0.0.0 --port 8792 --refresh-seconds 10 --scan-interval-seconds 60 --stream --stream-emit-min-interval-seconds 1
 Restart=always
 RestartSec=10
 

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import os
 import subprocess
+import threading
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -16,10 +18,89 @@ from .bot import KalshiBTC15MBot
 DEFAULT_DASHBOARD_PORT = 8792
 DEFAULT_REFRESH_SECONDS = 10
 DEFAULT_SERVICE_NAMES = (
+    "kalshi-btc15m-dashboard.service",
     "kalshi-btc15m-live-prod.service",
     "kalshi-btc15m-live-demo.service",
     "kalshi-btc15m-paper.service",
 )
+STREAM_WARNING_HISTORY_LIMIT = 8
+
+
+class StreamSnapshotStore:
+    """Thread-safe latest-state cache fed by the realtime websocket streamer."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._started_at = datetime.now(UTC)
+        self._running = False
+        self._latest: dict[str, Any] | None = None
+        self._updated_at: datetime | None = None
+        self._events_seen = 0
+        self._warnings: list[dict[str, Any]] = []
+        self._last_error: str | None = None
+
+    def mark_running(self, running: bool, *, error: str | None = None) -> None:
+        with self._lock:
+            self._running = running
+            if error:
+                self._last_error = _dashboard_error_text(error)
+
+    def record_line(self, text: str) -> None:
+        """Record one JSON line emitted by RealtimeStateStreamer."""
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            self.record_error(f"stream_output_parse_error: {exc}")
+            return
+        if not isinstance(payload, Mapping):
+            self.record_error("stream_output_parse_error: expected JSON object")
+            return
+        if payload.get("event") == "market_state" or payload.get("market_ticker"):
+            self.record_payload(payload)
+            return
+        self.record_warning(payload)
+
+    def record_payload(self, payload: Mapping[str, Any]) -> None:
+        now = datetime.now(UTC)
+        with self._lock:
+            self._latest = _json_safe_dict(payload)
+            self._updated_at = now
+            self._events_seen += 1
+            self._last_error = None
+
+    def record_warning(self, payload: Mapping[str, Any]) -> None:
+        warning = _json_safe_dict(payload)
+        warning.setdefault("as_of", datetime.now(UTC).isoformat())
+        with self._lock:
+            self._warnings.append(warning)
+            self._warnings = self._warnings[-STREAM_WARNING_HISTORY_LIMIT:]
+            text = warning.get("error") or warning.get("warning")
+            if text:
+                self._last_error = _dashboard_error_text(text)
+
+    def record_error(self, error: Any) -> None:
+        text = _dashboard_error_text(error)
+        self.record_warning({"warning": "stream_collector_error", "error": text})
+
+    def snapshot(self) -> dict[str, Any]:
+        now = datetime.now(UTC)
+        with self._lock:
+            latest = _json_safe_dict(self._latest) if self._latest is not None else None
+            warnings = [_json_safe_dict(warning) for warning in self._warnings]
+            updated_at = self._updated_at
+            staleness_seconds = (now - updated_at).total_seconds() if updated_at is not None else None
+            return {
+                "started_at": self._started_at.isoformat(),
+                "running": self._running,
+                "events_seen": self._events_seen,
+                "updated_at": updated_at.isoformat() if updated_at is not None else None,
+                "staleness_seconds": staleness_seconds,
+                "latest": latest,
+                "last_warning": warnings[-1] if warnings else None,
+                "warning_count": len(warnings),
+                "warnings": warnings,
+                "last_error": self._last_error,
+            }
 
 
 def collect_dashboard_data(
@@ -218,6 +299,223 @@ def render_dashboard_html(data: Mapping[str, Any], *, api_path: str = "/api/dash
     return html_doc
 
 
+def collect_stream_dashboard_data(
+    bot: KalshiBTC15MBot,
+    stream_store: StreamSnapshotStore,
+    *,
+    service_names: Sequence[str] = DEFAULT_SERVICE_NAMES,
+    scan_interval_seconds: float | None = None,
+    stream_emit_min_interval_seconds: float | None = None,
+    include_service_status: bool = True,
+) -> dict[str, Any]:
+    """Collect cheap read-only data for the live websocket stream dashboard."""
+    generated_at = datetime.now(UTC).isoformat()
+    config = bot.config
+    try:
+        safety = bot._safety_payload()  # noqa: SLF001 - dashboard is same package.
+        boundary = safety.get("boundary", "unknown")
+    except Exception as exc:  # noqa: BLE001 - dashboard should still show stream state.
+        safety = {"error": _dashboard_error_text(exc)}
+        boundary = "unknown"
+    return {
+        "generated_at": generated_at,
+        "boundary": boundary,
+        "strategy": {
+            "name": "Kalshi BTC 15m Stream",
+            "series_ticker": config.kalshi.series_ticker,
+            "trading_mode": config.trading_mode,
+            "enable_live_orders": config.enable_live_orders,
+            "live_environment": config.live.environment,
+            "market_data_provider": config.market_data.provider,
+            "market_data_product": getattr(config.market_data, "product_id", None)
+            or getattr(config.market_data, "symbol", None),
+            "candle_granularity_seconds": config.market_data.granularity_seconds,
+            "scan_interval_seconds": scan_interval_seconds,
+            "stream_emit_min_interval_seconds": stream_emit_min_interval_seconds,
+            "ledger_path": str(config.ledger_path),
+            "data_dir": str(config.data_dir),
+        },
+        "safety": safety,
+        "stream": stream_store.snapshot(),
+        "services": _service_statuses(service_names) if include_service_status else {},
+    }
+
+
+def render_stream_dashboard_html(data: Mapping[str, Any], *, api_path: str = "/api/stream") -> str:
+    strategy = _mapping(data.get("strategy"))
+    stream = _mapping(data.get("stream"))
+    latest = _mapping(stream.get("latest"))
+    boundary = str(data.get("boundary") or latest.get("boundary") or "unknown")
+    generated_at = str(data.get("generated_at") or "unknown")
+    initial_json = _json_for_script(data)
+    poll_ms = max(500, int((_float_or_none(strategy.get("stream_emit_min_interval_seconds")) or 1.0) * 1000))
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kalshi BTC Stream</title>
+  <style>
+    :root {{ color-scheme: dark; --bg:#05070b; --panel:#0f1724; --panel2:#151f30; --glass:rgba(15,23,36,.78); --text:#e7eefb; --muted:#8b9bb3; --line:#24324a; --green:#35d49a; --red:#ff5f79; --yellow:#ffca58; --blue:#67b7ff; --purple:#a78bfa; }}
+    * {{ box-sizing:border-box; }}
+    body {{ margin:0; font-family:Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background: radial-gradient(circle at 12% 0%, rgba(103,183,255,.22), transparent 35%), radial-gradient(circle at 88% 8%, rgba(53,212,154,.14), transparent 28%), var(--bg); color:var(--text); }}
+    main {{ max-width:1280px; margin:0 auto; padding:22px; }}
+    header {{ display:flex; justify-content:space-between; gap:16px; align-items:flex-start; flex-wrap:wrap; margin-bottom:18px; }}
+    h1 {{ margin:0; font-size:clamp(30px, 5vw, 56px); letter-spacing:-.06em; line-height:.95; }}
+    h2 {{ margin:0 0 12px; font-size:16px; letter-spacing:-.02em; }}
+    .sub,.muted {{ color:var(--muted); }}
+    .mono {{ font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; }}
+    .pillrow {{ display:flex; flex-wrap:wrap; gap:8px; }}
+    .pill {{ border:1px solid var(--line); background:rgba(21,31,48,.72); border-radius:999px; padding:7px 10px; color:var(--muted); font-size:13px; }}
+    .pill.good {{ color:var(--green); border-color:rgba(53,212,154,.45); }} .pill.warn {{ color:var(--yellow); border-color:rgba(255,202,88,.45); }} .pill.bad {{ color:var(--red); border-color:rgba(255,95,121,.45); }}
+    .grid {{ display:grid; gap:14px; }} .hero {{ grid-template-columns:1.2fr .8fr; }} .kpis {{ grid-template-columns:repeat(4,minmax(0,1fr)); }} .two {{ grid-template-columns:1fr 1fr; margin-top:14px; }}
+    .panel {{ background:linear-gradient(180deg, rgba(16,24,38,.94), rgba(8,12,20,.94)); border:1px solid var(--line); border-radius:22px; padding:16px; box-shadow:0 24px 70px rgba(0,0,0,.32); }}
+    .big {{ font-size:clamp(38px, 7vw, 78px); font-weight:900; letter-spacing:-.07em; line-height:.92; }}
+    .label {{ color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.09em; }}
+    .value {{ font-size:26px; font-weight:800; letter-spacing:-.04em; margin-top:7px; }}
+    .hint {{ color:var(--muted); font-size:13px; margin-top:7px; }}
+    .row {{ display:flex; justify-content:space-between; gap:12px; border-top:1px solid var(--line); padding:10px 0; align-items:flex-start; }} .row:first-child {{ border-top:0; padding-top:0; }}
+    .quotegrid {{ display:grid; grid-template-columns:repeat(2,1fr); gap:10px; }}
+    .quote {{ background:rgba(21,31,48,.65); border:1px solid var(--line); border-radius:16px; padding:14px; }}
+    .quote.yes {{ border-color:rgba(53,212,154,.3); }} .quote.no {{ border-color:rgba(255,95,121,.3); }}
+    .green {{ color:var(--green); }} .red {{ color:var(--red); }} .yellow {{ color:var(--yellow); }} .blue {{ color:var(--blue); }} .purple {{ color:var(--purple); }}
+    pre {{ white-space:pre-wrap; overflow-wrap:anywhere; color:var(--muted); background:#080f1b; border:1px solid var(--line); padding:12px; border-radius:14px; max-height:260px; overflow:auto; }}
+    footer {{ color:var(--muted); margin-top:18px; font-size:12px; }}
+    @media (max-width:950px) {{ .hero,.kpis,.two {{ grid-template-columns:1fr; }} main {{ padding:14px; }} }}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Kalshi BTC Stream</h1>
+      <div class="sub">Live websocket BTC + Kalshi orderbook state · API <a class="blue" href="{esc(api_path)}">{esc(api_path)}</a></div>
+      <div class="sub tiny">Server rendered {esc(generated_at)} · browser polls every {poll_ms}ms</div>
+    </div>
+    <div class="pillrow">
+      <span id="stream-status" class="pill">stream: {_stream_status_label(stream)}</span>
+      <span class="pill">mode: {esc(strategy.get('trading_mode'))}</span>
+      <span class="pill">env: {esc(strategy.get('live_environment'))}</span>
+      <span class="pill">emit: {_format_seconds(strategy.get('stream_emit_min_interval_seconds'))}</span>
+    </div>
+  </header>
+
+  <section class="grid hero">
+    <div class="panel">
+      <div class="label">BTC current price</div>
+      <div id="btc-price" class="big">{_money_or_dash(latest.get('current_price'))}</div>
+      <div class="pillrow" style="margin-top:12px">
+        <span class="pill">source: <span id="btc-source">{esc(latest.get('btc_source'))}</span></span>
+        <span class="pill">product: <span id="btc-product">{esc(latest.get('btc_product'))}</span></span>
+        <span class="pill">as_of: <span id="as-of">{esc(latest.get('as_of'))}</span></span>
+      </div>
+      <div class="hint">{esc(boundary)}</div>
+    </div>
+    <div class="panel">
+      <h2>Market clock</h2>
+      <div class="row"><span class="muted">ticker</span><strong id="market-ticker" class="mono">{esc(latest.get('market_ticker'))}</strong></div>
+      <div class="row"><span class="muted">target</span><strong id="target-price">{_money_or_dash(latest.get('target_price'))}</strong></div>
+      <div class="row"><span class="muted">time till close</span><strong id="seconds-to-close">{_format_seconds(latest.get('seconds_to_close'))}</strong></div>
+      <div class="row"><span class="muted">direction</span><strong id="direction-state">{esc(latest.get('direction_state'))}</strong></div>
+      <div class="row"><span class="muted">rollover</span><strong id="rollover-state">{_rollover_text(latest)}</strong></div>
+    </div>
+  </section>
+
+  <section class="grid kpis" style="margin-top:14px">
+    {_stream_kpi('Decision', latest.get('decision') or '—', 'Only WATCH_ONLY_EV_SIGNAL is actionable', 'decision')}
+    {_stream_kpi('Monitor', latest.get('monitor_action') or 'NO_EDGE', 'Signal output after all gates', 'monitor')}
+    {_stream_kpi('best_ev', _pct_or_dash(latest.get('best_ev_per_dollar')), f"side {latest.get('best_ev_side') or 'NONE'} · $25 EV {_signed_money_or_dash(latest.get('best_ev_reference_profit_dollars'))}", 'best-ev')}
+    {_stream_kpi('prob_edge', _pct_or_dash(latest.get('best_edge')), f"spread {_pct_or_dash(latest.get('best_spread'))}", 'prob-edge')}
+  </section>
+
+  <section class="grid two">
+    <div class="panel">
+      <h2>YES / NO orderbook</h2>
+      <div class="quotegrid">
+        <div class="quote yes"><div class="label">YES</div><div class="value">bid <span id="yes-bid">{_num(latest.get('yes_bid'), 3)}</span> / ask <span id="yes-ask">{_num(latest.get('yes_ask'), 3)}</span></div><div class="hint">p_yes <span id="p-yes">{_num(latest.get('probability_yes'), 3)}</span></div></div>
+        <div class="quote no"><div class="label">NO</div><div class="value">bid <span id="no-bid">{_num(latest.get('no_bid'), 3)}</span> / ask <span id="no-ask">{_num(latest.get('no_ask'), 3)}</span></div><div class="hint">p_no <span id="p-no">{_num(latest.get('probability_no'), 3)}</span></div></div>
+      </div>
+      <div class="hint">liquidity <span id="liquidity">{_money_or_dash(latest.get('orderbook_liquidity'))}</span> · valid <span id="orderbook-valid">{esc(latest.get('orderbook_valid'))}</span></div>
+    </div>
+    <div class="panel">
+      <h2>Warnings / collector</h2>
+      <div class="row"><span class="muted">events seen</span><strong id="events-seen">{esc(stream.get('events_seen'))}</strong></div>
+      <div class="row"><span class="muted">last update age</span><strong id="staleness">{_format_seconds(stream.get('staleness_seconds'))}</strong></div>
+      <div class="row"><span class="muted">last error</span><strong id="last-error">{esc(stream.get('last_error'))}</strong></div>
+      <pre id="warnings-json">{esc(json.dumps(stream.get('warnings') or [], indent=2, default=str))}</pre>
+    </div>
+  </section>
+
+  <section class="panel" style="margin-top:14px">
+    <h2>Raw latest payload</h2>
+    <pre id="raw-json">{esc(json.dumps(latest or {}, indent=2, sort_keys=True, default=str))}</pre>
+  </section>
+  <footer>Read-only stream dashboard; no live orders submitted. The collector uses the same stream-state path and never calls scan, submit, cancel, or live order routes. Status dashboard: <a class="blue" href="/status">/status</a>.</footer>
+</main>
+<script>
+const API_PATH = {json.dumps(api_path)};
+const POLL_MS = {poll_ms};
+const INITIAL_DATA = {initial_json};
+function tokenQuery() {{ const params = new URLSearchParams(window.location.search); return params.has('token') ? '?' + params.toString() : ''; }}
+function get(obj, path, fallback='—') {{ let cur = obj; for (const part of path.split('.')) {{ if (!cur || !(part in cur)) return fallback; cur = cur[part]; }} return cur ?? fallback; }}
+function money(v) {{ const n = Number(v); return Number.isFinite(n) ? '$' + n.toLocaleString(undefined, {{maximumFractionDigits:2, minimumFractionDigits:2}}) : '—'; }}
+function num(v, d=3) {{ const n = Number(v); return Number.isFinite(n) ? n.toFixed(d) : '—'; }}
+function pct(v) {{ const n = Number(v); return Number.isFinite(n) ? (n * 100).toFixed(1) + '%' : '—'; }}
+function signedMoney(v) {{ const n = Number(v); if (!Number.isFinite(n)) return '—'; return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2); }}
+function seconds(v) {{ const n = Number(v); return Number.isFinite(n) ? Math.round(n) + 's' : '—'; }}
+function setText(id, value) {{ const el = document.getElementById(id); if (el) el.textContent = value; }}
+function kpi(id, value, hint) {{ setText(id + '-value', value); setText(id + '-hint', hint); }}
+function render(data) {{
+  const stream = data.stream || {{}}; const p = stream.latest || {{}};
+  setText('stream-status', 'stream: ' + (stream.running ? 'running' : 'stopped') + (stream.last_error ? ' / error' : ''));
+  setText('btc-price', money(p.current_price)); setText('btc-source', p.btc_source || '—'); setText('btc-product', p.btc_product || '—'); setText('as-of', p.as_of || '—');
+  setText('market-ticker', p.market_ticker || '—'); setText('target-price', money(p.target_price)); setText('seconds-to-close', seconds(p.seconds_to_close)); setText('direction-state', p.direction_state || '—');
+  setText('rollover-state', p.rollover_status || (p.market_rollover_unsafe ? 'unsafe' : 'clear'));
+  kpi('decision', p.decision || '—', 'Only WATCH_ONLY_EV_SIGNAL is actionable'); kpi('monitor', p.monitor_action || 'NO_EDGE', 'side ' + (p.monitor_side || 'NONE'));
+  kpi('best-ev', pct(p.best_ev_per_dollar), 'side ' + (p.best_ev_side || 'NONE') + ' · $25 EV ' + signedMoney(p.best_ev_reference_profit_dollars));
+  kpi('prob-edge', pct(p.best_edge), 'spread ' + pct(p.best_spread));
+  setText('yes-bid', num(p.yes_bid)); setText('yes-ask', num(p.yes_ask)); setText('no-bid', num(p.no_bid)); setText('no-ask', num(p.no_ask)); setText('p-yes', num(p.probability_yes)); setText('p-no', num(p.probability_no));
+  setText('liquidity', money(p.orderbook_liquidity)); setText('orderbook-valid', String(p.orderbook_valid ?? '—')); setText('events-seen', stream.events_seen ?? '0'); setText('staleness', seconds(stream.staleness_seconds)); setText('last-error', stream.last_error || '—');
+  setText('warnings-json', JSON.stringify(stream.warnings || [], null, 2)); setText('raw-json', JSON.stringify(p, null, 2));
+}}
+async function refresh() {{ try {{ const r = await fetch(API_PATH + tokenQuery(), {{cache:'no-store'}}); if (!r.ok) throw new Error('HTTP ' + r.status); render(await r.json()); }} catch (err) {{ setText('last-error', String(err)); }} }}
+render(INITIAL_DATA); setInterval(refresh, POLL_MS); refresh();
+</script>
+</body>
+</html>"""
+
+
+def start_stream_collector(
+    bot: KalshiBTC15MBot,
+    stream_store: StreamSnapshotStore,
+    *,
+    emit_min_interval_seconds: float = 1.0,
+) -> threading.Thread:
+    if emit_min_interval_seconds <= 0:
+        raise ValueError("stream_emit_min_interval_seconds must be greater than zero")
+
+    def worker() -> None:
+        stream_store.mark_running(True)
+        try:
+            from .streaming import RealtimeStateStreamer
+
+            streamer = RealtimeStateStreamer(
+                bot,
+                json_output=True,
+                emit=stream_store.record_line,
+                emit_min_interval_seconds=emit_min_interval_seconds,
+            )
+            asyncio.run(streamer.run())
+        except Exception as exc:  # noqa: BLE001 - dashboard must display stream failures.
+            stream_store.record_error(exc)
+        finally:
+            stream_store.mark_running(False)
+
+    thread = threading.Thread(target=worker, name="kbtc15-stream-dashboard", daemon=True)
+    thread.start()
+    return thread
+
+
 def serve_dashboard(
     bot: KalshiBTC15MBot,
     *,
@@ -226,6 +524,8 @@ def serve_dashboard(
     token: str | None = None,
     refresh_seconds: int = DEFAULT_REFRESH_SECONDS,
     scan_interval_seconds: float | None = None,
+    stream: bool = False,
+    stream_emit_min_interval_seconds: float = 1.0,
 ) -> None:
     token = token or os.getenv("KALSHI_BTC15M_DASHBOARD_TOKEN") or os.getenv("DASHBOARD_AUTH_TOKEN")
     _validate_dashboard_auth(host, token)
@@ -233,6 +533,16 @@ def serve_dashboard(
         raise ValueError("dashboard port must be between 1 and 65535")
     if refresh_seconds < 1:
         raise ValueError("refresh_seconds must be at least 1")
+    if stream_emit_min_interval_seconds <= 0:
+        raise ValueError("stream_emit_min_interval_seconds must be greater than zero")
+
+    stream_store = StreamSnapshotStore()
+    if stream:
+        start_stream_collector(
+            bot,
+            stream_store,
+            emit_min_interval_seconds=stream_emit_min_interval_seconds,
+        )
 
     class DashboardHandler(BaseHTTPRequestHandler):
         server_version = "kbtc15-dashboard/0.1"
@@ -254,7 +564,28 @@ def serve_dashboard(
                 )
                 self._send_json(data)
                 return
-            if path in {"/", "/index.html"}:
+            if path in {"/api/stream", "/stream.json"}:
+                data = collect_stream_dashboard_data(
+                    bot,
+                    stream_store,
+                    scan_interval_seconds=scan_interval_seconds,
+                    stream_emit_min_interval_seconds=stream_emit_min_interval_seconds,
+                    include_service_status=True,
+                )
+                self._send_json(data)
+                return
+            if path in {"/stream", "/stream.html"} or (stream and path in {"/", "/index.html"}):
+                data = collect_stream_dashboard_data(
+                    bot,
+                    stream_store,
+                    scan_interval_seconds=scan_interval_seconds,
+                    stream_emit_min_interval_seconds=stream_emit_min_interval_seconds,
+                    include_service_status=True,
+                )
+                body = render_stream_dashboard_html(data, api_path="/api/stream")
+                self._send(body.encode("utf-8"), "text/html; charset=utf-8")
+                return
+            if path in {"/", "/index.html", "/status", "/status.html"}:
                 data = collect_dashboard_data(
                     bot,
                     scan_interval_seconds=scan_interval_seconds,
@@ -298,7 +629,8 @@ def serve_dashboard(
     httpd = ThreadingHTTPServer((host, port), DashboardHandler)
     print(
         f"kbtc15 dashboard listening on http://{host}:{port} "
-        f"auth={'enabled' if token else 'disabled'} scan_interval={scan_interval_seconds or 'unknown'}s",
+        f"auth={'enabled' if token else 'disabled'} scan_interval={scan_interval_seconds or 'unknown'}s "
+        f"stream={'enabled' if stream else 'disabled'} stream_emit={stream_emit_min_interval_seconds}s",
         flush=True,
     )
     httpd.serve_forever()
@@ -353,6 +685,58 @@ def _service_status(name: str) -> dict[str, Any]:
             fields[key] = value
     fields["returncode"] = str(result.returncode)
     return fields
+
+
+def _json_safe_dict(payload: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        return json.loads(json.dumps(dict(payload), default=str))
+    except (TypeError, ValueError):
+        return {str(key): str(value) for key, value in payload.items()}
+
+
+def _dashboard_error_text(value: Any) -> str:
+    text = str(value).replace("\n", " ").replace("\r", " ").strip()
+    if len(text) > 300:
+        return text[:297] + "..."
+    return text or "unknown"
+
+
+def _json_for_script(data: Mapping[str, Any]) -> str:
+    return json.dumps(data, sort_keys=True, default=str).replace("</", "<\\/")
+
+
+def _stream_status_label(stream: Mapping[str, Any]) -> str:
+    if stream.get("running"):
+        return "running"
+    if stream.get("latest"):
+        return "stopped"
+    if stream.get("last_error"):
+        return "error"
+    return "warming up"
+
+
+def _rollover_text(latest: Mapping[str, Any]) -> str:
+    status = latest.get("rollover_status")
+    if status:
+        parts = [str(status)]
+        stale = latest.get("stale_closed_seconds")
+        retry = latest.get("rollover_retry_in_seconds")
+        if stale is not None:
+            parts.append(f"stale {_format_seconds(stale)}")
+        if retry is not None:
+            parts.append(f"retry {_format_seconds(retry)}")
+        return " · ".join(parts)
+    return "unsafe" if latest.get("market_rollover_unsafe") else "clear"
+
+
+def _stream_kpi(label: str, value: Any, hint: Any, field_id: str) -> str:
+    return (
+        "<div class='panel kpi'>"
+        f"<div class='label'>{esc(label)}</div>"
+        f"<div id='{esc(field_id)}-value' class='value'>{esc(value)}</div>"
+        f"<div id='{esc(field_id)}-hint' class='hint'>{esc(hint)}</div>"
+        "</div>"
+    )
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:

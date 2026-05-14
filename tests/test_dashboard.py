@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from kalshi_btc_15m_bot.dashboard import (
+    StreamSnapshotStore,
     _is_authorized,
     _validate_dashboard_auth,
     collect_dashboard_data,
+    collect_stream_dashboard_data,
     render_dashboard_html,
+    render_stream_dashboard_html,
 )
 
 
@@ -112,6 +116,99 @@ def test_render_dashboard_html_includes_cards_and_read_only_boundary() -> None:
     assert "candles: 900s" in text
     assert "guarded live IOC limit orders enabled" in text
     assert "no route that can scan, submit, cancel, or exit orders" in text
+    assert "KALSHI_API_KEY" not in text
+
+
+def _sample_stream_payload() -> dict[str, object]:
+    return {
+        "event": "market_state",
+        "as_of": "2026-05-14T17:01:02+00:00",
+        "btc_source": "coinbase_ws",
+        "btc_product": "BTC-USD",
+        "btc_ts": "2026-05-14T17:01:01+00:00",
+        "current_price": 64321.5,
+        "btc_bid": 64321.0,
+        "btc_ask": 64322.0,
+        "market_ticker": "KXBTC15M-TEST",
+        "target_price": 64250.0,
+        "seconds_to_close": 328.0,
+        "seconds_to_expiration": 328.0,
+        "direction_state": "ABOVE_TARGET",
+        "probability_yes": 0.602,
+        "probability_no": 0.398,
+        "model_probability_yes": 0.50,
+        "model_probability_gap": 0.102,
+        "market_implied_yes": 0.55,
+        "yes_bid": 0.54,
+        "yes_ask": 0.56,
+        "no_bid": 0.43,
+        "no_ask": 0.46,
+        "orderbook_liquidity": 1200.0,
+        "orderbook_valid": True,
+        "best_ev_side": "YES",
+        "best_ev_per_dollar": 0.075,
+        "best_ev_reference_profit_dollars": 1.875,
+        "best_edge": 0.042,
+        "best_spread": 0.02,
+        "monitor_action": "NO_EDGE",
+        "monitor_side": "NONE",
+        "decision": "WATCH_ONLY_MODEL_DISAGREEMENT",
+        "warnings": ["model_state_probability_gap"],
+        "boundary": "read-only websocket market-state stream; no orders submitted",
+    }
+
+
+def test_stream_snapshot_store_tracks_latest_payload_and_reconnect_warnings() -> None:
+    store = StreamSnapshotStore()
+
+    store.record_line(json.dumps({"warning": "kalshi_ws_reconnect_failed", "error": "boom"}))
+    store.record_line(json.dumps(_sample_stream_payload()))
+    snapshot = store.snapshot()
+
+    assert snapshot["events_seen"] == 1
+    assert snapshot["warning_count"] == 1
+    assert snapshot["last_warning"]["warning"] == "kalshi_ws_reconnect_failed"
+    assert snapshot["latest"]["market_ticker"] == "KXBTC15M-TEST"
+    assert snapshot["latest"]["decision"] == "WATCH_ONLY_MODEL_DISAGREEMENT"
+
+
+def test_collect_stream_dashboard_data_projects_latest_stream_state() -> None:
+    store = StreamSnapshotStore()
+    store.record_line(json.dumps(_sample_stream_payload()))
+
+    data = collect_stream_dashboard_data(
+        FakeBot(),
+        store,
+        include_service_status=False,
+        stream_emit_min_interval_seconds=1.0,
+    )
+
+    assert data["boundary"] == "guarded live IOC limit orders enabled"
+    assert data["strategy"]["stream_emit_min_interval_seconds"] == 1.0
+    assert data["stream"]["latest"]["market_ticker"] == "KXBTC15M-TEST"
+    assert data["stream"]["latest"]["monitor_action"] == "NO_EDGE"
+
+
+def test_render_stream_dashboard_html_includes_live_stream_shell_and_latest_state() -> None:
+    store = StreamSnapshotStore()
+    store.record_line(json.dumps(_sample_stream_payload()))
+    data = collect_stream_dashboard_data(
+        FakeBot(),
+        store,
+        include_service_status=False,
+        stream_emit_min_interval_seconds=1.0,
+    )
+
+    text = render_stream_dashboard_html(data)
+
+    assert "Kalshi BTC Stream" in text
+    assert "/api/stream" in text
+    assert "KXBTC15M-TEST" in text
+    assert "WATCH_ONLY_MODEL_DISAGREEMENT" in text
+    assert "NO_EDGE" in text
+    assert "best_ev" in text
+    assert "prob_edge" in text
+    assert "no live orders submitted" in text
     assert "KALSHI_API_KEY" not in text
 
 

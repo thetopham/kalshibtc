@@ -119,6 +119,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=60.0,
         help="Operator display hint for the running scan loop cadence (default: 60)",
     )
+    dashboard.add_argument(
+        "--stream",
+        action="store_true",
+        help="Start the read-only websocket stream collector and serve the stream dashboard at /",
+    )
+    dashboard.add_argument(
+        "--stream-emit-min-interval-seconds",
+        type=float,
+        default=1.0,
+        help="Minimum seconds between stream dashboard state updates (default: 1.0)",
+    )
     backtest = sub.add_parser("backtest", help="Run offline BTC 15m directional backtest")
     backtest.add_argument("--show-trades", action="store_true", help="Include synthetic trades in JSON")
     return parser
@@ -281,6 +292,8 @@ def main(argv: list[str] | None = None) -> int:
                 token=args.token,
                 refresh_seconds=args.refresh_seconds,
                 scan_interval_seconds=args.scan_interval_seconds,
+                stream=args.stream,
+                stream_emit_min_interval_seconds=args.stream_emit_min_interval_seconds,
             )
             return 0
 
