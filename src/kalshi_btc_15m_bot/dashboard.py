@@ -141,8 +141,9 @@ def collect_dashboard_data(
     live_account = live.get("account") or {}
     performance = status.get("performance") or {}
     paper_account = status.get("paper_account") or {}
+    paper_results_path = _dashboard_paper_results_path(config)
     paper_performance = collect_paper_trading_performance(
-        config.ledger_path,
+        paper_results_path,
         snapshot_path=_dashboard_snapshot_path(config),
     )
 
@@ -160,6 +161,7 @@ def collect_dashboard_data(
             "candle_granularity_seconds": config.market_data.granularity_seconds,
             "scan_interval_seconds": scan_interval_seconds,
             "ledger_path": str(config.ledger_path),
+            "paper_results_1s_path": str(paper_results_path),
             "data_dir": str(config.data_dir),
         },
         "portfolio": {
@@ -1077,11 +1079,41 @@ def _mapping(value: Any) -> Mapping[str, Any]:
 
 
 def _dashboard_snapshot_path(config: Any) -> Path:
+    recorder_owned = Path("data/realtime-snapshots-1s.sqlite3").resolve()
     configured = getattr(config, "realtime_snapshots_path", None)
+    configured_path = Path(configured) if configured is not None else None
+    data_dir = Path(getattr(config, "data_dir", Path("data")))
+    data_dir_candidate = data_dir / "realtime-snapshots-1s.sqlite3"
+
+    if configured_path is not None and recorder_owned.exists():
+        try:
+            if configured_path.resolve() != recorder_owned:
+                return recorder_owned
+        except OSError:
+            return recorder_owned
+    if configured_path is not None and configured_path.exists():
+        return configured_path
+    if data_dir_candidate.exists():
+        return data_dir_candidate
+    if recorder_owned.exists():
+        return recorder_owned
+    if configured_path is not None:
+        return configured_path
+    return data_dir_candidate
+
+
+def _dashboard_paper_results_path(config: Any) -> Path:
+    configured = getattr(config, "paper_results_1s_path", None)
     if configured is not None:
         return Path(configured)
-    data_dir = getattr(config, "data_dir", Path("data"))
-    return Path(data_dir) / "realtime-snapshots-1s.sqlite3"
+    data_dir = Path(getattr(config, "data_dir", Path("data")))
+    one_second_results = data_dir / "paper-results-1s.sqlite3"
+    if one_second_results.exists():
+        return one_second_results
+    legacy = getattr(config, "ledger_path", None)
+    if legacy is not None:
+        return Path(legacy)
+    return one_second_results
 
 
 def _rows(value: Any, renderer: Any, empty: str) -> str:

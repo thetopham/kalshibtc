@@ -119,7 +119,23 @@ That makes the intended development loop:
 
 ## Paper review loop
 
-Do not add strategy complexity until the simple slope + above/below rule has enough paper evidence. Run the 1s collector/paper path and persist:
+Do not add strategy complexity until the simple slope + above/below rule has enough paper evidence. Keep the live 1s data stream and paper results in separate databases:
+
+```text
+data/realtime-snapshots-1s.sqlite3       # recorder-owned stream DB; recorder keeps adding 1s rows
+data-live-prod/paper-results-1s.sqlite3  # paper executor results DB; signals/fake fills/exits/PnL
+```
+
+The paper executor does not chmod the stream DB, does not open it in read-only file mode, and does not write result tables into it. It only SELECTs from the stream tape and writes all generated research results to the separate results DB:
+
+```bash
+python -m kalshibtc.paper_signal_executor \
+  --snapshot-db data/realtime-snapshots-1s.sqlite3 \
+  --results-db data-live-prod/paper-results-1s.sqlite3 \
+  --loop --interval-seconds 1
+```
+
+Run the 1s collector/paper path and persist:
 
 1. every 1s BTC tick;
 2. Kalshi order book snapshots;

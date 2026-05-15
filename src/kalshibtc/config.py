@@ -27,7 +27,7 @@ class BotConfig:
     series_ticker: str = "KXBTC15M"
     data_dir: Path = Path("data")
     snapshot_db_name: str = "realtime-snapshots-1s.sqlite3"
-    paper_db_name: str = "paper-ledger.sqlite3"
+    paper_db_name: str = "paper-results-1s.sqlite3"
     risk: RiskLimits = RiskLimits()
     live_orders_enabled: bool = False
 
