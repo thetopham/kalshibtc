@@ -299,6 +299,30 @@ def test_collect_dashboard_data_adds_sqlite_paper_performance_summary(tmp_path: 
     assert review[0]["seconds_to_expiry"] == pytest.approx(899.0)
     assert review[0]["reason"] == "above strike + trend up"
 
+    buckets = perf["review_buckets"]
+    by_strategy = {row["bucket"]: row for row in buckets["strategy"]}
+    assert by_strategy["simple_directional"]["trades"] == 3
+    assert by_strategy["simple_directional"]["win_rate"] == pytest.approx(2 / 3)
+    assert by_strategy["simple_directional"]["avg_pnl"] == pytest.approx(10.0 / 3)
+    assert by_strategy["simple_directional"]["total_pnl"] == pytest.approx(10.0)
+    assert by_strategy["simple_directional"]["avg_hold_seconds"] == pytest.approx(219.0)
+
+    by_side = {row["bucket"]: row for row in buckets["side"]}
+    assert by_side["YES"]["trades"] == 2
+    assert by_side["YES"]["total_pnl"] == pytest.approx(14.0)
+    assert by_side["NO"]["trades"] == 1
+    assert by_side["NO"]["total_pnl"] == pytest.approx(-4.0)
+
+    assert {row["bucket"] for row in buckets["seconds_to_expiry"]} == {"420-900"}
+    assert buckets["seconds_to_expiry"][0]["trades"] == 3
+    assert buckets["distance_from_strike"][0]["bucket"] == "close:10-25"
+    assert buckets["distance_from_strike"][0]["trades"] == 3
+    assert buckets["slope_at_entry"][0]["bucket"] == "medium:1-3"
+    assert buckets["slope_at_entry"][0]["trades"] == 3
+    by_hold = {row["bucket"]: row for row in buckets["hold_seconds"]}
+    assert by_hold["0-60"]["trades"] == 1
+    assert by_hold["180-420"]["trades"] == 2
+
 
 def test_render_dashboard_html_includes_paper_trading_performance_panel(tmp_path: Path) -> None:
     ledger_path = tmp_path / "paper-ledger.sqlite3"
@@ -311,10 +335,12 @@ def test_render_dashboard_html_includes_paper_trading_performance_panel(tmp_path
     assert "cumulative-pnl-chart" in text
     assert "Recent paper trades" in text
     assert "Paper PnL Review" in text
-    assert "strategy" in text
-    assert "slope_at_entry" in text
-    assert "distance_from_strike" in text
+    assert "Paper Review Buckets" in text
     assert "seconds_to_expiry" in text
+    assert "distance_from_strike" in text
+    assert "slope_at_entry" in text
+    assert "hold_seconds" in text
+    assert "medium:1-3" in text
     assert "simple_directional" in text
     assert "above strike + trend up" in text
     assert "Grouped by signal" in text
@@ -341,12 +367,27 @@ def test_render_dashboard_html_escapes_paper_review_text() -> None:
         }
     ]
 
+    data["paper_performance"]["review_buckets"] = {
+        "strategy": [
+            {
+                "bucket": "<img src=x onerror=alert(1)>",
+                "trades": 1,
+                "win_rate": 1.0,
+                "avg_pnl": 1.25,
+                "total_pnl": 1.25,
+                "avg_hold_seconds": 12.0,
+            }
+        ]
+    }
+
     text = render_dashboard_html(data)
 
     assert "<b>simple</b>" not in text
     assert "<script>alert(1)</script>" not in text
+    assert "<img src=x onerror=alert(1)>" not in text
     assert "&lt;b&gt;simple&lt;/b&gt;" in text
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in text
+    assert "&lt;img src=x onerror=alert(1)&gt;" in text
 
 
 def test_render_dashboard_html_includes_cards_and_read_only_boundary() -> None:

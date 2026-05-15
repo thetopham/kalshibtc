@@ -127,7 +127,7 @@ Do not add strategy complexity until the simple slope + above/below rule has eno
 4. fake fills;
 5. exits and PnL.
 
-The `/status` dashboard exposes a **Paper PnL Review** table with these review columns: strategy, side, entry time, exit time, entry price, exit price, PnL, hold seconds, slope at entry, distance from strike, seconds to expiry, and reason. The operator question is: does simple slope + above/below actually have edge, or is it just noise?
+The `/status` dashboard exposes a **Paper PnL Review** table with these review columns: strategy, side, entry time, exit time, entry price, exit price, PnL, hold seconds, slope at entry, distance from strike, seconds to expiry, and reason. It also exposes **Paper Review Buckets** grouped by strategy, side, seconds-to-expiry bucket, distance-from-strike bucket, slope-at-entry bucket, and hold-seconds bucket. Each bucket reports trades, win rate, average PnL, total PnL, and average hold seconds. The operator question is: does simple slope + above/below actually have edge, and where, or is it just noise?
 
 ## Safety boundary
 

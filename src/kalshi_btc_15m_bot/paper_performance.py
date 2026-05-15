@@ -11,6 +11,14 @@ CLOSED_STATUSES = {"CLOSED", "SETTLED"}
 PAPER_TRADES_TABLE = "paper_trades"
 PREDICTIONS_TABLE = "predictions"
 REALTIME_SNAPSHOTS_TABLE = "realtime_snapshots_1s"
+REVIEW_BUCKET_KEYS = (
+    "strategy",
+    "side",
+    "seconds_to_expiry",
+    "distance_from_strike",
+    "slope_at_entry",
+    "hold_seconds",
+)
 
 
 def collect_paper_trading_performance(
@@ -77,6 +85,14 @@ def collect_paper_trading_performance(
             }
 
             metrics = _summary_metrics(conn, unrealized_state)
+            review_trades = _review_trades(
+                conn,
+                has_predictions=has_predictions,
+                trade_columns=trade_columns,
+                prediction_columns=prediction_columns,
+                marked_open_positions=marked_open_positions,
+                limit=recent_limit,
+            )
             payload.update(
                 {
                     "metrics": metrics,
@@ -86,14 +102,8 @@ def collect_paper_trading_performance(
                         has_predictions=has_predictions,
                         limit=recent_limit,
                     ),
-                    "review_trades": _review_trades(
-                        conn,
-                        has_predictions=has_predictions,
-                        trade_columns=trade_columns,
-                        prediction_columns=prediction_columns,
-                        marked_open_positions=marked_open_positions,
-                        limit=recent_limit,
-                    ),
+                    "review_trades": review_trades,
+                    "review_buckets": _review_buckets(review_trades, limit=group_limit),
                     "cumulative_pnl": _cumulative_pnl(conn, limit=cumulative_limit),
                     "by_signal": _group_by_signal(
                         conn,
@@ -142,10 +152,15 @@ def _empty_payload(ledger_path: Path, snapshot_path: Path | None) -> dict[str, A
         "open_positions": [],
         "recent_trades": [],
         "review_trades": [],
+        "review_buckets": _empty_review_buckets(),
         "cumulative_pnl": [],
         "by_signal": [],
         "by_market": [],
     }
+
+
+def _empty_review_buckets() -> dict[str, list[dict[str, Any]]]:
+    return {key: [] for key in REVIEW_BUCKET_KEYS}
 
 
 def _connect_readonly(path: Path) -> sqlite3.Connection:
@@ -423,6 +438,154 @@ def _normalize_review_row(
         or data.get("signal")
         or data.get("strategy"),
     }
+
+
+def _review_buckets(review_rows: list[dict[str, Any]], *, limit: int) -> dict[str, list[dict[str, Any]]]:
+    capped_limit = max(1, int(limit))
+    return {
+        "strategy": _aggregate_review_buckets(
+            review_rows,
+            lambda row: (str(row.get("strategy") or "unknown"), 0),
+            limit=capped_limit,
+        ),
+        "side": _aggregate_review_buckets(
+            review_rows,
+            lambda row: (str(row.get("side") or "unknown"), 0),
+            limit=capped_limit,
+        ),
+        "seconds_to_expiry": _aggregate_review_buckets(
+            review_rows,
+            lambda row: _seconds_to_expiry_bucket(row.get("seconds_to_expiry")),
+            limit=capped_limit,
+        ),
+        "distance_from_strike": _aggregate_review_buckets(
+            review_rows,
+            lambda row: _distance_from_strike_bucket(row.get("distance_from_strike")),
+            limit=capped_limit,
+        ),
+        "slope_at_entry": _aggregate_review_buckets(
+            review_rows,
+            lambda row: _slope_at_entry_bucket(row.get("slope_at_entry")),
+            limit=capped_limit,
+        ),
+        "hold_seconds": _aggregate_review_buckets(
+            review_rows,
+            lambda row: _hold_seconds_bucket(row.get("hold_seconds")),
+            limit=capped_limit,
+        ),
+    }
+
+
+def _aggregate_review_buckets(
+    review_rows: list[dict[str, Any]],
+    bucket_fn: Any,
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = {}
+    for row in review_rows:
+        bucket, bucket_order = bucket_fn(row)
+        group = groups.setdefault(
+            bucket,
+            {
+                "bucket": bucket,
+                "bucket_order": bucket_order,
+                "trades": 0,
+                "pnl_trades": 0,
+                "wins": 0,
+                "total_pnl": 0.0,
+                "hold_count": 0,
+                "total_hold_seconds": 0.0,
+            },
+        )
+        group["trades"] += 1
+        pnl = _float_or_none(row.get("pnl"))
+        if pnl is not None:
+            group["pnl_trades"] += 1
+            group["total_pnl"] += pnl
+            if pnl > 0:
+                group["wins"] += 1
+        hold_seconds = _float_or_none(row.get("hold_seconds"))
+        if hold_seconds is not None:
+            group["hold_count"] += 1
+            group["total_hold_seconds"] += hold_seconds
+
+    normalized: list[dict[str, Any]] = []
+    for group in groups.values():
+        pnl_trades = _int(group.get("pnl_trades"))
+        hold_count = _int(group.get("hold_count"))
+        total_pnl = _float(group.get("total_pnl"))
+        normalized.append(
+            {
+                "bucket": group.get("bucket"),
+                "bucket_order": group.get("bucket_order"),
+                "trades": _int(group.get("trades")),
+                "pnl_trades": pnl_trades,
+                "wins": _int(group.get("wins")),
+                "win_rate": (_int(group.get("wins")) / pnl_trades) if pnl_trades else 0.0,
+                "avg_pnl": (total_pnl / pnl_trades) if pnl_trades else None,
+                "total_pnl": total_pnl,
+                "avg_hold_seconds": (
+                    _float(group.get("total_hold_seconds")) / hold_count if hold_count else None
+                ),
+            }
+        )
+    normalized.sort(key=lambda item: (_int(item.get("bucket_order")), str(item.get("bucket"))))
+    return normalized[:limit]
+
+
+def _seconds_to_expiry_bucket(value: Any) -> tuple[str, int]:
+    seconds = _float_or_none(value)
+    if seconds is None:
+        return ("unknown", 999)
+    if seconds < 60:
+        return ("0-60", 0)
+    if seconds < 180:
+        return ("60-180", 1)
+    if seconds < 420:
+        return ("180-420", 2)
+    if seconds <= 900:
+        return ("420-900", 3)
+    return ("900+", 4)
+
+
+def _distance_from_strike_bucket(value: Any) -> tuple[str, int]:
+    distance = _float_or_none(value)
+    if distance is None:
+        return ("unknown", 999)
+    abs_distance = abs(distance)
+    if abs_distance < 10:
+        return ("very_close:<10", 0)
+    if abs_distance < 25:
+        return ("close:10-25", 1)
+    if abs_distance < 75:
+        return ("medium:25-75", 2)
+    return ("far:75+", 3)
+
+
+def _slope_at_entry_bucket(value: Any) -> tuple[str, int]:
+    slope = _float_or_none(value)
+    if slope is None:
+        return ("unknown", 999)
+    abs_slope = abs(slope)
+    if abs_slope < 1:
+        return ("weak:<1", 0)
+    if abs_slope < 3:
+        return ("medium:1-3", 1)
+    return ("strong:3+", 2)
+
+
+def _hold_seconds_bucket(value: Any) -> tuple[str, int]:
+    seconds = _float_or_none(value)
+    if seconds is None:
+        return ("unknown", 999)
+    if seconds < 60:
+        return ("0-60", 0)
+    if seconds < 180:
+        return ("60-180", 1)
+    if seconds < 420:
+        return ("180-420", 2)
+    return ("420+", 3)
 
 
 def _open_positions(conn: sqlite3.Connection, *, has_predictions: bool) -> list[dict[str, Any]]:
