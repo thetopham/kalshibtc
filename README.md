@@ -1,25 +1,56 @@
-# Kalshi BTC 15m Bot
+# kalshibtc — boring 1s Kalshi BTC paper bot
 
-A paper-first Python bot for Kalshi's `KXBTC15M` BTC Up/Down 15-minute markets, with an explicit guarded live adapter for tiny IOC limit orders once you opt in.
+## Current Focus
 
-Safety boundary: default config is paper-only. Live trading requires a separate live config, Kalshi credentials outside the repo, a literal acknowledgement string, demo/production environment selection, hard dollar/contract caps, cash reserve gates, and SQLite audit logging before any order path is constructed.
+This repo's current target is the boring **1-second websocket-first Kalshi BTC bot** for `KXBTC15M` markets.
 
-## Current direction: 1s websocket-first, boring modules
+- **Current bot:** 1s websocket-first bot.
+- **Current package:** `src/kalshibtc/`.
+- **Current data collector:** `kbtc15 --config configs/default.toml record-1s --emit-min-interval-seconds 1`.
+- **Current paper loop:** `python -m kalshibtc.paper_signal_executor`.
+- **Current strategy:** `SimpleDirectionalStrategy`.
+- **Current question:** does simple slope + above/below have edge, or is it just noise?
 
-There are currently two bot lines in this repo:
-
-- **Legacy 1-minute scanner**: the original `kalshi_btc_15m_bot` path (`scan`, `run`, predictor/model blend, ledger, dashboard, guarded live adapter). It still works, but it accumulated research/dashboard feature creep.
-- **1-second websocket bot**: the current target. It should collect a clean 1 Hz BTC/Kalshi tape, run simple strategy/analyzer modules, backtest or paper trade multiple strategies at once, and keep execution separate from signal generation.
-
-New strategy work should happen in the boring modular package at `src/kalshibtc/`, documented in [docs/1s-modular-architecture.md](docs/1s-modular-architecture.md). The intended core flow is:
+The intended v1 flow is:
 
 ```text
-1s datafeed → market state builder → slope/analyzer → strategy → risk/position sizing → paper/live adapter → logger/database/dashboard/stats
+1s datafeed -> market state builder -> slope/analyzer -> strategy -> risk/position sizing -> paper executor -> logger/database/dashboard/stats
 ```
 
-The important boundary is: **strategies emit `Signal`; risk sizes/blocks; executors fill/submit.** Strategy logic must be reusable in live paper mode, historical replay mode, and a future real Kalshi adapter without rewriting the strategy.
+The package boundary is the point of the refocus: **strategies emit `Signal`; risk sizes/blocks; executors fill/submit.** Strategy logic must not submit orders. Execution adapters must not decide strategy.
 
-## What it does
+Start here:
+
+- [docs/CURRENT_1S_BOT.md](docs/CURRENT_1S_BOT.md) — one-page overview of the current 1s bot.
+- [docs/1s-modular-architecture.md](docs/1s-modular-architecture.md) — module seams and architecture details.
+- [docs/LEGACY.md](docs/LEGACY.md) — what the old package is and why not to extend it now.
+
+Safety boundary: default config is paper-only. Live trading requires a separate live config, Kalshi credentials outside the repo, a literal acknowledgement string, demo/production environment selection, hard dollar/contract caps, cash reserve gates, and SQLite audit logging before any order path is constructed. Do not enable live orders as part of current 1s paper research.
+
+## Legacy / Do Not Extend
+
+Legacy path: `src/kalshi_btc_15m_bot/`.
+
+This contains the older 1-minute scanner, predictor/model blend, legacy dashboard, ledger, and guarded live-order code. Keep it available as reference, but do **not** add new strategy work there. Do not merge the legacy and 1s implementations yet, and do not delete the legacy package while it remains useful reference code.
+
+## Next Real Task
+
+Review `data-live-prod/paper-results-1s.sqlite3` before adding strategy complexity:
+
+- total PnL
+- win rate
+- average PnL
+- PnL by side
+- PnL by seconds-to-expiry bucket
+- PnL by distance-from-strike bucket
+- PnL by slope-at-entry bucket
+- PnL by hold-time bucket
+
+The purpose is to answer: **does simple slope + above/below actually have edge, and where, or is it just noise?**
+
+## What still exists in this repo
+
+The Current Focus above is the source of truth for new work. The capabilities below remain documented because old commands still exist, but the legacy scanner/model/dashboard/live-order path is not where new strategy work belongs.
 
 - Finds the current Kalshi BTC 15-minute up/down market from the public API.
 - Pulls BTC 15-minute candles from Coinbase by default, with optional Binance REST support.

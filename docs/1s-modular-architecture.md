@@ -1,9 +1,14 @@
 # 1s Modular Kalshi BTC Bot Architecture
 
+Companion docs:
+
+- [CURRENT_1S_BOT.md](CURRENT_1S_BOT.md) is the one-page operator/dev overview for the current boring 1s bot.
+- [LEGACY.md](LEGACY.md) explains the old `src/kalshi_btc_15m_bot/` path and why new strategy work should not go there.
+
 This repo now has two bot lines:
 
 1. **Legacy 1-minute scanner** — the original `kalshi_btc_15m_bot` CLI path (`scan`, `run`, predictor, live guards). It has useful ledger, dashboard, and live-order guardrail code, but also accumulated feature creep.
-2. **1-second websocket-first core** — the new boring `kalshibtc` package. This is the target shape for data collection, strategy development, replay/backtesting, parallel paper trading, and eventually a guarded broker adapter.
+2. **1-second websocket-first core** — the new boring `kalshibtc` package. This is the target shape for data collection, strategy development, replay/backtesting, paper execution, and clean adapter seams. Live adapters remain disabled/out of scope for the current evidence-gathering loop.
 
 The near-term goal is not to delete the legacy scanner. The goal is to stop adding strategy/execution complexity to it and move new work into simple seams that can be tested offline.
 
@@ -20,10 +25,12 @@ strategy module(s)
    ↓
 risk filter / position sizing
    ↓
-paper or live broker adapter
+paper executor
    ↓
 logger + database + dashboard/reports/stats
 ```
+
+Current strategy/risk/replay work stops at paper execution. Any real-order adapter stays disabled until the paper evidence review justifies a separate live-safety task.
 
 Strategy logic must not submit orders. Execution adapters must not decide strategy.
 
