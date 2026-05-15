@@ -19,6 +19,10 @@ python -m kalshibtc.paper_signal_executor \
 
 The installed script alias is `kbtc15-1s-paper`.
 
+## Known active gap
+
+PR #7 preserves paper execution over existing snapshot DBs. The active 1s recorder command still needs to be re-created as a small clean module, not restored from the legacy CLI wholesale.
+
 ## Database split
 
 Keep these databases separate:
