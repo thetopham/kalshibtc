@@ -202,9 +202,55 @@ def test_zero_values_are_preserved_in_fallback_fields() -> None:
     assert row["edge_yes"] == pytest.approx(0.0)
     assert row["edge_no"] == pytest.approx(0.0)
     assert row["best_side"] is None
-    assert row["yes_spread"] == pytest.approx(0.0)
-    assert row["min_spread"] == pytest.approx(0.0)
-    assert row["spread"] == pytest.approx(0.0)
+    assert row["yes_bid"] == 0.0
+    assert row["yes_ask"] == 0.0
+    assert row["yes_spread"] == 0.0
+    assert row["min_spread"] == 0.0
+    assert row["spread"] == 0.0
+
+
+def test_recorder_rounds_normalized_columns_without_rounding_raw_payload(tmp_path) -> None:
+    recorder = RealtimeSnapshotRecorder(tmp_path / "snapshots.sqlite3")
+    payload = sample_stream_payload(
+        current_price=100_125.1299,
+        target_price=100_000.125,
+        distance_to_target=125.0049,
+        seconds_to_close=600.123456,
+        minutes_to_close=10.0020576,
+        btc_velocity_30s=1.123456789,
+        slope_30s=1.123456789,
+        spread=None,
+        yes_bid=0.51,
+        yes_ask=0.52,
+        no_bid=0.477,
+        no_ask=0.49,
+        probability_yes=0.74009,
+        edge_yes=0.123456,
+    )
+
+    recorder.record_snapshot(payload)
+
+    row = rows(recorder)[0]
+    assert row["btc_price"] == 100_125.13
+    assert row["target_price"] == 100_000.12
+    assert row["distance_from_strike"] == 125.0
+    assert row["seconds_to_close"] == 600.123
+    assert row["minutes_to_close"] == 10.002
+    assert row["btc_velocity_30s"] == 1.123457
+    assert row["slope_30s"] == 1.123457
+    assert row["probability_yes"] == 0.7401
+    assert row["edge_yes"] == 0.1235
+    assert row["yes_spread"] == 0.01
+    assert row["no_spread"] == 0.013
+    assert row["min_spread"] == 0.01
+    assert row["spread"] == 0.01
+
+    raw = json.loads(row["raw_state_json"])
+    assert raw["current_price"] == 100_125.1299
+    assert raw["target_price"] == 100_000.125
+    assert raw["seconds_to_close"] == 600.123456
+    assert raw["yes_ask"] == 0.52
+    assert raw["no_bid"] == 0.477
 
 
 def test_yes_no_and_min_spreads_are_computed_from_top_of_book() -> None:

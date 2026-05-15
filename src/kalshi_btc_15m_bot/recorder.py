@@ -12,6 +12,64 @@ from .models import now_utc, parse_ts
 SNAPSHOT_DB_FILENAME = "realtime-snapshots-1s.sqlite3"
 VOLUME_TODO = "Kalshi trade/volume websocket fields are not available in the current stream payload."
 
+ROUND_PRICE_COLUMNS = {
+    "btc_price",
+    "strike",
+    "target_price",
+    "distance_from_strike",
+    "abs_distance_from_strike",
+}
+ROUND_TIME_COLUMNS = {"seconds_to_close", "minutes_to_close", "seconds_since_last_strike_cross"}
+ROUND_VELOCITY_COLUMNS = {
+    "btc_velocity_10s",
+    "slope_10s",
+    "btc_velocity_30s",
+    "slope_30s",
+    "btc_velocity_60s",
+    "slope_60s",
+    "distance_velocity_30s",
+    "distance_pct",
+}
+ROUND_PROBABILITY_COLUMNS = {
+    "yes_bid",
+    "yes_ask",
+    "no_bid",
+    "no_ask",
+    "yes_mid",
+    "no_mid",
+    "spread",
+    "yes_spread",
+    "no_spread",
+    "min_spread",
+    "market_implied_yes",
+    "probability_yes",
+    "probability_no",
+    "probability_delta_30s",
+    "probability_delta_60s",
+    "model_probability_yes",
+    "edge_yes",
+    "edge_no",
+    "last_trade_price",
+    "execution_confidence",
+}
+ROUND_DEPTH_VOLUME_COLUMNS = {
+    "yes_bid_depth",
+    "yes_ask_depth",
+    "no_bid_depth",
+    "no_ask_depth",
+    "cumulative_volume",
+    "volume_delta_1s",
+    "volume_delta_10s",
+    "volume_delta_60s",
+}
+ROUND_DECIMALS_BY_COLUMN = {
+    **dict.fromkeys(ROUND_PRICE_COLUMNS, 2),
+    **dict.fromkeys(ROUND_TIME_COLUMNS, 3),
+    **dict.fromkeys(ROUND_VELOCITY_COLUMNS, 6),
+    **dict.fromkeys(ROUND_PROBABILITY_COLUMNS, 4),
+    **dict.fromkeys(ROUND_DEPTH_VOLUME_COLUMNS, 4),
+}
+
 SNAPSHOT_COLUMNS = [
     "ts",
     "market_ticker",
@@ -286,7 +344,7 @@ def snapshot_row_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     elif "invalid_orderbook_quotes" in warnings:
         orderbook_warning = "invalid_orderbook_quotes"
 
-    return {
+    row = {
         "ts": ts,
         "market_ticker": str(payload.get("market_ticker") or "UNKNOWN"),
         "market_open_time": _iso_or_none(payload.get("market_open_time")),
@@ -364,6 +422,21 @@ def snapshot_row_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "raw_state_json": _json_dumps(payload),
         "created_at": now_utc().replace(microsecond=0).isoformat(),
     }
+    return _round_snapshot_row(row)
+
+
+def _round_snapshot_row(row: dict[str, Any]) -> dict[str, Any]:
+    for column, decimals in ROUND_DECIMALS_BY_COLUMN.items():
+        if column in row:
+            row[column] = _round_float_or_none(row[column], decimals)
+    return row
+
+
+def _round_float_or_none(value: Any, decimals: int) -> float | None:
+    numeric = _float_or_none(value)
+    if numeric is None:
+        return None
+    return round(numeric, decimals)
 
 
 def _snapshot_second(payload: Mapping[str, Any]) -> str:
