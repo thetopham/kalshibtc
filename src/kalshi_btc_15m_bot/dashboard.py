@@ -1192,10 +1192,14 @@ def _live_fill_row(row: Mapping[str, Any]) -> str:
 
 def _paper_trade_row(row: Mapping[str, Any]) -> str:
     pnl = row.get("realized_pnl")
+    settlement_detail = _paper_settlement_detail(row)
+    detail = esc(row.get("created_at"))
+    if settlement_detail:
+        detail += f" · {esc(settlement_detail)}"
     return (
         "<div class='row'>"
         f"<div><strong>{esc(row.get('status'))} {esc(row.get('side'))}</strong> <span class='badge'>{esc(row.get('market_ticker'))}</span>"
-        f"<div class='muted tiny'>{esc(row.get('created_at'))}</div></div>"
+        f"<div class='muted tiny'>{detail}</div></div>"
         f"<div class='mono'>notional={_money_or_dash(row.get('notional'))}<br>pnl={_signed_money_or_dash(pnl)}</div>"
         "</div>"
     )
@@ -1276,6 +1280,7 @@ def _paper_review_table(value: Any) -> str:
         "<th>slope_at_entry</th>"
         "<th>distance_from_strike</th>"
         "<th>seconds_to_expiry</th>"
+        "<th>settlement</th>"
         "<th>reason</th>"
         "</tr>"
     )
@@ -1341,16 +1346,55 @@ def _paper_review_table_row(row: Mapping[str, Any]) -> str:
         f"<td>{_num(row.get('slope_at_entry'), 3)}</td>"
         f"<td>{_num(row.get('distance_from_strike'), 2)}</td>"
         f"<td>{_num(row.get('seconds_to_expiry'), 0)}</td>"
+        f"<td>{esc(_paper_settlement_label(row))}</td>"
         f"<td>{esc(row.get('reason'))}</td>"
         "</tr>"
     )
 
 
+def _paper_settlement_label(row: Mapping[str, Any]) -> str:
+    label = row.get("settlement_source_label") or _paper_source_label(row.get("settlement_source"))
+    if label:
+        return str(label)
+    if str(row.get("status") or "").upper() == "SETTLED":
+        return "source unavailable"
+    return "—"
+
+
+def _paper_settlement_detail(row: Mapping[str, Any]) -> str | None:
+    label = row.get("settlement_source_label") or _paper_source_label(row.get("settlement_source"))
+    if not label:
+        return None
+    detail = f"settlement: {label}"
+    official_result = row.get("official_result")
+    if official_result:
+        detail += f" result={official_result}"
+    official_value = _float_or_none(row.get("official_expiration_value"))
+    if official_value is not None:
+        detail += f" official_btc={official_value:,.2f}"
+    return detail
+
+
+def _paper_source_label(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    source = str(value)
+    if source == "kalshi_official":
+        return "official (Kalshi)"
+    if source == "coinbase_estimate":
+        return "estimated (Coinbase/raw)"
+    return source
+
+
 def _paper_performance_trade_row(row: Mapping[str, Any]) -> str:
+    settlement_detail = _paper_settlement_detail(row)
+    detail = f"{esc(row.get('created_at'))} · {esc(row.get('exit_reason') or 'open')}"
+    if settlement_detail:
+        detail += f" · {esc(settlement_detail)}"
     return (
         "<div class='row'>"
         f"<div><strong>{esc(row.get('status'))} {esc(row.get('signal') or row.get('side'))}</strong> <span class='badge'>{esc(row.get('market_ticker'))}</span>"
-        f"<div class='muted tiny'>{esc(row.get('created_at'))} · {esc(row.get('exit_reason') or 'open')}</div></div>"
+        f"<div class='muted tiny'>{detail}</div></div>"
         f"<div class='mono'>entry={_num(row.get('entry_price'), 3)} exit={_num(row.get('exit_price'), 3)}<br>notional={_money_or_dash(row.get('notional'))} pnl={_signed_money_or_dash(row.get('realized_pnl'))}</div>"
         "</div>"
     )

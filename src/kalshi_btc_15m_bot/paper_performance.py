@@ -100,6 +100,7 @@ def collect_paper_trading_performance(
                     "recent_trades": _recent_trades(
                         conn,
                         has_predictions=has_predictions,
+                        trade_columns=trade_columns,
                         limit=recent_limit,
                     ),
                     "review_trades": review_trades,
@@ -246,12 +247,21 @@ def _recent_trades(
     conn: sqlite3.Connection,
     *,
     has_predictions: bool,
+    trade_columns: set[str],
     limit: int,
 ) -> list[dict[str, Any]]:
     join = "LEFT JOIN predictions p ON p.id = t.prediction_id" if has_predictions else ""
     signal_expr = "COALESCE(p.action, t.side)" if has_predictions else "t.side"
     edge_expr = "p.edge" if has_predictions else "NULL"
     confidence_expr = "p.confidence" if has_predictions else "NULL"
+    settlement_source_expr = "t.settlement_source" if "settlement_source" in trade_columns else "NULL"
+    official_result_expr = "t.official_result" if "official_result" in trade_columns else "NULL"
+    official_expiration_value_expr = (
+        "t.official_expiration_value" if "official_expiration_value" in trade_columns else "NULL"
+    )
+    settlement_value_dollars_expr = (
+        "t.settlement_value_dollars" if "settlement_value_dollars" in trade_columns else "NULL"
+    )
     rows = conn.execute(
         f"""
         SELECT
@@ -266,6 +276,10 @@ def _recent_trades(
             t.entry_price,
             t.exit_price,
             t.exit_reason,
+            {settlement_source_expr} AS settlement_source,
+            {official_result_expr} AS official_result,
+            {official_expiration_value_expr} AS official_expiration_value,
+            {settlement_value_dollars_expr} AS settlement_value_dollars,
             t.contracts,
             t.notional,
             t.status,
@@ -318,6 +332,14 @@ def _review_trades(
         close_exprs.append("p.market_close_time")
     close_time_expr = _coalesce_expr(close_exprs, fallback="NULL")
     prediction_id_expr = "t.prediction_id" if "prediction_id" in trade_columns else "NULL"
+    settlement_source_expr = "t.settlement_source" if "settlement_source" in trade_columns else "NULL"
+    official_result_expr = "t.official_result" if "official_result" in trade_columns else "NULL"
+    official_expiration_value_expr = (
+        "t.official_expiration_value" if "official_expiration_value" in trade_columns else "NULL"
+    )
+    settlement_value_dollars_expr = (
+        "t.settlement_value_dollars" if "settlement_value_dollars" in trade_columns else "NULL"
+    )
     rows = conn.execute(
         f"""
         SELECT
@@ -333,6 +355,10 @@ def _review_trades(
             t.entry_price,
             t.exit_price,
             t.exit_reason,
+            {settlement_source_expr} AS settlement_source,
+            {official_result_expr} AS official_result,
+            {official_expiration_value_expr} AS official_expiration_value,
+            {settlement_value_dollars_expr} AS settlement_value_dollars,
             t.status,
             t.realized_pnl,
             {features_expr} AS features_json,
@@ -428,6 +454,11 @@ def _normalize_review_row(
         "exit_time": exit_time,
         "entry_price": _float_or_none(data.get("entry_price")),
         "exit_price": _float_or_none(data.get("exit_price")),
+        "settlement_source": data.get("settlement_source"),
+        "settlement_source_label": _settlement_source_label(data.get("settlement_source")),
+        "official_result": data.get("official_result"),
+        "official_expiration_value": _float_or_none(data.get("official_expiration_value")),
+        "settlement_value_dollars": _float_or_none(data.get("settlement_value_dollars")),
         "pnl": pnl,
         "hold_seconds": hold_seconds,
         "slope_at_entry": slope_at_entry,
@@ -822,10 +853,24 @@ def _normalize_trade_row(row: sqlite3.Row) -> dict[str, Any]:
         "realized_pnl",
         "edge",
         "confidence",
+        "official_expiration_value",
+        "settlement_value_dollars",
     ):
         if key in data:
             data[key] = _float_or_none(data[key])
+    data["settlement_source_label"] = _settlement_source_label(data.get("settlement_source"))
     return data
+
+
+def _settlement_source_label(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    source = str(value)
+    if source == "kalshi_official":
+        return "official (Kalshi)"
+    if source == "coinbase_estimate":
+        return "estimated (Coinbase/raw)"
+    return source
 
 
 def _normalize_group_row(row: sqlite3.Row) -> dict[str, Any]:
