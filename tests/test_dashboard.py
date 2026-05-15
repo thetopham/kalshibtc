@@ -154,7 +154,11 @@ def _write_paper_performance_db(ledger_path: Path) -> None:
                 realized_pnl REAL,
                 settled_at TEXT,
                 exit_price REAL,
-                exit_reason TEXT
+                exit_reason TEXT,
+                settlement_source TEXT,
+                official_result TEXT,
+                official_expiration_value REAL,
+                settlement_value_dollars REAL
             );
             """
         )
@@ -184,8 +188,9 @@ def _write_paper_performance_db(ledger_path: Path) -> None:
             INSERT INTO paper_trades (
                 id, prediction_id, created_at, market_ticker, side, entry_price,
                 contracts, notional, status, market_close_time, realized_pnl,
-                settled_at, exit_price, exit_reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                settled_at, exit_price, exit_reason, settlement_source,
+                official_result, official_expiration_value, settlement_value_dollars
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -197,12 +202,16 @@ def _write_paper_performance_db(ledger_path: Path) -> None:
                     0.50,
                     40.0,
                     20.0,
-                    "CLOSED",
+                    "SETTLED",
                     "2026-05-14T16:15:00+00:00",
                     10.0,
                     "2026-05-14T16:05:00+00:00",
                     0.75,
-                    "stream_take_profit",
+                    "1s_expiry_above",
+                    "coinbase_estimate",
+                    None,
+                    None,
+                    None,
                 ),
                 (
                     "paper-loss",
@@ -219,6 +228,10 @@ def _write_paper_performance_db(ledger_path: Path) -> None:
                     "2026-05-14T16:15:30+00:00",
                     0.0,
                     "settlement_yes",
+                    "kalshi_official",
+                    "yes",
+                    100001.25,
+                    1.0,
                 ),
                 (
                     "paper-open",
@@ -231,6 +244,10 @@ def _write_paper_performance_db(ledger_path: Path) -> None:
                     20.0,
                     "OPEN",
                     "2026-05-14T16:15:00+00:00",
+                    None,
+                    None,
+                    None,
+                    None,
                     None,
                     None,
                     None,
@@ -303,6 +320,18 @@ def test_collect_dashboard_data_adds_sqlite_paper_performance_summary(tmp_path: 
     assert review[0]["distance_from_strike"] == pytest.approx(-10.0)
     assert review[0]["seconds_to_expiry"] == pytest.approx(899.0)
     assert review[0]["reason"] == "above strike + trend up"
+    assert review[1]["settlement_source"] == "kalshi_official"
+    assert review[1]["settlement_source_label"] == "official (Kalshi)"
+    assert review[1]["official_result"] == "yes"
+    assert review[1]["official_expiration_value"] == pytest.approx(100001.25)
+    assert review[2]["settlement_source"] == "coinbase_estimate"
+    assert review[2]["settlement_source_label"] == "estimated (Coinbase/raw)"
+
+    recent = perf["recent_trades"]
+    assert recent[1]["settlement_source"] == "kalshi_official"
+    assert recent[1]["settlement_source_label"] == "official (Kalshi)"
+    assert recent[2]["settlement_source"] == "coinbase_estimate"
+    assert recent[2]["settlement_source_label"] == "estimated (Coinbase/raw)"
 
     buckets = perf["review_buckets"]
     by_strategy = {row["bucket"]: row for row in buckets["strategy"]}
@@ -351,6 +380,10 @@ def test_render_dashboard_html_includes_paper_trading_performance_panel(tmp_path
     assert "Grouped by signal" in text
     assert "+$6.00" in text
     assert "+$4.00" in text
+    assert "official (Kalshi)" in text
+    assert "estimated (Coinbase/raw)" in text
+    assert "settlement: official (Kalshi)" in text
+    assert "settlement: estimated (Coinbase/raw)" in text
 
 
 def test_render_dashboard_html_escapes_paper_review_text() -> None:

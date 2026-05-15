@@ -4,11 +4,13 @@ import argparse
 import json
 import sqlite3
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from kalshi_btc_15m_bot.kalshi_client import KalshiPublicClient
 
 from .config import RiskLimits
 from .datafeed.models import OrderBookSnapshot, Tick
@@ -20,6 +22,21 @@ from .strategy.signals import Signal, Strategy
 from .strategy.simple_directional import SimpleDirectionalStrategy
 
 STREAM_TABLE = "realtime_snapshots_1s"
+KALSHI_PUBLIC_BASE_URL = "https://external-api.kalshi.com/trade-api/v2"
+SETTLEMENT_SOURCE_OFFICIAL = "kalshi_official"
+SETTLEMENT_SOURCE_ESTIMATE = "coinbase_estimate"
+
+
+@dataclass(frozen=True)
+class SettlementDecision:
+    outcome: str
+    settled_at: str
+    source: str
+    exit_reason_prefix: str
+    official_result: str | None = None
+    official_expiration_value: float | None = None
+    settlement_value_dollars: float | None = None
+    raw_json: str | None = None
 
 
 @dataclass(frozen=True)
@@ -46,6 +63,7 @@ class OneSecondPaperTrader:
         ledger_db: str | Path,
         strategies: Sequence[Strategy] | None = None,
         risk_limits: RiskLimits | None = None,
+        official_settlement_client: Any | None = None,
     ) -> None:
         self.snapshot_db = Path(snapshot_db)
         self.ledger_db = Path(ledger_db)
@@ -53,11 +71,16 @@ class OneSecondPaperTrader:
             raise ValueError("snapshot_db and ledger_db must be separate databases")
         self.strategies = list(strategies or [SimpleDirectionalStrategy()])
         self.risk_manager = RiskManager(risk_limits or RiskLimits())
+        self.official_settlement_client = official_settlement_client
         initialize_results_db(self.ledger_db)
 
     def run_once(self, *, limit: int = 250) -> PaperRunSummary:
         processed = signals = opened = closed = skipped = 0
-        with _connect_stream(self.snapshot_db) as stream, _connect_results(self.ledger_db) as results:
+        official_cache: dict[str, SettlementDecision | None] = {}
+        with (
+            _connect_stream(self.snapshot_db) as stream,
+            _connect_results(self.ledger_db) as results,
+        ):
             rows = _select_unprocessed_snapshots(stream, results, limit=limit)
             for row in rows:
                 snapshot_key = _snapshot_key(row)
@@ -74,8 +97,24 @@ class OneSecondPaperTrader:
                     continue
 
                 processed += 1
-                closed += _settle_expired_positions(results, state)
-                closed += _settle_expired_positions_from_stream(results, stream, state.tick.ts)
+                _upgrade_estimated_settlements(
+                    results,
+                    self.official_settlement_client,
+                    official_cache=official_cache,
+                )
+                closed += _settle_expired_positions(
+                    results,
+                    state,
+                    official_client=self.official_settlement_client,
+                    official_cache=official_cache,
+                )
+                closed += _settle_expired_positions_from_stream(
+                    results,
+                    stream,
+                    state.tick.ts,
+                    official_client=self.official_settlement_client,
+                    official_cache=official_cache,
+                )
                 open_positions = _open_position_count(results)
                 for strategy in self.strategies:
                     signal = strategy.on_tick(state)
@@ -104,7 +143,12 @@ class OneSecondPaperTrader:
                         if trade_opened:
                             opened += 1
                             open_positions += 1
-                closed += _settle_expired_positions(results, state)
+                closed += _settle_expired_positions(
+                    results,
+                    state,
+                    official_client=self.official_settlement_client,
+                    official_cache=official_cache,
+                )
                 _mark_snapshot_processed(results, snapshot_key)
                 _advance_cursor(results, row)
         return PaperRunSummary(
@@ -178,6 +222,11 @@ def initialize_results_db(path: str | Path) -> None:
                 settled_at TEXT,
                 exit_price REAL,
                 exit_reason TEXT,
+                settlement_source TEXT,
+                official_result TEXT,
+                official_expiration_value REAL,
+                settlement_value_dollars REAL,
+                settlement_raw_json TEXT,
                 FOREIGN KEY(prediction_id) REFERENCES predictions(id)
             );
 
@@ -188,6 +237,19 @@ def initialize_results_db(path: str | Path) -> None:
         )
         _ensure_column(conn, "predictions", "strategy", "TEXT NOT NULL DEFAULT 'unknown'")
         _ensure_column(conn, "paper_trades", "strategy", "TEXT NOT NULL DEFAULT 'unknown'")
+        _ensure_column(conn, "paper_trades", "settlement_source", "TEXT")
+        _ensure_column(conn, "paper_trades", "official_result", "TEXT")
+        _ensure_column(conn, "paper_trades", "official_expiration_value", "REAL")
+        _ensure_column(conn, "paper_trades", "settlement_value_dollars", "REAL")
+        _ensure_column(conn, "paper_trades", "settlement_raw_json", "TEXT")
+        conn.execute(
+            """
+            UPDATE paper_trades
+            SET settlement_source = ?
+            WHERE status = 'SETTLED' AND settlement_source IS NULL
+            """,
+            (SETTLEMENT_SOURCE_ESTIMATE,),
+        )
 
 
 def count_paper_trades(path: str | Path) -> int:
@@ -396,21 +458,40 @@ def _open_trade(
     return bool(inserted)
 
 
-def _settle_expired_positions(conn: sqlite3.Connection, state: MarketState) -> int:
+def _settle_expired_positions(
+    conn: sqlite3.Connection,
+    state: MarketState,
+    *,
+    official_client: Any | None = None,
+    official_cache: dict[str, SettlementDecision | None] | None = None,
+) -> int:
     if state.tick.ts < state.contract.close_time and state.seconds_to_close > 0:
         return 0
-    outcome = _settlement_outcome(state.price, state.strike)
     rows = conn.execute(
         "SELECT * FROM paper_trades WHERE market_ticker = ? AND status = 'OPEN'",
         (state.contract.ticker,),
     ).fetchall()
-    return _settle_trade_rows(conn, rows, outcome=outcome, settled_at=state.tick.ts.isoformat())
+    if not rows:
+        return 0
+    settlement = _official_settlement_for_market(
+        official_client,
+        state.contract.ticker,
+        official_cache=official_cache,
+    ) or _estimated_settlement(
+        price=state.price,
+        strike=state.strike,
+        settled_at=state.tick.ts.isoformat(),
+    )
+    return _settle_trade_rows(conn, rows, settlement=settlement)
 
 
 def _settle_expired_positions_from_stream(
     conn: sqlite3.Connection,
     stream: sqlite3.Connection,
     now: datetime,
+    *,
+    official_client: Any | None = None,
+    official_cache: dict[str, SettlementDecision | None] | None = None,
 ) -> int:
     rows = conn.execute(
         """
@@ -424,24 +505,80 @@ def _settle_expired_positions_from_stream(
     ).fetchall()
     settled = 0
     for row in rows:
+        market_ticker = str(row["market_ticker"])
+        official = _official_settlement_for_market(
+            official_client,
+            market_ticker,
+            official_cache=official_cache,
+        )
+        if official is not None:
+            settled += _settle_trade_rows(conn, [row], settlement=official)
+            continue
+
         settlement_row = _latest_settlement_snapshot(
             stream,
-            market_ticker=str(row["market_ticker"]),
+            market_ticker=market_ticker,
             close_time=str(row["market_close_time"]),
         )
         if settlement_row is None:
             continue
         try:
-            price = _float_value(_row_get(settlement_row, "btc_price", _row_get(settlement_row, "price")))
+            price = _float_value(
+                _row_get(settlement_row, "btc_price", _row_get(settlement_row, "price"))
+            )
             strike = _float_value(
                 _row_get(settlement_row, "target_price"),
                 _float_value(settlement_row["strike"]),
             )
         except (KeyError, TypeError, ValueError):
             continue
-        outcome = _settlement_outcome(price, strike)
-        settled += _settle_trade_rows(conn, [row], outcome=outcome, settled_at=now.isoformat())
+        settlement = _estimated_settlement(price=price, strike=strike, settled_at=now.isoformat())
+        settled += _settle_trade_rows(conn, [row], settlement=settlement)
     return settled
+
+
+def _upgrade_estimated_settlements(
+    conn: sqlite3.Connection,
+    official_client: Any | None,
+    *,
+    official_cache: dict[str, SettlementDecision | None] | None = None,
+) -> int:
+    if official_client is None:
+        return 0
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM paper_trades
+        WHERE status = 'SETTLED'
+          AND COALESCE(settlement_source, ?) = ?
+        """,
+        (SETTLEMENT_SOURCE_ESTIMATE, SETTLEMENT_SOURCE_ESTIMATE),
+    ).fetchall()
+    upgraded = 0
+    for row in rows:
+        settlement = _official_settlement_for_market(
+            official_client,
+            str(row["market_ticker"]),
+            official_cache=official_cache,
+        )
+        if settlement is None:
+            continue
+        cursor = conn.execute(
+            """
+            UPDATE paper_trades
+            SET settlement_result = ?, realized_pnl = ?, settled_at = ?,
+                exit_price = ?, exit_reason = ?, settlement_source = ?,
+                official_result = ?, official_expiration_value = ?,
+                settlement_value_dollars = ?, settlement_raw_json = ?
+            WHERE id = ?
+              AND status = 'SETTLED'
+              AND COALESCE(settlement_source, ?) = ?
+            """,
+            _settlement_update_values(row, settlement)
+            + (row["id"], SETTLEMENT_SOURCE_ESTIMATE, SETTLEMENT_SOURCE_ESTIMATE),
+        )
+        upgraded += cursor.rowcount
+    return upgraded
 
 
 def _latest_settlement_snapshot(
@@ -478,29 +615,184 @@ def _settlement_outcome(price: float, strike: float) -> str:
     return "above" if price > strike else "below" if price < strike else "at"
 
 
+def _estimated_settlement(*, price: float, strike: float, settled_at: str) -> SettlementDecision:
+    return SettlementDecision(
+        outcome=_settlement_outcome(price, strike),
+        settled_at=settled_at,
+        source=SETTLEMENT_SOURCE_ESTIMATE,
+        exit_reason_prefix="1s_expiry",
+    )
+
+
+def _official_settlement_for_market(
+    official_client: Any | None,
+    market_ticker: str,
+    *,
+    official_cache: dict[str, SettlementDecision | None] | None = None,
+) -> SettlementDecision | None:
+    if official_client is None:
+        return None
+    if official_cache is not None and market_ticker in official_cache:
+        return official_cache[market_ticker]
+    try:
+        market = official_client.get_market(market_ticker)
+    except Exception:
+        settlement = None
+    else:
+        settlement = _official_settlement_from_market(market)
+    if official_cache is not None:
+        official_cache[market_ticker] = settlement
+    return settlement
+
+
+def _official_settlement_from_market(market: Any) -> SettlementDecision | None:
+    raw = _official_market_mapping(market)
+    result = _first_text(
+        raw,
+        "result",
+        "settlement_result",
+        "final_result",
+        "winning_side",
+        "outcome",
+        "market_result",
+    )
+    outcome = _official_result_to_outcome(result)
+    if outcome is None:
+        return None
+    official_result = _normalize_official_result(result, outcome)
+    return SettlementDecision(
+        outcome=outcome,
+        settled_at=_first_text(raw, "settlement_ts", "settled_at", "expiration_time", "close_time")
+        or datetime.now(tz=UTC).isoformat(),
+        source=SETTLEMENT_SOURCE_OFFICIAL,
+        exit_reason_prefix="kalshi_official",
+        official_result=official_result,
+        official_expiration_value=_first_float_from_mapping(
+            raw,
+            "expiration_value",
+            "final_price",
+            "underlying_price",
+            "index_price",
+        ),
+        settlement_value_dollars=_first_float_from_mapping(
+            raw,
+            "settlement_value_dollars",
+            "settlement_value",
+            "payout_dollars",
+        ),
+        raw_json=_json(raw),
+    )
+
+
+def _official_market_mapping(market: Any) -> Mapping[str, Any]:
+    if isinstance(market, Mapping):
+        nested = market.get("market")
+        return nested if isinstance(nested, Mapping) else market
+    raw = getattr(market, "raw", None)
+    if isinstance(raw, Mapping):
+        nested = raw.get("market")
+        return nested if isinstance(nested, Mapping) else raw
+    to_jsonable = getattr(market, "to_jsonable", None)
+    if callable(to_jsonable):
+        data = to_jsonable()
+        if isinstance(data, Mapping):
+            return data
+    return {}
+
+
+def _official_result_to_outcome(result: str | None) -> str | None:
+    if result is None:
+        return None
+    token = str(result).strip().lower().replace(" ", "_").replace("-", "_")
+    if token in {"yes", "y", "true", "above", "yes_win", "yes_won", "yes_wins"}:
+        return "above"
+    if token in {
+        "no",
+        "n",
+        "false",
+        "below",
+        "at_or_below",
+        "no_win",
+        "no_won",
+        "no_wins",
+    }:
+        return "below"
+    if token == "at":
+        return "at"
+    return None
+
+
+def _normalize_official_result(result: str | None, outcome: str) -> str | None:
+    if result is None:
+        return None
+    token = str(result).strip().lower()
+    if token in {"yes", "no"}:
+        return token
+    if outcome == "above":
+        return "yes"
+    if outcome == "below":
+        return "no"
+    return token or None
+
+
+def _first_text(mapping: Mapping[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = mapping.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _first_float_from_mapping(mapping: Mapping[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = _float_or_none(mapping.get(key))
+        if value is not None:
+            return value
+    return None
+
+
 def _settle_trade_rows(
     conn: sqlite3.Connection,
     rows: Sequence[sqlite3.Row],
     *,
-    outcome: str,
-    settled_at: str,
+    settlement: SettlementDecision,
 ) -> int:
     settled = 0
     for row in rows:
-        won = (row["side"] == "YES" and outcome == "above") or (row["side"] == "NO" and outcome == "below")
-        exit_price = 1.0 if won else 0.0
-        pnl = float(row["contracts"]) * exit_price - float(row["notional"])
-        conn.execute(
+        cursor = conn.execute(
             """
             UPDATE paper_trades
             SET status = 'SETTLED', settlement_result = ?, realized_pnl = ?,
-                settled_at = ?, exit_price = ?, exit_reason = ?
+                settled_at = ?, exit_price = ?, exit_reason = ?, settlement_source = ?,
+                official_result = ?, official_expiration_value = ?,
+                settlement_value_dollars = ?, settlement_raw_json = ?
             WHERE id = ? AND status = 'OPEN'
             """,
-            (outcome, pnl, settled_at, exit_price, f"1s_expiry_{outcome}", row["id"]),
+            _settlement_update_values(row, settlement) + (row["id"],),
         )
-        settled += 1
+        settled += cursor.rowcount
     return settled
+
+
+def _settlement_update_values(row: sqlite3.Row, settlement: SettlementDecision) -> tuple[Any, ...]:
+    side = str(row["side"]).upper()
+    won = (side == "YES" and settlement.outcome == "above") or (
+        side == "NO" and settlement.outcome == "below"
+    )
+    exit_price = 1.0 if won else 0.0
+    pnl = float(row["contracts"]) * exit_price - float(row["notional"])
+    return (
+        settlement.outcome,
+        pnl,
+        settlement.settled_at,
+        exit_price,
+        f"{settlement.exit_reason_prefix}_{settlement.outcome}",
+        settlement.source,
+        settlement.official_result,
+        settlement.official_expiration_value,
+        settlement.settlement_value_dollars,
+        settlement.raw_json,
+    )
 
 
 def _can_open_trade(state: MarketState, risk: RiskDecision, paper_side: str | None) -> bool:
@@ -691,7 +983,9 @@ def main(argv: list[str] | None = None) -> int:
         default="data-live-prod/paper-results-1s.sqlite3",
         help="Separate writable results database for signals, fake fills, exits, and PnL.",
     )
-    parser.add_argument("--limit", type=int, default=250, help="Max new snapshots to process per pass.")
+    parser.add_argument(
+        "--limit", type=int, default=250, help="Max new snapshots to process per pass."
+    )
     parser.add_argument(
         "--loop",
         action="store_true",
@@ -704,11 +998,35 @@ def main(argv: list[str] | None = None) -> int:
         help="Sleep interval between loop passes when --loop is set.",
     )
     parser.add_argument("--json", action="store_true", help="Emit JSON summaries.")
+    parser.add_argument(
+        "--kalshi-base-url",
+        default=KALSHI_PUBLIC_BASE_URL,
+        help="Kalshi public REST base URL used only to read official market results for settlement.",
+    )
+    parser.add_argument(
+        "--official-settlement-timeout-seconds",
+        type=int,
+        default=10,
+        help="Timeout for read-only Kalshi official settlement lookups.",
+    )
+    parser.add_argument(
+        "--no-official-settlement",
+        action="store_true",
+        help="Disable Kalshi official result lookups and settle from Coinbase/raw 1s estimates only.",
+    )
     args = parser.parse_args(argv)
+
+    official_settlement_client = None
+    if not args.no_official_settlement:
+        official_settlement_client = KalshiPublicClient(
+            base_url=args.kalshi_base_url,
+            timeout_seconds=args.official_settlement_timeout_seconds,
+        )
 
     trader = OneSecondPaperTrader(
         snapshot_db=Path(args.snapshot_db),
         ledger_db=Path(args.results_db),
+        official_settlement_client=official_settlement_client,
     )
 
     def emit(summary: PaperRunSummary) -> None:
