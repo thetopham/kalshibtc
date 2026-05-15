@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -462,3 +463,75 @@ def test_1s_paper_trader_records_signal_but_blocks_wide_spread_fill(tmp_path: Pa
     assert predictions[0]["action"] == "BUY_YES"
     assert predictions[0]["stake_dollars"] == 0.0
     assert "spread_too_wide" in predictions[0]["reasons_json"]
+
+
+def test_1s_paper_trader_records_long_above_long_below_and_none_decisions(tmp_path: Path) -> None:
+    snapshot_db = tmp_path / "snapshots.sqlite3"
+    results_db = tmp_path / "paper-results-1s.sqlite3"
+    close_time = datetime(2026, 5, 15, 12, 10, tzinfo=UTC)
+    _snapshot_db(
+        snapshot_db,
+        rows=[
+            {
+                "ts": _iso(20),
+                "market_ticker": "KXBTC15M-ABOVE",
+                "market_close_time": close_time.isoformat(),
+                "btc_price": 100_025.0,
+                "strike": 100_000.0,
+                "btc_velocity_30s": 2.0,
+            },
+            {
+                "ts": _iso(21),
+                "market_ticker": "KXBTC15M-BELOW",
+                "market_close_time": close_time.isoformat(),
+                "btc_price": 99_975.0,
+                "strike": 100_000.0,
+                "btc_velocity_30s": -2.0,
+            },
+            {
+                "ts": _iso(22),
+                "market_ticker": "KXBTC15M-NONE",
+                "market_close_time": close_time.isoformat(),
+                "btc_price": 100_025.0,
+                "strike": 100_000.0,
+                "btc_velocity_30s": -2.0,
+            },
+        ],
+    )
+
+    trader = OneSecondPaperTrader(
+        snapshot_db=snapshot_db,
+        ledger_db=results_db,
+        risk_limits=RiskLimits(base_size_dollars=25.0, max_open_positions=5, max_spread=0.05),
+    )
+
+    summary = trader.run_once(limit=10)
+
+    assert summary.snapshots_processed == 3
+    assert summary.signals_recorded == 3
+    predictions = _ledger_rows(results_db, "predictions")
+    assert [(row["market_ticker"], row["action"], row["side"]) for row in predictions] == [
+        ("KXBTC15M-ABOVE", "BUY_YES", "YES"),
+        ("KXBTC15M-BELOW", "BUY_NO", "NO"),
+        ("KXBTC15M-NONE", "NO_TRADE", None),
+    ]
+
+
+def test_kalshibtc_package_does_not_import_legacy_15m_package() -> None:
+    package_root = Path(__file__).resolve().parents[1] / "src" / "kalshibtc"
+    offenders: list[str] = []
+    for path in sorted(package_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "kalshi_btc_15m_bot" or alias.name.startswith(
+                        "kalshi_btc_15m_bot."
+                    ):
+                        offenders.append(f"{path.relative_to(package_root)} imports {alias.name}")
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if module == "kalshi_btc_15m_bot" or module.startswith("kalshi_btc_15m_bot."):
+                    offenders.append(f"{path.relative_to(package_root)} imports {module}")
+
+    assert offenders == []

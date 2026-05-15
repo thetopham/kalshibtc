@@ -5,19 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "kalshi-btc-15m-bot"
 version = "0.1.0"
-description = "Paper-first BTC 15-minute Kalshi prediction bot"
+description = "Boring 1-second Kalshi BTC paper bot"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Local Hermes" }]
 dependencies = [
-  "cryptography>=42.0",
-  "numpy>=1.26",
-  "pandas>=2.1",
-  "python-dotenv>=1.0",
   "requests>=2.31",
-  "scikit-learn>=1.4",
-  "websockets>=12.0",
 ]
 
 [project.optional-dependencies]
@@ -27,8 +21,8 @@ dev = [
 ]
 
 [project.scripts]
-kbtc15 = "kalshi_btc_15m_bot.cli:main"
 kbtc15-1s-paper = "kalshibtc.paper_signal_executor:main"
+kbtc15-1s-recorder = "kalshibtc.record_1s_snapshots:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -44,6 +38,7 @@ addopts = "-q"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+extend-exclude = ["archive"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

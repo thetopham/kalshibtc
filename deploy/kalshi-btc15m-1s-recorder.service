@@ -1,0 +1,20 @@
+[Unit]
+Description=Kalshi BTC 15m read-only 1s snapshot recorder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/matt/workspace/kalshi-btc-15m-bot
+ExecStart=/home/matt/workspace/kalshi-btc-15m-bot/.venv/bin/kbtc15-1s-recorder --snapshot-db data/realtime-snapshots-1s.sqlite3 --loop --emit-min-interval-seconds 1
+Restart=always
+RestartSec=10
+
+# Safety: read-only public-data recorder. It writes local SQLite snapshots and has no order-submission path.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/home/matt/workspace/kalshi-btc-15m-bot/data
+
+[Install]
+WantedBy=default.target

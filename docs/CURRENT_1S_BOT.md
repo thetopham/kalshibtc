@@ -1,42 +1,43 @@
 # Current 1s Bot
 
-This is the current target for this repo: a boring 1-second, websocket-first Kalshi BTC paper bot for `KXBTC15M` markets.
+This repo's active code is the boring 1-second Kalshi BTC paper bot under `src/kalshibtc/`.
 
-The current question is deliberately narrow:
+Current question:
 
 > Does simple slope + above/below have edge, and where, or is it just noise?
 
-Do not add ML, market making, EV blending, new indicators, live orders, or strategy complexity until paper PnL review shows evidence that the simple baseline has a specific weakness worth fixing.
+Do not add ML, market making, EV blending, new indicators, dashboards, live orders, or strategy complexity until paper PnL review shows evidence for a specific next change.
 
-## North star flow
+## Active entrypoints
 
-```text
-1s datafeed
-  -> market state builder
-  -> slope/analyzer
-  -> strategy
-  -> risk/position sizing
-  -> paper executor
-  -> logger/database/dashboard/stats
-```
-
-Important boundary:
-
-- Strategy emits `Signal`.
-- Risk sizes or blocks.
-- Executor fills/submits.
-- Strategy logic must not submit orders.
-- Execution adapters must not decide strategy.
-
-## Current entrypoints
-
-Collect the 1s tape:
+Recorder:
 
 ```bash
-kbtc15 --config configs/default.toml record-1s --emit-min-interval-seconds 1
+kbtc15-1s-recorder \
+  --snapshot-db data/realtime-snapshots-1s.sqlite3 \
+  --emit-min-interval-seconds 1 \
+  --loop
 ```
 
-Run the 1s paper executor:
+Equivalent module form:
+
+```bash
+python -m kalshibtc.record_1s_snapshots \
+  --snapshot-db data/realtime-snapshots-1s.sqlite3 \
+  --emit-min-interval-seconds 1 \
+  --loop
+```
+
+Paper executor:
+
+```bash
+kbtc15-1s-paper \
+  --snapshot-db data/realtime-snapshots-1s.sqlite3 \
+  --results-db data-live-prod/paper-results-1s.sqlite3 \
+  --loop --interval-seconds 1
+```
+
+Equivalent module form:
 
 ```bash
 python -m kalshibtc.paper_signal_executor \
@@ -45,7 +46,9 @@ python -m kalshibtc.paper_signal_executor \
   --loop --interval-seconds 1
 ```
 
-The recorder command is still exposed through the `kbtc15` CLI while the current strategy/risk/execution/replay seams live in `src/kalshibtc/`.
+The active installed script aliases are `kbtc15-1s-recorder` and `kbtc15-1s-paper`.
+
+Recorder v1 is deliberately small and read-only: it polls public Coinbase BTC spot plus Kalshi public market/orderbook endpoints, then writes compatible SQLite rows. A later source swap can put an authenticated read-only Kalshi websocket behind the same `realtime_snapshots_1s` writer without restoring the legacy CLI.
 
 ## Database split
 
@@ -55,14 +58,15 @@ Keep these databases separate:
 data/realtime-snapshots-1s.sqlite3
   Recorder-owned stream DB.
   Stores normalized 1s BTC/Kalshi snapshots in `realtime_snapshots_1s`.
-  The paper executor should only SELECT from this DB.
+  `kbtc15-1s-recorder` creates/upserts this table.
+  The paper executor only SELECTs from this DB.
 
 data-live-prod/paper-results-1s.sqlite3
   Paper-executor results DB.
   Stores generated signals, fake fills, exits, and PnL.
 ```
 
-Do not write paper results into the stream tape. Do not make the recorder depend on paper results.
+Do not write paper results into the stream tape.
 
 ## V1 strategy rule
 
@@ -81,22 +85,44 @@ else:
 
 The baseline is intentionally boring. It exists so paper results can answer whether the simplest above/below plus slope alignment has any useful edge before the repo grows more moving parts.
 
-## Module map
+## Flow and ownership
+
+```text
+snapshot row from recorder
+  -> MarketState
+  -> SimpleDirectionalStrategy emits Signal
+  -> RiskManager sizes or blocks
+  -> PaperExecutor creates fake fill
+  -> PaperSignalStore writes prediction/trade/settlement rows
+```
+
+Important boundary:
+
+- Recorder creates/upserts stream snapshots only.
+- Strategy emits `Signal`.
+- Risk sizes or blocks.
+- Paper executor creates fake fills only.
+- Storage reads snapshots and writes results.
+- No live order path is constructed by `paper_signal_executor.py`.
+
+## Active module map
 
 ```text
 src/kalshibtc/
   __init__.py
   config.py                    # BotConfig and RiskLimits defaults for the modular path
   main.py                      # MarketStateBuilder, BotPipeline, strategy -> risk -> executor wiring
-  paper_signal_executor.py     # live 1s paper loop over snapshot DB into results DB
+  record_1s_snapshots.py       # read-only active recorder CLI into realtime_snapshots_1s
+  paper_signal_executor.py     # thin CLI/live 1s paper loop over snapshot DB into results DB
 
   datafeed/
     models.py                  # Tick and OrderBookSnapshot
     websocket.py               # live feed protocol boundary
-    recorder.py                # SQLite recorder seam for feed snapshots
+    recorder.py                # lightweight SQLite snapshot writer seam
 
   market/
     contract.py                # ContractWindow, strike/close metadata
+    kalshi_public.py           # read-only unauthenticated official settlement lookup
     pricing.py                 # quote/spread helpers
     state.py                   # normalized MarketState used by strategies/risk
 
@@ -116,13 +142,26 @@ src/kalshibtc/
     metrics.py                 # basic trade metrics
 
   storage/
-    db.py                      # SQLite helpers
+    db.py                      # generic SQLite helpers
+    paper_signal_store.py      # 1s snapshot/results repository and paper settlement persistence
     schema.sql                 # modular storage schema
 ```
 
+## Archived legacy code
+
+Everything that is not active 1s bot code has been moved under:
+
+```text
+archive/legacy-15m/
+```
+
+That archive contains the old `kalshi_btc_15m_bot` package, old tests, legacy configs, old deploy templates, and historical notes. It is reference only and is excluded from active packaging/linting.
+
+If something from the archive becomes necessary again, move only the small needed piece into `src/kalshibtc/` behind a tested 1s-specific seam. Do not re-expand the archive in place.
+
 ## Paper PnL review before complexity
 
-The next real task is to review `data-live-prod/paper-results-1s.sqlite3` by:
+Review `data-live-prod/paper-results-1s.sqlite3` by:
 
 - total PnL
 - win rate
@@ -133,29 +172,25 @@ The next real task is to review `data-live-prod/paper-results-1s.sqlite3` by:
 - PnL by slope-at-entry bucket
 - PnL by hold-time bucket
 
-Only after that review should new complexity be considered. If the baseline is noise, document that. If edge exists only in a bucket, constrain the next change to that evidence.
+Only after that review should new complexity be considered.
 
 ## Tests and checks
 
 Focused modular tests:
 
 ```bash
-pytest tests/test_kalshibtc_modular_core.py -q
+uv run pytest tests/test_kalshibtc_1s_recorder.py -q
+uv run pytest tests/test_kalshibtc_modular_core.py -q
 ```
 
 Full local checks:
 
 ```bash
-pytest
-python -m compileall src tests
-ruff check .
+uv run python -m kalshibtc.record_1s_snapshots --help
+uv run python -m kalshibtc.paper_signal_executor --help
+uv run kbtc15-1s-recorder --help
+uv run kbtc15-1s-paper --help
+uv run pytest
+uv run python -m compileall src tests
+uv run ruff check .
 ```
-
-## What not to touch yet
-
-- Do not enable live orders.
-- Do not add ML, market making, EV blending, or new indicators.
-- Do not merge `src/kalshi_btc_15m_bot/` with `src/kalshibtc/`.
-- Do not delete legacy code.
-- Do not move new strategy work into the legacy package.
-- Do not add strategy complexity until paper PnL review shows evidence.

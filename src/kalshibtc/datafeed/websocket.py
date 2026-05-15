@@ -14,18 +14,12 @@ class WebsocketFeed(Protocol):
 
 
 class LiveWebsocketFeed:
-    """Placeholder adapter boundary for the existing websocket implementation.
-
-    The current production websocket loop still lives in
-    `kalshi_btc_15m_bot.streaming`. New strategy, replay, risk, and execution
-    code should depend on the `WebsocketFeed` protocol above so the old stream
-    can be wrapped without leaking strategy logic into transport code.
-    """
+    """Placeholder boundary for a future package-local live feed adapter."""
 
     async def ticks(self) -> AsyncIterator[Tick]:
-        raise NotImplementedError("wrap kalshi_btc_15m_bot.streaming before using live feed")
+        raise NotImplementedError("live 1s websocket feed adapter has not been moved into kalshibtc")
         yield  # pragma: no cover
 
     async def orderbooks(self) -> AsyncIterator[OrderBookSnapshot]:
-        raise NotImplementedError("wrap kalshi_btc_15m_bot.streaming before using live feed")
+        raise NotImplementedError("live 1s websocket feed adapter has not been moved into kalshibtc")
         yield  # pragma: no cover
