@@ -9,11 +9,12 @@ def test_legacy_15m_package_is_archived_off_active_python_path() -> None:
     assert importlib.util.find_spec("kalshi_btc_15m_bot") is None
 
 
-def test_only_active_console_script_is_1s_paper_executor() -> None:
+def test_only_active_console_scripts_are_1s_recorder_and_paper_executor() -> None:
     pyproject = tomllib.loads(Path("pyproject.toml").read_text())
 
     assert pyproject["project"]["scripts"] == {
-        "kbtc15-1s-paper": "kalshibtc.paper_signal_executor:main"
+        "kbtc15-1s-paper": "kalshibtc.paper_signal_executor:main",
+        "kbtc15-1s-recorder": "kalshibtc.record_1s_snapshots:main",
     }
 
 

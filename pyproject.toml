@@ -22,6 +22,7 @@ dev = [
 
 [project.scripts]
 kbtc15-1s-paper = "kalshibtc.paper_signal_executor:main"
+kbtc15-1s-recorder = "kalshibtc.record_1s_snapshots:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

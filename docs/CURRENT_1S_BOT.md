@@ -8,7 +8,36 @@ Current question:
 
 Do not add ML, market making, EV blending, new indicators, dashboards, live orders, or strategy complexity until paper PnL review shows evidence for a specific next change.
 
-## Active entrypoint
+## Active entrypoints
+
+Recorder:
+
+```bash
+kbtc15-1s-recorder \
+  --snapshot-db data/realtime-snapshots-1s.sqlite3 \
+  --emit-min-interval-seconds 1 \
+  --loop
+```
+
+Equivalent module form:
+
+```bash
+python -m kalshibtc.record_1s_snapshots \
+  --snapshot-db data/realtime-snapshots-1s.sqlite3 \
+  --emit-min-interval-seconds 1 \
+  --loop
+```
+
+Paper executor:
+
+```bash
+kbtc15-1s-paper \
+  --snapshot-db data/realtime-snapshots-1s.sqlite3 \
+  --results-db data-live-prod/paper-results-1s.sqlite3 \
+  --loop --interval-seconds 1
+```
+
+Equivalent module form:
 
 ```bash
 python -m kalshibtc.paper_signal_executor \
@@ -17,11 +46,9 @@ python -m kalshibtc.paper_signal_executor \
   --loop --interval-seconds 1
 ```
 
-The installed script alias is `kbtc15-1s-paper`.
+The active installed script aliases are `kbtc15-1s-recorder` and `kbtc15-1s-paper`.
 
-## Known active gap
-
-PR #7 preserves paper execution over existing snapshot DBs. The active 1s recorder command still needs to be re-created as a small clean module, not restored from the legacy CLI wholesale.
+Recorder v1 is deliberately small and read-only: it polls public Coinbase BTC spot plus Kalshi public market/orderbook endpoints, then writes compatible SQLite rows. A later source swap can put an authenticated read-only Kalshi websocket behind the same `realtime_snapshots_1s` writer without restoring the legacy CLI.
 
 ## Database split
 
@@ -31,6 +58,7 @@ Keep these databases separate:
 data/realtime-snapshots-1s.sqlite3
   Recorder-owned stream DB.
   Stores normalized 1s BTC/Kalshi snapshots in `realtime_snapshots_1s`.
+  `kbtc15-1s-recorder` creates/upserts this table.
   The paper executor only SELECTs from this DB.
 
 data-live-prod/paper-results-1s.sqlite3
@@ -60,7 +88,7 @@ The baseline is intentionally boring. It exists so paper results can answer whet
 ## Flow and ownership
 
 ```text
-snapshot row
+snapshot row from recorder
   -> MarketState
   -> SimpleDirectionalStrategy emits Signal
   -> RiskManager sizes or blocks
@@ -70,6 +98,7 @@ snapshot row
 
 Important boundary:
 
+- Recorder creates/upserts stream snapshots only.
 - Strategy emits `Signal`.
 - Risk sizes or blocks.
 - Paper executor creates fake fills only.
@@ -83,6 +112,7 @@ src/kalshibtc/
   __init__.py
   config.py                    # BotConfig and RiskLimits defaults for the modular path
   main.py                      # MarketStateBuilder, BotPipeline, strategy -> risk -> executor wiring
+  record_1s_snapshots.py       # read-only active recorder CLI into realtime_snapshots_1s
   paper_signal_executor.py     # thin CLI/live 1s paper loop over snapshot DB into results DB
 
   datafeed/
@@ -149,12 +179,17 @@ Only after that review should new complexity be considered.
 Focused modular tests:
 
 ```bash
+uv run pytest tests/test_kalshibtc_1s_recorder.py -q
 uv run pytest tests/test_kalshibtc_modular_core.py -q
 ```
 
 Full local checks:
 
 ```bash
+uv run python -m kalshibtc.record_1s_snapshots --help
+uv run python -m kalshibtc.paper_signal_executor --help
+uv run kbtc15-1s-recorder --help
+uv run kbtc15-1s-paper --help
 uv run pytest
 uv run python -m compileall src tests
 uv run ruff check .

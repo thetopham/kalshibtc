@@ -10,18 +10,27 @@ Active question:
 
 Do not add ML, market making, EV blending, new indicators, dashboards, live orders, or strategy complexity until paper PnL review shows a specific weakness worth fixing.
 
-## Active command
+## Active commands
 
-Run the 1s paper executor over an existing recorder-owned snapshot DB:
+Run the read-only 1s recorder to keep the snapshot DB fresh:
 
 ```bash
-python -m kalshibtc.paper_signal_executor \
+kbtc15-1s-recorder \
   --snapshot-db data/realtime-snapshots-1s.sqlite3 \
-  --results-db data-live-prod/paper-results-1s.sqlite3 \
-  --loop --interval-seconds 1
+  --emit-min-interval-seconds 1 \
+  --loop
 ```
 
-Equivalent installed script:
+Equivalent module form:
+
+```bash
+python -m kalshibtc.record_1s_snapshots \
+  --snapshot-db data/realtime-snapshots-1s.sqlite3 \
+  --emit-min-interval-seconds 1 \
+  --loop
+```
+
+Then run the 1s paper executor over that recorder-owned snapshot DB:
 
 ```bash
 kbtc15-1s-paper \
@@ -30,7 +39,18 @@ kbtc15-1s-paper \
   --loop --interval-seconds 1
 ```
 
-The executor only SELECTs from the snapshot DB and writes signals, fake fills, exits, and PnL to the separate results DB.
+Equivalent module form:
+
+```bash
+python -m kalshibtc.paper_signal_executor \
+  --snapshot-db data/realtime-snapshots-1s.sqlite3 \
+  --results-db data-live-prod/paper-results-1s.sqlite3 \
+  --loop --interval-seconds 1
+```
+
+The recorder writes only `realtime_snapshots_1s` rows to the snapshot DB. The executor only SELECTs from the snapshot DB and writes signals, fake fills, exits, and PnL to the separate results DB.
+
+Recorder v1 is a tiny read-only public-data poller: Coinbase BTC spot plus Kalshi public market/orderbook endpoints. It has no credentials and no order-submission path; a later PR can swap in a read-only websocket source behind the same SQLite writer.
 
 ## V1 strategy
 
@@ -51,6 +71,7 @@ Strategy emits `Signal`. `RiskManager` sizes or blocks. `PaperExecutor` creates 
 
 ```text
 src/kalshibtc/
+  record_1s_snapshots.py          # active read-only recorder CLI for realtime_snapshots_1s
   paper_signal_executor.py       # thin 1s paper loop CLI
   main.py                        # MarketStateBuilder and strategy/risk/executor pipeline
   config.py                      # small 1s defaults
@@ -90,7 +111,11 @@ Review `data-live-prod/paper-results-1s.sqlite3` before adding strategy complexi
 This host currently uses `uv run` because bare `python`/`pytest` may not be on PATH:
 
 ```bash
+uv run python -m kalshibtc.record_1s_snapshots --help
 uv run python -m kalshibtc.paper_signal_executor --help
+uv run kbtc15-1s-recorder --help
+uv run kbtc15-1s-paper --help
+uv run pytest tests/test_kalshibtc_1s_recorder.py -q
 uv run pytest tests/test_kalshibtc_modular_core.py -q
 uv run pytest
 uv run python -m compileall src tests
