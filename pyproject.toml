@@ -28,6 +28,7 @@ dev = [
 
 [project.scripts]
 kbtc15 = "kalshi_btc_15m_bot.cli:main"
+kbtc15-1s-paper = "kalshibtc.paper_signal_executor:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

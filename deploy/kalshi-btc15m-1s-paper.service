@@ -1,0 +1,22 @@
+[Unit]
+Description=Kalshi BTC 15m 1s paper signal executor
+After=network-online.target kalshi-btc15m-dashboard.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/matt/workspace/kalshi-btc-15m-bot
+ExecStart=/home/matt/workspace/kalshi-btc-15m-bot/.venv/bin/python -m kalshibtc.paper_signal_executor --snapshot-db data/realtime-snapshots-1s.sqlite3 --results-db data-live-prod/paper-results-1s.sqlite3 --loop --interval-seconds 1 --limit 250
+Restart=always
+RestartSec=5
+
+# Safety: 1s paper executor only. It SELECTs from the recorder-owned stream DB
+# and writes fake signals/fills/PnL to the separate results DB. No Kalshi
+# credentials or live-order environment variables are required here.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/home/matt/workspace/kalshi-btc-15m-bot/data-live-prod
+
+[Install]
+WantedBy=default.target

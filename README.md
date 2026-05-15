@@ -29,7 +29,8 @@ The important boundary is: **strategies emit `Signal`; risk sizes/blocks; execut
 - Compares predicted probability to Kalshi YES/NO asks and records a local paper trade only when edge gates pass.
 - Provides a read-only `stream-state` websocket loop that keeps BTC ticks and the Kalshi order book fresh, recomputes contract-close-aware YES/NO probabilities against the current top-of-book, rolls to the next 15-minute contract after close, and flags model/market/direction disagreement in every state payload.
 - Provides a read-only `record-1s` websocket recorder that stores one normalized realtime snapshot per market/second for replay, labeling, and post-session research.
-- Stores predictions and paper trades in `data/paper-ledger.sqlite3`.
+- Provides a `kbtc15-1s-paper` / `python -m kalshibtc.paper_signal_executor` loop that paper-trades the 1s snapshot tape into a separate results database. It SELECTs from the recorder-owned stream DB but writes only to `paper-results-1s.sqlite3`.
+- Stores legacy scanner predictions and paper trades in `data/paper-ledger.sqlite3`; stores 1s paper research results separately in `data-live-prod/paper-results-1s.sqlite3` or another explicit `--results-db` path.
 - Actively manages paper positions with take-profit, stop-loss, and near-close simulated exits at public bid marks.
 - Reports open paper positions with public Kalshi mark-to-market quotes, unrealized PnL, liquidity, max-win exposure, and exit signals.
 - Logs performance stats: equity, realized/unrealized PnL, win rate, expectancy, ROI on risk, and largest win/loss.
@@ -87,7 +88,13 @@ kbtc15 --config configs/default.toml stream-state --emit-min-interval-seconds 1
 # Read-only 1s websocket recorder; writes normalized snapshots to SQLite for replay/research
 kbtc15 --config configs/default.toml record-1s --emit-min-interval-seconds 1
 
-# Websocket paper trader; same realtime BTC/orderbook state, but opens/closes only local SQLite paper trades
+# 1s paper executor; reads the recorder-owned stream DB and writes only to a separate results DB
+python -m kalshibtc.paper_signal_executor \
+  --snapshot-db data/realtime-snapshots-1s.sqlite3 \
+  --results-db data-live-prod/paper-results-1s.sqlite3 \
+  --loop --interval-seconds 1
+
+# Legacy websocket paper trader; kept for compatibility with the original ledger path
 # Boundary remains paper-only: no Kalshi live orders are submitted by this command.
 kbtc15 --config configs/default.toml stream-paper --emit-min-interval-seconds 1
 
@@ -216,6 +223,24 @@ The current `SimpleDirectionalStrategy` does only this:
 
 `BotPipeline` can run multiple strategies against the same state, pass each signal through `RiskManager`, and send allowed decisions to `PaperExecutor`. `ReplayEngine` uses the same strategy/risk/paper seams over historical 1s ticks and books, so live paper mode and replay mode exercise the same strategy code. `KalshiBrokerAdapter` is a disabled-by-default future boundary and does not submit orders.
 
+For the live 1s paper research loop, keep databases split:
+
+```text
+data/realtime-snapshots-1s.sqlite3       # recorder-owned stream DB; keeps receiving 1s rows
+data-live-prod/paper-results-1s.sqlite3  # paper executor results DB; signals/fake fills/exits/PnL
+```
+
+Run the paper executor with:
+
+```bash
+python -m kalshibtc.paper_signal_executor \
+  --snapshot-db data/realtime-snapshots-1s.sqlite3 \
+  --results-db data-live-prod/paper-results-1s.sqlite3 \
+  --loop --interval-seconds 1
+```
+
+The executor does not chmod or make the stream DB read-only; it only SELECTs from it. Generated `predictions` and `paper_trades` are written to the separate results DB so the data tape and hypothesis results cannot overwrite each other.
+
 See [docs/1s-modular-architecture.md](docs/1s-modular-architecture.md) for the module map, flow, safety boundary, and testing commands.
 
 ## 1s Websocket Data Feed
@@ -301,7 +326,13 @@ Live mode protections:
 
 ## Ledger
 
-SQLite ledger path: `<data_dir>/paper-ledger.sqlite3` (the live audit tables live in the same SQLite file for that config's data directory). Realtime 1 Hz observation snapshots are stored separately at `<data_dir>/realtime-snapshots-1s.sqlite3` so research captures cannot interfere with paper/live ledgers.
+SQLite DB split:
+
+- Legacy scanner ledger: `<data_dir>/paper-ledger.sqlite3` (legacy predictions/paper trades plus live audit tables for that config's data directory).
+- 1s stream tape: `<data_dir>/realtime-snapshots-1s.sqlite3` (recorder-owned observations; the recorder keeps writing here).
+- 1s paper results: `data-live-prod/paper-results-1s.sqlite3` by convention, or any explicit `--results-db` path passed to `python -m kalshibtc.paper_signal_executor`.
+
+The 1s paper executor never stores `predictions` or `paper_trades` in the stream tape; those result tables live in the separate results DB.
 
 Tables:
 
@@ -309,11 +340,11 @@ Tables:
 - `paper_trades`: simulated YES/NO contract entries, active paper exits, settlement PnL, exit price, and exit reason.
 - `live_orders`: guarded live order intents, submitted responses, errors, client IDs, and request JSON.
 - `live_fills`: confirmed authenticated fill records used to reconstruct live position state and realized PnL.
-- `realtime_snapshots_1s`: normalized read-only websocket observations keyed by `(market_ticker, ts)`, plus raw stream-state JSON for replay.
+- `realtime_snapshots_1s`: normalized recorder-owned websocket observations keyed by `(market_ticker, ts)`, plus raw stream-state JSON for replay. This table lives in the stream DB, not in the 1s results DB.
 
 ## Deployment note
 
-A sample paper user-service file is in `deploy/kalshi-btc15m-paper.service`. A guarded demo-live template is in `deploy/kalshi-btc15m-live-demo.service`; it expects credentials in `%h/.config/kalshibtc/kalshibtc.env` and a local untracked `configs/live-demo.local.toml`. A read-only dashboard template is in `deploy/kalshi-btc15m-dashboard.service`; it expects production env credentials plus `%h/.config/kalshibtc/kalshibtc-dashboard.env` for dashboard auth. None of these services is installed or started automatically. Review every cap before use.
+A sample paper user-service file is in `deploy/kalshi-btc15m-paper.service`. The continuous 1s paper executor template is in `deploy/kalshi-btc15m-1s-paper.service`; it reads `data/realtime-snapshots-1s.sqlite3` and writes `data-live-prod/paper-results-1s.sqlite3`. A guarded demo-live template is in `deploy/kalshi-btc15m-live-demo.service`; it expects credentials in `%h/.config/kalshibtc/kalshibtc.env` and a local untracked `configs/live-demo.local.toml`. A read-only dashboard template is in `deploy/kalshi-btc15m-dashboard.service`; it expects production env credentials plus `%h/.config/kalshibtc/kalshibtc-dashboard.env` for dashboard auth. None of these services is installed or started automatically. Review every cap before use.
 
 ## Verification
 
@@ -333,6 +364,7 @@ timeout 5s env KALSHI_BTC15M_DASHBOARD_TOKEN=test-token kbtc15 --config configs/
 kbtc15 --config configs/default.toml live-status
 kbtc15 --config configs/default.toml stream-state --help
 kbtc15 --config configs/default.toml record-1s --help
+python -m kalshibtc.paper_signal_executor --help
 kbtc15 --config configs/default.toml stream-paper --help
 # With Kalshi WebSocket credentials configured outside the repo:
 # kbtc15 --config configs/default.toml stream-state --max-events 3

@@ -115,6 +115,10 @@ class BotConfig:
         return self.data_dir / "paper-ledger.sqlite3"
 
     @property
+    def paper_results_1s_path(self) -> Path:
+        return self.data_dir / "paper-results-1s.sqlite3"
+
+    @property
     def realtime_snapshots_path(self) -> Path:
         return self.data_dir / "realtime-snapshots-1s.sqlite3"
 
