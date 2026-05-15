@@ -26,6 +26,7 @@ DEFAULT_SERVICE_NAMES = (
     "kalshi-btc15m-live-prod.service",
     "kalshi-btc15m-live-demo.service",
     "kalshi-btc15m-paper.service",
+    "kalshi-btc15m-1s-paper.service",
 )
 STREAM_WARNING_HISTORY_LIMIT = 8
 STREAM_CHART_HISTORY_LIMIT = 900

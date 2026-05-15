@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from kalshi_btc_15m_bot.dashboard import (
+    DEFAULT_SERVICE_NAMES,
     StreamSnapshotStore,
     _is_authorized,
     _sanitize_dashboard_log_message,
@@ -104,6 +105,10 @@ def test_collect_dashboard_data_projects_live_and_strategy_fields() -> None:
     assert data["portfolio"]["live_balance_dollars"] == 24.50
     assert data["portfolio"]["paper_equity"] == 1000.0
     assert data["latest_predictions"][0]["action"] == "BUY_YES"
+
+
+def test_default_dashboard_services_include_1s_paper_executor() -> None:
+    assert "kalshi-btc15m-1s-paper.service" in DEFAULT_SERVICE_NAMES
 
 
 def _write_paper_performance_db(ledger_path: Path) -> None:
