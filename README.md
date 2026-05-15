@@ -4,6 +4,21 @@ A paper-first Python bot for Kalshi's `KXBTC15M` BTC Up/Down 15-minute markets, 
 
 Safety boundary: default config is paper-only. Live trading requires a separate live config, Kalshi credentials outside the repo, a literal acknowledgement string, demo/production environment selection, hard dollar/contract caps, cash reserve gates, and SQLite audit logging before any order path is constructed.
 
+## Current direction: 1s websocket-first, boring modules
+
+There are currently two bot lines in this repo:
+
+- **Legacy 1-minute scanner**: the original `kalshi_btc_15m_bot` path (`scan`, `run`, predictor/model blend, ledger, dashboard, guarded live adapter). It still works, but it accumulated research/dashboard feature creep.
+- **1-second websocket bot**: the current target. It should collect a clean 1 Hz BTC/Kalshi tape, run simple strategy/analyzer modules, backtest or paper trade multiple strategies at once, and keep execution separate from signal generation.
+
+New strategy work should happen in the boring modular package at `src/kalshibtc/`, documented in [docs/1s-modular-architecture.md](docs/1s-modular-architecture.md). The intended core flow is:
+
+```text
+1s datafeed → market state builder → slope/analyzer → strategy → risk/position sizing → paper/live adapter → logger/database/dashboard/stats
+```
+
+The important boundary is: **strategies emit `Signal`; risk sizes/blocks; executors fill/submit.** Strategy logic must be reusable in live paper mode, historical replay mode, and a future real Kalshi adapter without rewriting the strategy.
+
 ## What it does
 
 - Finds the current Kalshi BTC 15-minute up/down market from the public API.
@@ -156,6 +171,51 @@ systemctl --user status kalshi-btc15m-dashboard.service --no-pager
 
 The dashboard service template uses `--stream --stream-emit-min-interval-seconds 1`, so `/` is the websocket stream dashboard and `/api/stream` is the latest state JSON. `/status` remains the ledger/account dashboard. The market itself is still a 15-minute Kalshi market using 900-second BTC candles.
 
+## 1s Modular Strategy Core
+
+The `src/kalshibtc/` package is the new small seam for the websocket-first bot. It intentionally mirrors the boring architecture we want long term:
+
+```text
+kalshibtc/
+  main.py                 # wires MarketStateBuilder + Strategy + RiskManager + Executor
+  config.py               # symbols, risk limits, DB paths
+  datafeed/               # Tick, OrderBookSnapshot, recorder, websocket protocol
+  market/                 # contract, pricing, normalized MarketState
+  strategy/               # Signal, Strategy protocol, slope, simple_directional
+  execution/              # risk, paper fake fills, disabled Kalshi adapter, position rules
+  backtest/               # replay + metrics
+  storage/                # SQLite connection + schema.sql
+```
+
+The first strategy interface is deliberately plain:
+
+```python
+class Strategy:
+    def on_tick(self, state) -> Signal:
+        ...
+```
+
+The first signal object is:
+
+```python
+@dataclass(frozen=True)
+class Signal:
+    side: str          # "long_above", "long_below", "none"
+    reason: str
+    confidence: float
+    strategy: str = "manual"
+```
+
+The current `SimpleDirectionalStrategy` does only this:
+
+- `price > strike and slope_30s > 0` → `long_above`.
+- `price < strike and slope_30s < 0` → `long_below`.
+- otherwise → `none`.
+
+`BotPipeline` can run multiple strategies against the same state, pass each signal through `RiskManager`, and send allowed decisions to `PaperExecutor`. `ReplayEngine` uses the same strategy/risk/paper seams over historical 1s ticks and books, so live paper mode and replay mode exercise the same strategy code. `KalshiBrokerAdapter` is a disabled-by-default future boundary and does not submit orders.
+
+See [docs/1s-modular-architecture.md](docs/1s-modular-architecture.md) for the module map, flow, safety boundary, and testing commands.
+
 ## 1s Websocket Data Feed
 
 `record-1s` is a read-only capture mode for observation sessions:
@@ -164,7 +224,7 @@ The dashboard service template uses `--stream --stream-emit-min-interval-seconds
 kbtc15 --config configs/default.toml record-1s --emit-min-interval-seconds 1
 ```
 
-It reuses the same websocket state engine as `stream-state`, but attaches a local recorder and writes at most one row per `(market_ticker, second)` to `<data_dir>/realtime-snapshots-1s.sqlite3` in table `realtime_snapshots_1s`. Duplicate websocket events in the same second are ignored so the feed stays replayable as a normalized 1 Hz tape.
+It reuses the same websocket state engine as `stream-state`, but attaches a local recorder and writes at most one row per `(market_ticker, second)` to `<data_dir>/realtime-snapshots-1s.sqlite3` in table `realtime_snapshots_1s`. Duplicate websocket events in the same second are upserted so reconnect/re-emission corrections update the latest payload while the feed stays replayable as a normalized 1 Hz tape.
 
 Recorded columns include the operator-decision inputs needed for later replay and labeling:
 
@@ -259,6 +319,7 @@ Expected local checks:
 
 ```bash
 pytest
+pytest tests/test_kalshibtc_modular_core.py -q
 python -m compileall src tests
 ruff check .
 kbtc15 --config configs/default.toml backtest

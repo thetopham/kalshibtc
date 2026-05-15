@@ -11,3 +11,4 @@ configs/*.local.toml
 data/*.sqlite3
 data/*.sqlite3-*
 data-live*/
+logs/

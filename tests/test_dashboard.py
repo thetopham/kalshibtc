@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,12 +22,13 @@ from kalshi_btc_15m_bot.dashboard import (
 
 
 class FakeBot:
-    def __init__(self) -> None:
+    def __init__(self, ledger_path: Path | None = None) -> None:
+        ledger_path = ledger_path or Path("/tmp/kbtc15-live/paper-ledger.sqlite3")
         self.config = SimpleNamespace(
             trading_mode="live",
             enable_live_orders=True,
-            data_dir=Path("/tmp/kbtc15-live"),
-            ledger_path=Path("/tmp/kbtc15-live/paper-ledger.sqlite3"),
+            data_dir=ledger_path.parent,
+            ledger_path=ledger_path,
             kalshi=SimpleNamespace(series_ticker="KXBTC15M"),
             live=SimpleNamespace(environment="production"),
             market_data=SimpleNamespace(provider="coinbase", granularity_seconds=900),
@@ -102,6 +104,197 @@ def test_collect_dashboard_data_projects_live_and_strategy_fields() -> None:
     assert data["portfolio"]["live_balance_dollars"] == 24.50
     assert data["portfolio"]["paper_equity"] == 1000.0
     assert data["latest_predictions"][0]["action"] == "BUY_YES"
+
+
+def _write_paper_performance_db(ledger_path: Path) -> None:
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(ledger_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE predictions (
+                id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                market_ticker TEXT NOT NULL,
+                event_ticker TEXT NOT NULL,
+                market_close_time TEXT,
+                action TEXT NOT NULL,
+                side TEXT,
+                probability_yes REAL NOT NULL,
+                probability_no REAL NOT NULL,
+                confidence REAL NOT NULL,
+                edge REAL NOT NULL,
+                stake_dollars REAL NOT NULL,
+                current_price REAL NOT NULL,
+                target_price REAL,
+                yes_ask REAL NOT NULL,
+                no_ask REAL NOT NULL,
+                model_info_json TEXT NOT NULL,
+                reasons_json TEXT NOT NULL,
+                features_json TEXT NOT NULL,
+                raw_json TEXT NOT NULL
+            );
+            CREATE TABLE paper_trades (
+                id TEXT PRIMARY KEY,
+                prediction_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                market_ticker TEXT NOT NULL,
+                side TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                contracts REAL NOT NULL,
+                notional REAL NOT NULL,
+                status TEXT NOT NULL,
+                market_close_time TEXT,
+                settlement_result TEXT,
+                realized_pnl REAL,
+                settled_at TEXT,
+                exit_price REAL,
+                exit_reason TEXT
+            );
+            """
+        )
+        for prediction_id, action, side, market_ticker in [
+            ("p-win", "BUY_YES", "YES", "KXBTC15M-TEST-WIN"),
+            ("p-loss", "BUY_NO", "NO", "KXBTC15M-TEST-LOSS"),
+            ("p-open", "BUY_YES", "YES", "KXBTC15M-TEST-OPEN"),
+        ]:
+            conn.execute(
+                """
+                INSERT INTO predictions (
+                    id, created_at, market_ticker, event_ticker, market_close_time,
+                    action, side, probability_yes, probability_no, confidence, edge,
+                    stake_dollars, current_price, target_price, yes_ask, no_ask,
+                    model_info_json, reasons_json, features_json, raw_json
+                ) VALUES (?, '2026-05-14T16:00:00+00:00', ?, 'KXBTC15M-TEST',
+                    '2026-05-14T16:15:00+00:00', ?, ?, 0.60, 0.40, 0.30, 0.05,
+                    25.0, 100000.0, 100010.0, 0.55, 0.45, '{}', '[]', '{}', '{}')
+                """,
+                (prediction_id, market_ticker, action, side),
+            )
+        conn.executemany(
+            """
+            INSERT INTO paper_trades (
+                id, prediction_id, created_at, market_ticker, side, entry_price,
+                contracts, notional, status, market_close_time, realized_pnl,
+                settled_at, exit_price, exit_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "paper-win",
+                    "p-win",
+                    "2026-05-14T16:00:01+00:00",
+                    "KXBTC15M-TEST-WIN",
+                    "YES",
+                    0.50,
+                    40.0,
+                    20.0,
+                    "CLOSED",
+                    "2026-05-14T16:15:00+00:00",
+                    10.0,
+                    "2026-05-14T16:05:00+00:00",
+                    0.75,
+                    "stream_take_profit",
+                ),
+                (
+                    "paper-loss",
+                    "p-loss",
+                    "2026-05-14T16:10:01+00:00",
+                    "KXBTC15M-TEST-LOSS",
+                    "NO",
+                    0.40,
+                    30.0,
+                    12.0,
+                    "SETTLED",
+                    "2026-05-14T16:15:00+00:00",
+                    -4.0,
+                    "2026-05-14T16:15:30+00:00",
+                    0.0,
+                    "settlement_yes",
+                ),
+                (
+                    "paper-open",
+                    "p-open",
+                    "2026-05-14T16:12:01+00:00",
+                    "KXBTC15M-TEST-OPEN",
+                    "YES",
+                    0.50,
+                    40.0,
+                    20.0,
+                    "OPEN",
+                    "2026-05-14T16:15:00+00:00",
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            ],
+        )
+
+
+def _write_realtime_snapshot_db(path: Path) -> None:
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE realtime_snapshots_1s (
+                ts TEXT NOT NULL,
+                market_ticker TEXT NOT NULL,
+                yes_bid REAL,
+                no_bid REAL,
+                yes_ask REAL,
+                no_ask REAL,
+                PRIMARY KEY (market_ticker, ts)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO realtime_snapshots_1s (ts, market_ticker, yes_bid, no_bid, yes_ask, no_ask)
+            VALUES ('2026-05-14T16:12:30+00:00', 'KXBTC15M-TEST-OPEN', 0.60, 0.39, 0.62, 0.41)
+            """
+        )
+
+
+def test_collect_dashboard_data_adds_sqlite_paper_performance_summary(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "paper-ledger.sqlite3"
+    _write_paper_performance_db(ledger_path)
+    _write_realtime_snapshot_db(tmp_path / "realtime-snapshots-1s.sqlite3")
+
+    data = collect_dashboard_data(FakeBot(ledger_path), include_service_status=False)
+    perf = data["paper_performance"]
+    metrics = perf["metrics"]
+
+    assert metrics["total_trades"] == 3
+    assert metrics["total_simulated_positions"] == 3
+    assert metrics["open_positions"] == 1
+    assert metrics["closed_positions"] == 2
+    assert metrics["realized_pnl"] == pytest.approx(6.0)
+    assert metrics["unrealized_pnl"] == pytest.approx(4.0)
+    assert metrics["total_pnl"] == pytest.approx(10.0)
+    assert metrics["win_rate"] == pytest.approx(0.5)
+    assert metrics["avg_win"] == pytest.approx(10.0)
+    assert metrics["avg_loss"] == pytest.approx(-4.0)
+    assert metrics["largest_win"] == pytest.approx(10.0)
+    assert metrics["largest_loss"] == pytest.approx(-4.0)
+    assert metrics["marked_open_positions"] == 1
+    assert perf["cumulative_pnl"][-1]["cumulative_pnl"] == pytest.approx(6.0)
+    assert perf["open_positions"][0]["unrealized_pnl"] == pytest.approx(4.0)
+    assert any(row["signal"] == "BUY_YES" for row in perf["by_signal"])
+    assert any(row["market_ticker"] == "KXBTC15M-TEST-WIN" for row in perf["by_market"])
+
+
+def test_render_dashboard_html_includes_paper_trading_performance_panel(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "paper-ledger.sqlite3"
+    _write_paper_performance_db(ledger_path)
+    _write_realtime_snapshot_db(tmp_path / "realtime-snapshots-1s.sqlite3")
+
+    text = render_dashboard_html(collect_dashboard_data(FakeBot(ledger_path), include_service_status=False))
+
+    assert "Paper Trading Performance" in text
+    assert "cumulative-pnl-chart" in text
+    assert "Recent paper trades" in text
+    assert "Grouped by signal" in text
+    assert "+$6.00" in text
+    assert "+$4.00" in text
 
 
 def test_render_dashboard_html_includes_cards_and_read_only_boundary() -> None:

@@ -12,10 +12,12 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .bot import KalshiBTC15MBot
+from .paper_performance import collect_paper_trading_performance
 
 DEFAULT_DASHBOARD_PORT = 8792
 DEFAULT_REFRESH_SECONDS = 10
@@ -139,6 +141,10 @@ def collect_dashboard_data(
     live_account = live.get("account") or {}
     performance = status.get("performance") or {}
     paper_account = status.get("paper_account") or {}
+    paper_performance = collect_paper_trading_performance(
+        config.ledger_path,
+        snapshot_path=_dashboard_snapshot_path(config),
+    )
 
     return {
         "generated_at": generated_at,
@@ -179,6 +185,7 @@ def collect_dashboard_data(
         "latest_paper_trades": status.get("latest_trades", []),
         "latest_live_orders": live.get("latest_orders", status.get("latest_live_orders", [])),
         "latest_live_fills": live.get("latest_fills", status.get("latest_live_fills", [])),
+        "paper_performance": paper_performance,
         "services": _service_statuses(service_names) if include_service_status else {},
         "raw_status": status,
     }
@@ -188,6 +195,8 @@ def render_dashboard_html(data: Mapping[str, Any], *, api_path: str = "/api/dash
     strategy = _mapping(data.get("strategy"))
     portfolio = _mapping(data.get("portfolio"))
     services = _mapping(data.get("services"))
+    paper_perf = _mapping(data.get("paper_performance"))
+    paper_metrics = _mapping(paper_perf.get("metrics"))
     boundary = str(data.get("boundary") or "unknown")
     mode = str(strategy.get("trading_mode") or "unknown")
     live_enabled = bool(strategy.get("enable_live_orders"))
@@ -275,6 +284,7 @@ def render_dashboard_html(data: Mapping[str, Any], *, api_path: str = "/api/dash
       {service_cards}
     </div>
   </section>
+  {_paper_performance_panel(paper_perf, paper_metrics)}
   <section class="grid two">
     <div class="panel">
       <h2>Open live positions</h2>
@@ -1061,6 +1071,14 @@ def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def _dashboard_snapshot_path(config: Any) -> Path:
+    configured = getattr(config, "realtime_snapshots_path", None)
+    if configured is not None:
+        return Path(configured)
+    data_dir = getattr(config, "data_dir", Path("data"))
+    return Path(data_dir) / "realtime-snapshots-1s.sqlite3"
+
+
 def _rows(value: Any, renderer: Any, empty: str) -> str:
     rows = value if isinstance(value, list) else []
     if not rows:
@@ -1142,6 +1160,122 @@ def _paper_trade_row(row: Mapping[str, Any]) -> str:
         f"<div class='muted tiny'>{esc(row.get('created_at'))}</div></div>"
         f"<div class='mono'>notional={_money_or_dash(row.get('notional'))}<br>pnl={_signed_money_or_dash(pnl)}</div>"
         "</div>"
+    )
+
+
+def _paper_performance_panel(perf: Mapping[str, Any], metrics: Mapping[str, Any]) -> str:
+    raw_schema_gaps = perf.get("schema_gaps")
+    schema_gaps: list[Any] = raw_schema_gaps if isinstance(raw_schema_gaps, list) else []
+    gap_html = "".join(f"<span class='pill'>{esc(gap)}</span>" for gap in schema_gaps[:6])
+    if len(schema_gaps) > 6:
+        gap_html += f"<span class='pill'>+{len(schema_gaps) - 6} more</span>"
+    if not gap_html:
+        gap_html = "<span class='pill green'>schema ok</span>"
+    return f"""
+  <section class="panel" style="margin-top:14px">
+    <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap">
+      <div>
+        <h2>Paper Trading Performance</h2>
+        <div class="muted tiny">SQLite-backed paper PnL from <span class="mono">{esc(perf.get('ledger_path'))}</span></div>
+      </div>
+      <div class="pillrow">{gap_html}</div>
+    </div>
+    <section class="grid kpis" style="margin-top:14px">
+      {_kpi('Realized PnL', _signed_money_or_dash(metrics.get('realized_pnl')), f"closed: {esc(metrics.get('closed_positions'))} · win rate {_pct_or_dash(metrics.get('win_rate'))}", metrics.get('realized_pnl'))}
+      {_kpi('Unrealized PnL', _signed_money_or_dash(metrics.get('unrealized_pnl')), f"marked: {esc(metrics.get('marked_open_positions'))} · open: {esc(metrics.get('open_positions'))}", metrics.get('unrealized_pnl'))}
+      {_kpi('Total PnL', _signed_money_or_dash(metrics.get('total_pnl')), f"positions: {esc(metrics.get('total_simulated_positions'))} · source {esc(metrics.get('unrealized_source'))}", metrics.get('total_pnl'))}
+      {_kpi('Avg trade', _signed_money_or_dash(metrics.get('avg_trade_pnl')), f"avg win {_signed_money_or_dash(metrics.get('avg_win'))} · avg loss {_signed_money_or_dash(metrics.get('avg_loss'))}", metrics.get('avg_trade_pnl'))}
+    </section>
+    <div id="cumulative-pnl-chart" style="margin-top:14px">{_cumulative_pnl_svg(perf.get('cumulative_pnl'))}</div>
+    <section class="grid two">
+      <div class="panel" style="margin-top:14px;box-shadow:none">
+        <h2>Recent paper trades</h2>
+        {_rows(perf.get('recent_trades'), _paper_performance_trade_row, 'No paper trades in SQLite yet.')}
+      </div>
+      <div class="panel" style="margin-top:14px;box-shadow:none">
+        <h2>Open marked positions</h2>
+        {_rows(perf.get('open_positions'), _paper_performance_position_row, 'No open paper positions.')}
+      </div>
+    </section>
+    <section class="grid two">
+      <div class="panel" style="margin-top:14px;box-shadow:none">
+        <h2>Grouped by signal</h2>
+        {_rows(perf.get('by_signal'), _paper_group_row, 'No signal grouping available.')}
+      </div>
+      <div class="panel" style="margin-top:14px;box-shadow:none">
+        <h2>Grouped by market</h2>
+        {_rows(perf.get('by_market'), _paper_group_row, 'No market grouping available.')}
+      </div>
+    </section>
+  </section>"""
+
+
+def _paper_performance_trade_row(row: Mapping[str, Any]) -> str:
+    return (
+        "<div class='row'>"
+        f"<div><strong>{esc(row.get('status'))} {esc(row.get('signal') or row.get('side'))}</strong> <span class='badge'>{esc(row.get('market_ticker'))}</span>"
+        f"<div class='muted tiny'>{esc(row.get('created_at'))} · {esc(row.get('exit_reason') or 'open')}</div></div>"
+        f"<div class='mono'>entry={_num(row.get('entry_price'), 3)} exit={_num(row.get('exit_price'), 3)}<br>notional={_money_or_dash(row.get('notional'))} pnl={_signed_money_or_dash(row.get('realized_pnl'))}</div>"
+        "</div>"
+    )
+
+
+def _paper_performance_position_row(row: Mapping[str, Any]) -> str:
+    detail = (
+        f"mark={_num(row.get('mark_price'), 3)} · {_signed_money_or_dash(row.get('unrealized_pnl'))}"
+        if row.get("mark_error") is None
+        else f"mark_error={esc(row.get('mark_error'))}"
+    )
+    return (
+        "<div class='row'>"
+        f"<div><strong>OPEN {esc(row.get('signal') or row.get('side'))}</strong> <span class='badge'>{esc(row.get('market_ticker'))}</span>"
+        f"<div class='muted tiny'>{esc(row.get('created_at'))}</div></div>"
+        f"<div class='mono'>entry={_num(row.get('entry_price'), 3)} contracts={_num(row.get('contracts'), 2)}<br>{detail}</div>"
+        "</div>"
+    )
+
+
+def _paper_group_row(row: Mapping[str, Any]) -> str:
+    title = row.get("signal") or row.get("market_ticker") or row.get("side") or "group"
+    subtitle = row.get("market_ticker") if row.get("signal") else row.get("side")
+    return (
+        "<div class='row'>"
+        f"<div><strong>{esc(title)}</strong> <span class='badge'>{esc(subtitle)}</span>"
+        f"<div class='muted tiny'>trades {esc(row.get('trades'))} · open {esc(row.get('open_positions'))} · win {_pct_or_dash(row.get('win_rate'))}</div></div>"
+        f"<div class='mono'>realized={_signed_money_or_dash(row.get('realized_pnl'))}<br>notional={_money_or_dash(row.get('notional'))}</div>"
+        "</div>"
+    )
+
+
+def _cumulative_pnl_svg(value: Any) -> str:
+    points = value if isinstance(value, list) else []
+    if not points:
+        return "<p class='muted'>No closed paper trades yet for cumulative PnL.</p>"
+    pnls = [_float_or_none(_mapping(point).get("cumulative_pnl")) for point in points]
+    pnls = [pnl for pnl in pnls if pnl is not None]
+    if not pnls:
+        return "<p class='muted'>No realized PnL points available.</p>"
+    width = 760
+    height = 180
+    pad = 18
+    lo = min(0.0, min(pnls))
+    hi = max(0.0, max(pnls))
+    span = hi - lo or 1.0
+    coords: list[str] = []
+    for idx, pnl in enumerate(pnls):
+        x = pad + (width - pad * 2) * (idx / max(1, len(pnls) - 1))
+        y = height - pad - ((pnl - lo) / span) * (height - pad * 2)
+        coords.append(f"{x:.1f},{y:.1f}")
+    zero_y = height - pad - ((0.0 - lo) / span) * (height - pad * 2)
+    latest = pnls[-1]
+    return (
+        "<svg viewBox='0 0 760 180' role='img' aria-label='Cumulative paper PnL chart' "
+        "style='width:100%;height:180px;border:1px solid var(--line);border-radius:14px;background:#08101e'>"
+        f"<line x1='{pad}' y1='{zero_y:.1f}' x2='{width - pad}' y2='{zero_y:.1f}' stroke='#223149' stroke-width='1'/>"
+        f"<polyline fill='none' stroke='#38d996' stroke-width='3' points='{' '.join(coords)}'/>"
+        f"<text x='{pad}' y='24' fill='#93a4bd' font-size='12'>latest {_signed_money_or_dash(latest)}</text>"
+        f"<text x='{pad}' y='{height - 8}' fill='#93a4bd' font-size='12'>range {_signed_money_or_dash(lo)} to {_signed_money_or_dash(hi)}</text>"
+        "</svg>"
     )
 
 
