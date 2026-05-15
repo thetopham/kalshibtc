@@ -1,9 +1,8 @@
-"""Boring modular 1s Kalshi BTC bot core.
+"""Boring modular 1s Kalshi BTC paper bot core.
 
-This package is the small v2 seam for websocket data collection, reusable
-strategies, backtests, paper execution, and future broker adapters. The older
-`kalshi_btc_15m_bot` package remains for the original 1-minute scanner and the
-current production CLI while pieces migrate here deliberately.
+Archived legacy code lives under ``archive/legacy-15m`` and is not part of the
+active Python package path. New 1s strategy, risk, storage, replay, and paper
+execution work belongs here.
 """
 
 from .config import BotConfig, RiskLimits
