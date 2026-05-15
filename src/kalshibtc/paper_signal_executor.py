@@ -75,6 +75,7 @@ class OneSecondPaperTrader:
 
                 processed += 1
                 closed += _settle_expired_positions(results, state)
+                closed += _settle_expired_positions_from_stream(results, stream, state.tick.ts)
                 open_positions = _open_position_count(results)
                 for strategy in self.strategies:
                     signal = strategy.on_tick(state)
@@ -398,12 +399,92 @@ def _open_trade(
 def _settle_expired_positions(conn: sqlite3.Connection, state: MarketState) -> int:
     if state.tick.ts < state.contract.close_time and state.seconds_to_close > 0:
         return 0
-    outcome = "above" if state.price > state.strike else "below" if state.price < state.strike else "at"
-    settled_at = state.tick.ts.isoformat()
+    outcome = _settlement_outcome(state.price, state.strike)
     rows = conn.execute(
         "SELECT * FROM paper_trades WHERE market_ticker = ? AND status = 'OPEN'",
         (state.contract.ticker,),
     ).fetchall()
+    return _settle_trade_rows(conn, rows, outcome=outcome, settled_at=state.tick.ts.isoformat())
+
+
+def _settle_expired_positions_from_stream(
+    conn: sqlite3.Connection,
+    stream: sqlite3.Connection,
+    now: datetime,
+) -> int:
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM paper_trades
+        WHERE status = 'OPEN'
+          AND market_close_time IS NOT NULL
+          AND market_close_time <= ?
+        """,
+        (now.isoformat(),),
+    ).fetchall()
+    settled = 0
+    for row in rows:
+        settlement_row = _latest_settlement_snapshot(
+            stream,
+            market_ticker=str(row["market_ticker"]),
+            close_time=str(row["market_close_time"]),
+        )
+        if settlement_row is None:
+            continue
+        try:
+            price = _float_value(_row_get(settlement_row, "btc_price", _row_get(settlement_row, "price")))
+            strike = _float_value(
+                _row_get(settlement_row, "target_price"),
+                _float_value(settlement_row["strike"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        outcome = _settlement_outcome(price, strike)
+        settled += _settle_trade_rows(conn, [row], outcome=outcome, settled_at=now.isoformat())
+    return settled
+
+
+def _latest_settlement_snapshot(
+    stream: sqlite3.Connection,
+    *,
+    market_ticker: str,
+    close_time: str,
+) -> sqlite3.Row | None:
+    row = stream.execute(
+        f"""
+        SELECT *
+        FROM {STREAM_TABLE}
+        WHERE market_ticker = ? AND ts <= ?
+        ORDER BY ts DESC
+        LIMIT 1
+        """,
+        (market_ticker, close_time),
+    ).fetchone()
+    if row is not None:
+        return row
+    return stream.execute(
+        f"""
+        SELECT *
+        FROM {STREAM_TABLE}
+        WHERE market_ticker = ? AND ts > ?
+        ORDER BY ts ASC
+        LIMIT 1
+        """,
+        (market_ticker, close_time),
+    ).fetchone()
+
+
+def _settlement_outcome(price: float, strike: float) -> str:
+    return "above" if price > strike else "below" if price < strike else "at"
+
+
+def _settle_trade_rows(
+    conn: sqlite3.Connection,
+    rows: Sequence[sqlite3.Row],
+    *,
+    outcome: str,
+    settled_at: str,
+) -> int:
     settled = 0
     for row in rows:
         won = (row["side"] == "YES" and outcome == "above") or (row["side"] == "NO" and outcome == "below")

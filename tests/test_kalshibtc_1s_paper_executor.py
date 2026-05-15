@@ -175,6 +175,65 @@ def test_1s_paper_trader_writes_signal_fake_fill_and_expiry_pnl(tmp_path: Path) 
     assert trades[0]["exit_reason"] == "1s_expiry_above"
 
 
+def test_1s_paper_trader_settles_expired_trade_when_market_rolls_without_post_close_tick(
+    tmp_path: Path,
+) -> None:
+    snapshot_db = tmp_path / "snapshots.sqlite3"
+    results_db = tmp_path / "paper-results-1s.sqlite3"
+    first_close = datetime(2026, 5, 15, 12, 0, 50, tzinfo=UTC)
+    next_close = datetime(2026, 5, 15, 12, 15, 0, tzinfo=UTC)
+    _snapshot_db(
+        snapshot_db,
+        rows=[
+            {
+                "ts": _iso(20),
+                "market_ticker": "KXBTC15M-FIRST",
+                "market_close_time": first_close.isoformat(),
+                "btc_price": 100_020.0,
+                "strike": 100_000.0,
+                "btc_velocity_30s": 2.5,
+                "seconds_to_close": 30.0,
+            },
+            {
+                "ts": _iso(49),
+                "market_ticker": "KXBTC15M-FIRST",
+                "market_close_time": first_close.isoformat(),
+                "btc_price": 100_080.0,
+                "strike": 100_000.0,
+                "btc_velocity_30s": 1.0,
+                "seconds_to_close": 1.0,
+            },
+            {
+                "ts": _iso(51),
+                "market_ticker": "KXBTC15M-NEXT",
+                "market_close_time": next_close.isoformat(),
+                "btc_price": 100_040.0,
+                "strike": 100_000.0,
+                "btc_velocity_30s": 2.0,
+                "seconds_to_close": 849.0,
+            },
+        ],
+    )
+
+    trader = OneSecondPaperTrader(
+        snapshot_db=snapshot_db,
+        ledger_db=results_db,
+        strategies=[SimpleDirectionalStrategy()],
+        risk_limits=RiskLimits(base_size_dollars=25.0, max_position_dollars=25.0, max_spread=0.05),
+    )
+    summary = trader.run_once(limit=10)
+
+    assert summary.trades_closed == 1
+    assert summary.trades_opened == 2
+    trades = _ledger_rows(results_db, "paper_trades")
+    assert [(row["market_ticker"], row["status"]) for row in trades] == [
+        ("KXBTC15M-FIRST", "SETTLED"),
+        ("KXBTC15M-NEXT", "OPEN"),
+    ]
+    assert trades[0]["exit_price"] == pytest.approx(1.0)
+    assert trades[0]["exit_reason"] == "1s_expiry_above"
+
+
 def test_1s_paper_trader_advances_cursor_past_malformed_snapshot(tmp_path: Path) -> None:
     snapshot_db = tmp_path / "snapshots.sqlite3"
     results_db = tmp_path / "paper-results-1s.sqlite3"
