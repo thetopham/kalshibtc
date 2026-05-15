@@ -88,15 +88,16 @@ src/kalshibtc/
   __init__.py
   config.py                    # BotConfig and RiskLimits defaults for the modular path
   main.py                      # MarketStateBuilder, BotPipeline, strategy -> risk -> executor wiring
-  paper_signal_executor.py     # live 1s paper loop over snapshot DB into results DB
+  paper_signal_executor.py     # thin CLI/live 1s paper loop over snapshot DB into results DB
 
   datafeed/
     models.py                  # Tick and OrderBookSnapshot
-    websocket.py               # live feed protocol boundary
+    websocket.py               # live feed protocol boundary; wraps legacy streaming later, not in paper executor
     recorder.py                # SQLite recorder seam for feed snapshots
 
   market/
     contract.py                # ContractWindow, strike/close metadata
+    kalshi_public.py           # read-only unauthenticated official settlement lookups
     pricing.py                 # quote/spread helpers
     state.py                   # normalized MarketState used by strategies/risk
 
@@ -116,9 +117,31 @@ src/kalshibtc/
     metrics.py                 # basic trade metrics
 
   storage/
-    db.py                      # SQLite helpers
+    db.py                      # generic SQLite helpers
+    paper_signal_store.py      # 1s executor snapshot/results repositories and paper settlement persistence
     schema.sql                 # modular storage schema
 ```
+
+## Legacy coupling status
+
+Decoupled in this refactor:
+
+- `python -m kalshibtc.paper_signal_executor` no longer imports `kalshi_btc_15m_bot.kalshi_client`.
+- The official settlement lookup used by the 1s paper path now lives in `src/kalshibtc/market/kalshi_public.py` as a small unauthenticated read-only client.
+- Snapshot reads, cursor tracking, prediction writes, fake-fill persistence, and settlement/PnL writes now live behind `PaperSignalStore` in `src/kalshibtc/storage/paper_signal_store.py`.
+- `paper_signal_executor.py` stays focused on orchestration: snapshot row -> `MarketState` -> `SimpleDirectionalStrategy` -> `RiskManager` -> `PaperExecutor` -> results DB.
+
+Remaining known legacy boundaries:
+
+- The recorder entrypoint is still exposed by the legacy `kbtc15` CLI.
+- `src/kalshibtc/datafeed/websocket.py` is a protocol/placeholder that explicitly points at wrapping `kalshi_btc_15m_bot.streaming` later.
+- The legacy package remains available for the older scanner, dashboard/reporting pieces, and migration reference.
+
+Refactor later:
+
+- Move or wrap the active 1s recorder entrypoint into `src/kalshibtc/` without changing the live stream behavior.
+- Review dashboard/reporting dependencies and decide which read-only paper-PnL views belong in the modular package.
+- Keep the legacy authenticated/live-order adapter out of the 1s paper executor until live trading is explicitly redesigned and approved.
 
 ## Paper PnL review before complexity
 
