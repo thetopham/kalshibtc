@@ -1197,6 +1197,11 @@ def _paper_performance_panel(perf: Mapping[str, Any], metrics: Mapping[str, Any]
       <div class="muted tiny" style="margin-bottom:10px">Hypothesis table: does slope + above/below have edge, or is it noise?</div>
       {_paper_review_table(perf.get('review_trades'))}
     </section>
+    <section class="panel" style="margin-top:14px;box-shadow:none">
+      <h2>Paper Review Buckets</h2>
+      <div class="muted tiny" style="margin-bottom:10px">Bucketed PnL by strategy, side, expiry, distance, slope, and hold time before changing strategy rules.</div>
+      {_paper_review_bucket_table(perf.get('review_buckets'))}
+    </section>
     <section class="grid two">
       <div class="panel" style="margin-top:14px;box-shadow:none">
         <h2>Recent paper trades</h2>
@@ -1242,6 +1247,51 @@ def _paper_review_table(value: Any) -> str:
         "</tr>"
     )
     return f"<div class='table-wrap'><table class='review-table'><thead>{headers}</thead><tbody>{body}</tbody></table></div>"
+
+
+def _paper_review_bucket_table(value: Any) -> str:
+    bucket_map = value if isinstance(value, Mapping) else {}
+    rows: list[str] = []
+    for category in (
+        "strategy",
+        "side",
+        "seconds_to_expiry",
+        "distance_from_strike",
+        "slope_at_entry",
+        "hold_seconds",
+    ):
+        raw_rows = bucket_map.get(category)
+        if not isinstance(raw_rows, list):
+            continue
+        rows.extend(_paper_review_bucket_row(category, _mapping(row)) for row in raw_rows[:12])
+    if not rows:
+        return "<p class='muted'>No bucketed paper review stats yet.</p>"
+    headers = (
+        "<tr>"
+        "<th>group</th>"
+        "<th>bucket</th>"
+        "<th>trades</th>"
+        "<th>win_rate</th>"
+        "<th>avg_pnl</th>"
+        "<th>total_pnl</th>"
+        "<th>avg_hold_seconds</th>"
+        "</tr>"
+    )
+    return f"<div class='table-wrap'><table class='review-table'><thead>{headers}</thead><tbody>{''.join(rows)}</tbody></table></div>"
+
+
+def _paper_review_bucket_row(category: str, row: Mapping[str, Any]) -> str:
+    return (
+        "<tr>"
+        f"<td>{esc(category)}</td>"
+        f"<td>{esc(row.get('bucket'))}</td>"
+        f"<td>{esc(row.get('trades'))}</td>"
+        f"<td>{_pct_or_dash(row.get('win_rate'))}</td>"
+        f"<td>{_signed_money_or_dash(row.get('avg_pnl'))}</td>"
+        f"<td>{_signed_money_or_dash(row.get('total_pnl'))}</td>"
+        f"<td>{_num(row.get('avg_hold_seconds'), 0)}</td>"
+        "</tr>"
+    )
 
 
 def _paper_review_table_row(row: Mapping[str, Any]) -> str:
