@@ -119,6 +119,7 @@ def _write_paper_performance_db(ledger_path: Path) -> None:
                 market_close_time TEXT,
                 action TEXT NOT NULL,
                 side TEXT,
+                strategy TEXT,
                 probability_yes REAL NOT NULL,
                 probability_no REAL NOT NULL,
                 confidence REAL NOT NULL,
@@ -161,12 +162,15 @@ def _write_paper_performance_db(ledger_path: Path) -> None:
                 """
                 INSERT INTO predictions (
                     id, created_at, market_ticker, event_ticker, market_close_time,
-                    action, side, probability_yes, probability_no, confidence, edge,
+                    action, side, strategy, probability_yes, probability_no, confidence, edge,
                     stake_dollars, current_price, target_price, yes_ask, no_ask,
                     model_info_json, reasons_json, features_json, raw_json
                 ) VALUES (?, '2026-05-14T16:00:00+00:00', ?, 'KXBTC15M-TEST',
-                    '2026-05-14T16:15:00+00:00', ?, ?, 0.60, 0.40, 0.30, 0.05,
-                    25.0, 100000.0, 100010.0, 0.55, 0.45, '{}', '[]', '{}', '{}')
+                    '2026-05-14T16:15:00+00:00', ?, ?, 'simple_directional', 0.60, 0.40, 0.30, 0.05,
+                    25.0, 100000.0, 100010.0, 0.55, 0.45, '{}',
+                    '["above strike + trend up"]',
+                    '{"btc_velocity_30s": 2.5, "distance_from_strike": -10.0, "seconds_to_expiry": 899.0}',
+                    '{}')
                 """,
                 (prediction_id, market_ticker, action, side),
             )
@@ -281,6 +285,20 @@ def test_collect_dashboard_data_adds_sqlite_paper_performance_summary(tmp_path: 
     assert any(row["signal"] == "BUY_YES" for row in perf["by_signal"])
     assert any(row["market_ticker"] == "KXBTC15M-TEST-WIN" for row in perf["by_market"])
 
+    review = perf["review_trades"]
+    assert review[0]["strategy"] == "simple_directional"
+    assert review[0]["side"] == "YES"
+    assert review[0]["entry_time"] == "2026-05-14T16:12:01+00:00"
+    assert review[0]["exit_time"] is None
+    assert review[0]["entry_price"] == pytest.approx(0.50)
+    assert review[0]["exit_price"] is None
+    assert review[0]["pnl"] == pytest.approx(4.0)
+    assert review[0]["hold_seconds"] == pytest.approx(29.0)
+    assert review[0]["slope_at_entry"] == pytest.approx(2.5)
+    assert review[0]["distance_from_strike"] == pytest.approx(-10.0)
+    assert review[0]["seconds_to_expiry"] == pytest.approx(899.0)
+    assert review[0]["reason"] == "above strike + trend up"
+
 
 def test_render_dashboard_html_includes_paper_trading_performance_panel(tmp_path: Path) -> None:
     ledger_path = tmp_path / "paper-ledger.sqlite3"
@@ -292,9 +310,43 @@ def test_render_dashboard_html_includes_paper_trading_performance_panel(tmp_path
     assert "Paper Trading Performance" in text
     assert "cumulative-pnl-chart" in text
     assert "Recent paper trades" in text
+    assert "Paper PnL Review" in text
+    assert "strategy" in text
+    assert "slope_at_entry" in text
+    assert "distance_from_strike" in text
+    assert "seconds_to_expiry" in text
+    assert "simple_directional" in text
+    assert "above strike + trend up" in text
     assert "Grouped by signal" in text
     assert "+$6.00" in text
     assert "+$4.00" in text
+
+
+def test_render_dashboard_html_escapes_paper_review_text() -> None:
+    data = collect_dashboard_data(FakeBot(), include_service_status=False)
+    data["paper_performance"]["review_trades"] = [
+        {
+            "strategy": "<b>simple</b>",
+            "side": "YES",
+            "entry_time": "2026-05-14T16:00:00+00:00",
+            "exit_time": None,
+            "entry_price": 0.5,
+            "exit_price": None,
+            "pnl": 1.25,
+            "hold_seconds": 12.0,
+            "slope_at_entry": 2.0,
+            "distance_from_strike": 10.0,
+            "seconds_to_expiry": 800.0,
+            "reason": "<script>alert(1)</script>",
+        }
+    ]
+
+    text = render_dashboard_html(data)
+
+    assert "<b>simple</b>" not in text
+    assert "<script>alert(1)</script>" not in text
+    assert "&lt;b&gt;simple&lt;/b&gt;" in text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in text
 
 
 def test_render_dashboard_html_includes_cards_and_read_only_boundary() -> None:

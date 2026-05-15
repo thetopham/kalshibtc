@@ -241,6 +241,11 @@ def render_dashboard_html(data: Mapping[str, Any], *, api_path: str = "/api/dash
     .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }}
     .badge {{ border-radius: 8px; padding: 3px 7px; background: var(--panel2); border:1px solid var(--line); color: var(--muted); font-size:12px; }}
     .cards {{ display:grid; gap:10px; }}
+    .table-wrap {{ overflow-x:auto; border:1px solid var(--line); border-radius:14px; background:#08101e; }}
+    .review-table {{ width:100%; border-collapse:collapse; min-width:1080px; font-size:12px; }}
+    .review-table th,.review-table td {{ border-bottom:1px solid var(--line); padding:9px 10px; text-align:left; vertical-align:top; }}
+    .review-table th {{ color:var(--muted); text-transform:uppercase; letter-spacing:.08em; font-weight:800; }}
+    .review-table tr:last-child td {{ border-bottom:0; }}
     .tiny {{ font-size: 12px; }}
     pre {{ white-space: pre-wrap; overflow-wrap:anywhere; color: var(--muted); background:#08101e; border:1px solid var(--line); padding:12px; border-radius:12px; }}
     footer {{ color: var(--muted); margin-top: 18px; font-size: 12px; }}
@@ -1187,6 +1192,11 @@ def _paper_performance_panel(perf: Mapping[str, Any], metrics: Mapping[str, Any]
       {_kpi('Avg trade', _signed_money_or_dash(metrics.get('avg_trade_pnl')), f"avg win {_signed_money_or_dash(metrics.get('avg_win'))} · avg loss {_signed_money_or_dash(metrics.get('avg_loss'))}", metrics.get('avg_trade_pnl'))}
     </section>
     <div id="cumulative-pnl-chart" style="margin-top:14px">{_cumulative_pnl_svg(perf.get('cumulative_pnl'))}</div>
+    <section class="panel" style="margin-top:14px;box-shadow:none">
+      <h2>Paper PnL Review</h2>
+      <div class="muted tiny" style="margin-bottom:10px">Hypothesis table: does slope + above/below have edge, or is it noise?</div>
+      {_paper_review_table(perf.get('review_trades'))}
+    </section>
     <section class="grid two">
       <div class="panel" style="margin-top:14px;box-shadow:none">
         <h2>Recent paper trades</h2>
@@ -1208,6 +1218,49 @@ def _paper_performance_panel(perf: Mapping[str, Any], metrics: Mapping[str, Any]
       </div>
     </section>
   </section>"""
+
+
+def _paper_review_table(value: Any) -> str:
+    rows = value if isinstance(value, list) else []
+    if not rows:
+        return "<p class='muted'>No paper review rows yet. Let the 1s paper collector run first.</p>"
+    body = "".join(_paper_review_table_row(_mapping(row)) for row in rows[:25])
+    headers = (
+        "<tr>"
+        "<th>strategy</th>"
+        "<th>side</th>"
+        "<th>entry_time</th>"
+        "<th>exit_time</th>"
+        "<th>entry_price</th>"
+        "<th>exit_price</th>"
+        "<th>pnl</th>"
+        "<th>hold_seconds</th>"
+        "<th>slope_at_entry</th>"
+        "<th>distance_from_strike</th>"
+        "<th>seconds_to_expiry</th>"
+        "<th>reason</th>"
+        "</tr>"
+    )
+    return f"<div class='table-wrap'><table class='review-table'><thead>{headers}</thead><tbody>{body}</tbody></table></div>"
+
+
+def _paper_review_table_row(row: Mapping[str, Any]) -> str:
+    return (
+        "<tr>"
+        f"<td>{esc(row.get('strategy'))}</td>"
+        f"<td>{esc(row.get('side'))}</td>"
+        f"<td class='mono'>{esc(row.get('entry_time'))}</td>"
+        f"<td class='mono'>{esc(row.get('exit_time'))}</td>"
+        f"<td>{_num(row.get('entry_price'), 3)}</td>"
+        f"<td>{_num(row.get('exit_price'), 3)}</td>"
+        f"<td>{_signed_money_or_dash(row.get('pnl'))}</td>"
+        f"<td>{_num(row.get('hold_seconds'), 0)}</td>"
+        f"<td>{_num(row.get('slope_at_entry'), 3)}</td>"
+        f"<td>{_num(row.get('distance_from_strike'), 2)}</td>"
+        f"<td>{_num(row.get('seconds_to_expiry'), 0)}</td>"
+        f"<td>{esc(row.get('reason'))}</td>"
+        "</tr>"
+    )
 
 
 def _paper_performance_trade_row(row: Mapping[str, Any]) -> str:

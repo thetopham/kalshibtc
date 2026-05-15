@@ -117,6 +117,18 @@ That makes the intended development loop:
 - paper trade multiple strategies in parallel;
 - compare stats without rewriting feed or execution code.
 
+## Paper review loop
+
+Do not add strategy complexity until the simple slope + above/below rule has enough paper evidence. Run the 1s collector/paper path and persist:
+
+1. every 1s BTC tick;
+2. Kalshi order book snapshots;
+3. generated strategy signals;
+4. fake fills;
+5. exits and PnL.
+
+The `/status` dashboard exposes a **Paper PnL Review** table with these review columns: strategy, side, entry time, exit time, entry price, exit price, PnL, hold seconds, slope at entry, distance from strike, seconds to expiry, and reason. The operator question is: does simple slope + above/below actually have edge, or is it just noise?
+
 ## Safety boundary
 
 - The new `kalshibtc.execution.paper.PaperExecutor` only creates fake fills.

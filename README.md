@@ -139,6 +139,8 @@ kbtc15 --config configs/live-prod.local.toml dashboard --host 0.0.0.0 --port 879
 
 The stream page now defaults to a single Execution Decision v1 card: `ACTION` (`BUY_YES`, `BUY_NO`, or `NO_TRADE`), position size, entry, suggested stop, suggested take-profit, confidence, regime, reason, and blockers. The older probability model, EV calculations, YES/NO order book, warnings, raw payload, and prediction reasons are still retained under collapsible debug internals for replay and research. The `/status` page still shows live account balance/portfolio when the selected config has live credentials loaded, paper and live PnL from the local SQLite ledger, latest predictions, live orders/fills, open positions, service status, and the active safety boundary.
 
+The `/status` Paper Trading Performance panel also includes a **Paper PnL Review** table for hypothesis review before any strategy complexity is added. It displays strategy, side, entry/exit times, entry/exit prices, PnL, hold seconds, slope at entry, distance from strike, seconds to expiry, and the signal reason. Use it to answer: does simple slope + above/below actually have edge, or is it just noise?
+
 ## Execution Decision v1
 
 The realtime stream now has one deliberately simple operator answer: `execution_decision`. The v1 edge is only:

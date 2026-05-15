@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +70,11 @@ def collect_paper_trading_performance(
 
             open_positions = _open_positions(conn, has_predictions=has_predictions)
             open_positions, unrealized_state = _mark_open_positions(open_positions, snapshots, schema_gaps)
+            marked_open_positions = {
+                str(position.get("trade_id")): position
+                for position in open_positions
+                if position.get("trade_id") is not None
+            }
 
             metrics = _summary_metrics(conn, unrealized_state)
             payload.update(
@@ -77,6 +84,14 @@ def collect_paper_trading_performance(
                     "recent_trades": _recent_trades(
                         conn,
                         has_predictions=has_predictions,
+                        limit=recent_limit,
+                    ),
+                    "review_trades": _review_trades(
+                        conn,
+                        has_predictions=has_predictions,
+                        trade_columns=trade_columns,
+                        prediction_columns=prediction_columns,
+                        marked_open_positions=marked_open_positions,
                         limit=recent_limit,
                     ),
                     "cumulative_pnl": _cumulative_pnl(conn, limit=cumulative_limit),
@@ -126,6 +141,7 @@ def _empty_payload(ledger_path: Path, snapshot_path: Path | None) -> dict[str, A
         },
         "open_positions": [],
         "recent_trades": [],
+        "review_trades": [],
         "cumulative_pnl": [],
         "by_signal": [],
         "by_market": [],
@@ -249,6 +265,164 @@ def _recent_trades(
         (max(1, int(limit)),),
     ).fetchall()
     return [_normalize_trade_row(row) for row in rows]
+
+
+def _review_trades(
+    conn: sqlite3.Connection,
+    *,
+    has_predictions: bool,
+    trade_columns: set[str],
+    prediction_columns: set[str],
+    marked_open_positions: Mapping[str, Mapping[str, Any]],
+    limit: int,
+) -> list[dict[str, Any]]:
+    can_join_predictions = has_predictions and "prediction_id" in trade_columns
+    join = "LEFT JOIN predictions p ON p.id = t.prediction_id" if can_join_predictions else ""
+    strategy_expr = _review_strategy_expr(
+        trade_columns,
+        prediction_columns,
+        can_join_predictions=can_join_predictions,
+    )
+    signal_expr = "p.action" if can_join_predictions and "action" in prediction_columns else "t.side"
+    features_expr = (
+        "p.features_json" if can_join_predictions and "features_json" in prediction_columns else "NULL"
+    )
+    reasons_expr = (
+        "p.reasons_json" if can_join_predictions and "reasons_json" in prediction_columns else "NULL"
+    )
+    current_price_expr = (
+        "p.current_price" if can_join_predictions and "current_price" in prediction_columns else "NULL"
+    )
+    target_price_expr = (
+        "p.target_price" if can_join_predictions and "target_price" in prediction_columns else "NULL"
+    )
+    close_exprs = []
+    if "market_close_time" in trade_columns:
+        close_exprs.append("t.market_close_time")
+    if can_join_predictions and "market_close_time" in prediction_columns:
+        close_exprs.append("p.market_close_time")
+    close_time_expr = _coalesce_expr(close_exprs, fallback="NULL")
+    prediction_id_expr = "t.prediction_id" if "prediction_id" in trade_columns else "NULL"
+    rows = conn.execute(
+        f"""
+        SELECT
+            t.id AS trade_id,
+            {prediction_id_expr} AS prediction_id,
+            t.created_at AS entry_time,
+            t.settled_at AS exit_time,
+            {close_time_expr} AS market_close_time,
+            t.market_ticker,
+            {strategy_expr} AS strategy,
+            {signal_expr} AS signal,
+            t.side,
+            t.entry_price,
+            t.exit_price,
+            t.exit_reason,
+            t.status,
+            t.realized_pnl,
+            {features_expr} AS features_json,
+            {reasons_expr} AS reasons_json,
+            {current_price_expr} AS current_price,
+            {target_price_expr} AS target_price
+        FROM paper_trades t
+        {join}
+        ORDER BY t.created_at DESC, t.id DESC
+        LIMIT ?
+        """,
+        (max(1, int(limit)),),
+    ).fetchall()
+    return [_normalize_review_row(row, marked_open_positions) for row in rows]
+
+
+def _review_strategy_expr(
+    trade_columns: set[str],
+    prediction_columns: set[str],
+    *,
+    can_join_predictions: bool,
+) -> str:
+    exprs = []
+    if "strategy" in trade_columns:
+        exprs.append("t.strategy")
+    if can_join_predictions and "strategy" in prediction_columns:
+        exprs.append("p.strategy")
+    if can_join_predictions and "action" in prediction_columns:
+        exprs.append("p.action")
+    exprs.append("t.side")
+    return _coalesce_expr(exprs, fallback="t.side")
+
+
+def _coalesce_expr(exprs: list[str], *, fallback: str) -> str:
+    if not exprs:
+        return fallback
+    if len(exprs) == 1:
+        return exprs[0]
+    return f"COALESCE({', '.join(exprs)})"
+
+
+def _normalize_review_row(
+    row: sqlite3.Row,
+    marked_open_positions: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    data = dict(row)
+    trade_id = str(data.get("trade_id") or "")
+    mark = marked_open_positions.get(trade_id) or {}
+    features = _json_mapping(data.get("features_json"))
+    entry_time = data.get("entry_time")
+    exit_time = data.get("exit_time")
+    pnl = _float_or_none(data.get("realized_pnl"))
+    if pnl is None:
+        pnl = _float_or_none(mark.get("unrealized_pnl"))
+    hold_seconds = _seconds_between(entry_time, exit_time or mark.get("mark_ts"))
+    slope_at_entry = _first_float(
+        features,
+        "slope_at_entry",
+        "btc_velocity_30s",
+        "btc_slope_30s",
+        "slope_30s",
+        "price_slope",
+    )
+    distance_from_strike = _first_float(
+        features,
+        "distance_from_strike",
+        "distance_to_strike",
+        "distance_to_target",
+        "target_distance",
+    )
+    if distance_from_strike is None:
+        current_price = _float_or_none(data.get("current_price"))
+        target_price = _float_or_none(data.get("target_price"))
+        if current_price is not None and target_price is not None:
+            distance_from_strike = current_price - target_price
+    seconds_to_expiry = _first_float(
+        features,
+        "seconds_to_expiry",
+        "seconds_to_close",
+        "seconds_until_close",
+        "time_to_expiry_seconds",
+    )
+    if seconds_to_expiry is None:
+        seconds_to_expiry = _seconds_between(entry_time, data.get("market_close_time"))
+    return {
+        "trade_id": data.get("trade_id"),
+        "prediction_id": data.get("prediction_id"),
+        "market_ticker": data.get("market_ticker"),
+        "strategy": data.get("strategy") or data.get("signal") or data.get("side") or "unknown",
+        "side": data.get("side"),
+        "status": data.get("status"),
+        "entry_time": entry_time,
+        "exit_time": exit_time,
+        "entry_price": _float_or_none(data.get("entry_price")),
+        "exit_price": _float_or_none(data.get("exit_price")),
+        "pnl": pnl,
+        "hold_seconds": hold_seconds,
+        "slope_at_entry": slope_at_entry,
+        "distance_from_strike": distance_from_strike,
+        "seconds_to_expiry": seconds_to_expiry,
+        "reason": _review_reason(data.get("reasons_json"))
+        or data.get("exit_reason")
+        or data.get("signal")
+        or data.get("strategy"),
+    }
 
 
 def _open_positions(conn: sqlite3.Connection, *, has_predictions: bool) -> list[dict[str, Any]]:
@@ -505,6 +679,78 @@ def _normalize_group_row(row: sqlite3.Row) -> dict[str, Any]:
     data["avg_pnl"] = _float_or_none(data.get("avg_pnl"))
     data["notional"] = _float(data.get("notional"))
     return data
+
+
+def _json_mapping(value: Any) -> dict[str, Any]:
+    parsed = _json_value(value)
+    return dict(parsed) if isinstance(parsed, Mapping) else {}
+
+
+def _review_reason(value: Any) -> str | None:
+    parsed = _json_value(value)
+    if isinstance(parsed, str):
+        return parsed or None
+    if isinstance(parsed, Mapping):
+        return _first_text(parsed, "reason", "message", "text", "label")
+    if isinstance(parsed, list):
+        for item in parsed:
+            if isinstance(item, str) and item:
+                return item
+            if isinstance(item, Mapping):
+                text = _first_text(item, "reason", "message", "text", "label")
+                if text:
+                    return text
+    return None
+
+
+def _json_value(value: Any) -> Any:
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+def _first_text(mapping: Mapping[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _first_float(mapping: Mapping[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = _float_or_none(mapping.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _seconds_between(start: Any, end: Any) -> float | None:
+    start_dt = _parse_datetime(start)
+    end_dt = _parse_datetime(end)
+    if start_dt is None or end_dt is None:
+        return None
+    try:
+        return max(0.0, (end_dt - start_dt).total_seconds())
+    except TypeError:
+        return None
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if value is None or value == "":
+        return None
+    text = str(value)
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
 
 
 def _float(value: Any) -> float:
