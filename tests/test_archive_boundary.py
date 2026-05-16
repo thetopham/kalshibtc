@@ -5,14 +5,19 @@ import tomllib
 from pathlib import Path
 
 
-def test_legacy_15m_package_is_archived_off_active_python_path() -> None:
-    assert importlib.util.find_spec("kalshi_btc_15m_bot") is None
+def test_previous_stream_dashboard_package_is_active_again() -> None:
+    spec = importlib.util.find_spec("kalshi_btc_15m_bot")
+
+    assert spec is not None
+    assert spec.origin is not None
+    assert "src/kalshi_btc_15m_bot" in spec.origin
 
 
-def test_only_active_console_scripts_are_clean_1s_components() -> None:
+def test_console_scripts_include_previous_dashboard_and_clean_1s_components() -> None:
     pyproject = tomllib.loads(Path("pyproject.toml").read_text())
 
     assert pyproject["project"]["scripts"] == {
+        "kbtc15": "kalshi_btc_15m_bot.cli:main",
         "kbtc15-1s-dashboard": "kalshibtc.dashboard:main",
         "kbtc15-1s-paper": "kalshibtc.paper_signal_executor:main",
         "kbtc15-1s-recorder": "kalshibtc.record_1s_snapshots:main",
