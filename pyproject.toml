@@ -11,7 +11,13 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Local Hermes" }]
 dependencies = [
+  "cryptography>=42.0",
+  "numpy>=1.26",
+  "pandas>=2.1",
+  "python-dotenv>=1.0",
   "requests>=2.31",
+  "scikit-learn>=1.4",
+  "websockets>=12.0",
 ]
 
 [project.optional-dependencies]
@@ -21,8 +27,10 @@ dev = [
 ]
 
 [project.scripts]
-kbtc15-1s-paper = "kalshibtc.paper_signal_executor:main"
-kbtc15-1s-recorder = "kalshibtc.record_1s_snapshots:main"
+kbtc-feed = "kalshibtc.record_1s_snapshots:main"
+kbtc-replay = "kalshibtc.replay.cli:main"
+kbtc-dashboard = "kalshibtc.dashboard:main"
+kbtc-paper = "kalshibtc.paper_signal_executor:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
