@@ -4,11 +4,13 @@ import argparse
 import json
 import sqlite3
 import sys
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from ..config import BotConfig, RiskLimits
+from ..backtest.metrics import compute_metrics
 from ..datafeed.models import OrderBookSnapshot, Tick
 from ..execution.paper import PaperFill
 from ..execution.risk import RiskDecision, RiskManager
@@ -17,6 +19,7 @@ from ..runtime_paths import DEFAULT_FEED_DB, DEFAULT_RUNS_DIR, resolve_feed_db, 
 from ..strategy.registry import create_strategy, strategy_names
 from ..strategy.signals import Signal
 from .replay import ReplayEngine
+from .settlement import estimate_replay_fill_pnls
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -81,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
         run_dir=run_dir,
         strategy=args.strategy,
         max_open_positions=args.max_open_positions,
+        settlement_rows=rows,
     )
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -230,7 +234,32 @@ def _write_results(path: Path, results: list[Any]) -> None:
                 )
 
 
-def _metrics_payload(*, report: Any, feed_db: Path, run_dir: Path, strategy: str, max_open_positions: int) -> dict[str, Any]:
+def _metrics_payload(
+    *,
+    report: Any,
+    feed_db: Path,
+    run_dir: Path,
+    strategy: str,
+    max_open_positions: int,
+    settlement_rows: Sequence[Mapping[str, Any] | Any] | None = None,
+) -> dict[str, Any]:
+    settled_fills = estimate_replay_fill_pnls(report.fills, settlement_rows or [])
+    institutional_metrics: dict[str, Any] = dict(compute_metrics(settled_fills))
+    settlement_sources = sorted(
+        {
+            str(fill.get("settlement_source"))
+            for fill in settled_fills
+            if fill.get("settlement_source")
+        }
+    )
+    if settlement_sources:
+        institutional_metrics["settlement_sources"] = settlement_sources
+        institutional_metrics["settlement_source"] = (
+            settlement_sources[0] if len(settlement_sources) == 1 else "mixed"
+        )
+    institutional_metrics["settled_trades"] = sum(
+        1 for fill in settled_fills if fill.get("settlement_source") == "replay_final_snapshot"
+    )
     return {
         "feed_db": str(feed_db),
         "run_dir": str(run_dir),
@@ -242,6 +271,7 @@ def _metrics_payload(*, report: Any, feed_db: Path, run_dir: Path, strategy: str
         "settled_positions": getattr(report, "settled_positions", 0),
         "notional": round(sum(fill.notional for fill in report.fills), 6),
         "max_open_positions": max_open_positions,
+        "institutional_metrics": institutional_metrics,
     }
 
 
