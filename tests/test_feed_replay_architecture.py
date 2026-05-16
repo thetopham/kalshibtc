@@ -144,6 +144,77 @@ def test_replay_cli_reads_feed_db_and_writes_immutable_run_outputs(tmp_path: Pat
     assert fills >= 1
 
 
+def test_replay_cli_can_enable_composite_reference_without_default_strategy_change(tmp_path: Path) -> None:
+    feed_db = tmp_path / "feed" / "kalshi-btc-1s.sqlite3"
+    runs_dir = tmp_path / "runs"
+    _write_feed_db(feed_db)
+    with sqlite3.connect(feed_db) as conn:
+        conn.execute(
+            """
+            UPDATE realtime_snapshots_1s
+            SET raw_json = ?
+            WHERE ts = '2026-05-15T12:00:30+00:00'
+            """,
+            (
+                json.dumps(
+                    {
+                        "btc_venue_observations": [
+                            {"venue": "coinbase", "ts": "2026-05-15T12:00:30+00:00", "price": 99_990.0},
+                            {"venue": "kraken", "ts": "2026-05-15T12:00:30+00:00", "price": 100_000.0},
+                            {"venue": "bitstamp", "ts": "2026-05-15T12:00:30+00:00", "price": 100_010.0},
+                        ]
+                    }
+                ),
+            ),
+        )
+
+    assert replay_main(
+        [
+            "--feed-db",
+            str(feed_db),
+            "--runs-dir",
+            str(runs_dir),
+            "--strategy",
+            "simple_directional",
+            "--run-id",
+            "raw-default",
+            "--json",
+        ]
+    ) == 0
+    assert replay_main(
+        [
+            "--feed-db",
+            str(feed_db),
+            "--runs-dir",
+            str(runs_dir),
+            "--strategy",
+            "simple_directional",
+            "--run-id",
+            "composite-enabled",
+            "--reference-price-source",
+            "composite_60s_reference",
+            "--json",
+        ]
+    ) == 0
+
+    raw_metrics = json.loads((runs_dir / "simple_directional" / "raw-default" / "metrics.json").read_text())
+    composite_metrics = json.loads(
+        (runs_dir / "simple_directional" / "composite-enabled" / "metrics.json").read_text()
+    )
+    assert raw_metrics["reference_price_source"] == "single_venue"
+    assert composite_metrics["reference_price_source"] == "composite_60s_reference"
+    assert composite_metrics["reference_price_provenance"]["single_venue_ticks"] == 2
+    assert composite_metrics["reference_price_provenance"]["composite_60s_reference_ticks"] == 1
+    assert composite_metrics["reference_price_provenance"]["warnings"] == []
+
+    with sqlite3.connect(runs_dir / "simple_directional" / "composite-enabled" / "results.sqlite3") as conn:
+        raw = json.loads(conn.execute("SELECT raw_json FROM replay_signals WHERE raw_json LIKE '%composite_60s_reference%' LIMIT 1").fetchone()[0])
+
+    assert raw["state"]["reference_price_source"] == "composite_60s_reference"
+    assert raw["state"]["reference_price"] == 100_000.0
+    assert raw["state"]["raw_btc_price"] == 100_025.0
+
+
 def test_replay_cli_refuses_to_overwrite_existing_run(tmp_path: Path) -> None:
     feed_db = tmp_path / "feed.sqlite3"
     runs_dir = tmp_path / "runs"

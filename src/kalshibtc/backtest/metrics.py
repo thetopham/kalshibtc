@@ -66,6 +66,7 @@ def compute_metrics(
         "volatility": volatility,
         "mean_return": mean_return,
         "skewness": _skewness(returns),
+        "kurtosis": _kurtosis(returns),
         "excess_kurtosis": _excess_kurtosis(returns),
         "profit_factor": profit_factor,
         "avg_win": avg_win,
@@ -138,12 +139,16 @@ def _skewness(values: Sequence[float]) -> float:
     return sum(((value - mean) / std) ** 3 for value in values) / len(values)
 
 
-def _excess_kurtosis(values: Sequence[float]) -> float:
+def _kurtosis(values: Sequence[float]) -> float:
     if len(values) < 4:
         return 0.0
     mean = _mean(values)
     std = _population_std(values)
     if std == 0:
         return 0.0
-    kurtosis = sum(((value - mean) / std) ** 4 for value in values) / len(values)
-    return kurtosis - 3.0
+    return sum(((value - mean) / std) ** 4 for value in values) / len(values)
+
+
+def _excess_kurtosis(values: Sequence[float]) -> float:
+    kurtosis = _kurtosis(values)
+    return kurtosis - 3.0 if kurtosis else 0.0

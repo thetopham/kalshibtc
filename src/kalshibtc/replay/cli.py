@@ -9,8 +9,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ..config import BotConfig, RiskLimits
 from ..backtest.metrics import compute_metrics
+from ..config import BotConfig, RiskLimits
+from ..datafeed.composite_reference import VenueObservation, compute_composite_reference
 from ..datafeed.models import OrderBookSnapshot, Tick
 from ..execution.paper import PaperFill
 from ..execution.risk import RiskDecision, RiskManager
@@ -19,7 +20,13 @@ from ..runtime_paths import DEFAULT_FEED_DB, DEFAULT_RUNS_DIR, resolve_feed_db, 
 from ..strategy.registry import create_strategy, strategy_names
 from ..strategy.signals import Signal
 from .replay import ReplayEngine
-from .settlement import estimate_replay_fill_pnls
+from .settlement import (
+    backfill_market_settlements as backfill_market_settlements,
+)
+from .settlement import (
+    estimate_replay_fill_pnls,
+    load_official_market_settlements,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -42,6 +49,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Do not reset replay open-position count when the market ticker changes.",
     )
+    parser.add_argument(
+        "--reference-price-source",
+        choices=("single_venue", "composite_60s_reference"),
+        default="single_venue",
+        help="Replay distance-to-strike with raw single-venue BTC price (default) or local composite 60s approximation.",
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON summary.")
     parser.add_argument("--overwrite", action="store_true", help="Allow replacing an existing run directory.")
     args = parser.parse_args(argv)
@@ -56,7 +69,10 @@ def main(argv: list[str] | None = None) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     rows = _load_snapshot_rows(feed_db, from_ts=args.from_ts, to_ts=args.to_ts)
-    ticks, books, contract = _rows_to_replay_inputs(rows)
+    ticks, books, contract, reference_provenance = _rows_to_replay_inputs(
+        rows,
+        reference_price_source=args.reference_price_source,
+    )
     strategy = create_strategy(args.strategy)
     risk = RiskManager(
         RiskLimits(
@@ -85,6 +101,9 @@ def main(argv: list[str] | None = None) -> int:
         strategy=args.strategy,
         max_open_positions=args.max_open_positions,
         settlement_rows=rows,
+        official_settlements=load_official_market_settlements(feed_db),
+        reference_price_source=args.reference_price_source,
+        reference_provenance=reference_provenance,
     )
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -119,7 +138,11 @@ def _load_snapshot_rows(feed_db: Path, *, from_ts: str | None, to_ts: str | None
         return list(conn.execute(sql, params))
 
 
-def _rows_to_replay_inputs(rows: list[sqlite3.Row]) -> tuple[list[Tick], list[OrderBookSnapshot], ContractWindow]:
+def _rows_to_replay_inputs(
+    rows: list[sqlite3.Row],
+    *,
+    reference_price_source: str = "single_venue",
+) -> tuple[list[Tick], list[OrderBookSnapshot], ContractWindow, dict[str, Any]]:
     if not rows:
         raise ValueError("feed DB query returned no snapshots")
     first = rows[0]
@@ -131,15 +154,43 @@ def _rows_to_replay_inputs(rows: list[sqlite3.Row]) -> tuple[list[Tick], list[Or
     )
     ticks: list[Tick] = []
     books: list[OrderBookSnapshot] = []
+    provenance: dict[str, Any] = {
+        "requested_source": reference_price_source,
+        "single_venue_ticks": 0,
+        "composite_60s_reference_ticks": 0,
+        "warnings": [],
+        "label": "approximation_not_official_cf_or_kalshi"
+        if reference_price_source == "composite_60s_reference"
+        else "raw_single_venue_feed_price",
+    }
     for row in rows:
         ts = _parse_dt(row["ts"])
+        raw = _json_or_empty(row["raw_json"] if _has_column(row, "raw_json") else None)
+        raw_price = float(row["btc_price"])
+        reference_price = raw_price
+        source = "single_venue"
+        reference = None
+        if reference_price_source == "composite_60s_reference":
+            reference = compute_composite_reference(_venue_observations_from_raw(raw), as_of=ts)
+            if reference is not None and reference.source == "composite_60s_reference":
+                reference_price = reference.price
+                source = reference.source
+            elif reference is not None and reference.source == "single_venue":
+                provenance["warnings"].extend(reference.provenance.get("warnings", []))
+        provenance[f"{source}_ticks"] = int(provenance.get(f"{source}_ticks", 0)) + 1
+        tick_raw = dict(raw)
+        tick_raw["reference_price_source"] = source
+        tick_raw["reference_price"] = reference_price
+        tick_raw["raw_btc_price"] = raw_price
+        if reference is not None:
+            tick_raw["reference_price_provenance"] = reference.provenance
         ticks.append(
             Tick(
                 ts=ts,
-                price=float(row["btc_price"]),
-                source="feed_replay",
+                price=reference_price,
+                source=source,
                 symbol="BTC-USD",
-                raw=_json_or_empty(row["raw_json"] if _has_column(row, "raw_json") else None),
+                raw=tick_raw,
             )
         )
         books.append(
@@ -151,10 +202,11 @@ def _rows_to_replay_inputs(rows: list[sqlite3.Row]) -> tuple[list[Tick], list[Or
                 no_bid=_optional_float(row, "no_bid"),
                 no_ask=_optional_float(row, "no_ask"),
                 sequence=_optional_int(row, "orderbook_sequence"),
-                raw=_json_or_empty(row["raw_json"] if _has_column(row, "raw_json") else None),
+                raw=raw,
             )
         )
-    return ticks, books, contract
+    provenance["warnings"] = sorted(set(provenance["warnings"]))
+    return ticks, books, contract, provenance
 
 
 def _write_results(path: Path, results: list[Any]) -> None:
@@ -185,6 +237,8 @@ def _write_results(path: Path, results: list[Any]) -> None:
             """
         )
         for result in results:
+            state = getattr(result, "state", None)
+            tick = getattr(state, "tick", None)
             signal: Signal = result.signal
             risk: RiskDecision = result.risk
             fill: PaperFill | None = result.fill
@@ -196,6 +250,11 @@ def _write_results(path: Path, results: list[Any]) -> None:
                     "size_dollars": risk.size_dollars,
                     "entry_price": risk.entry_price,
                     "blocked_by": risk.blocked_by,
+                },
+                "state": {
+                    "reference_price": state.price if state is not None else None,
+                    "reference_price_source": tick.source if tick is not None else None,
+                    "raw_btc_price": tick.raw.get("raw_btc_price") if tick is not None else None,
                 },
             }
             conn.execute(
@@ -242,8 +301,15 @@ def _metrics_payload(
     strategy: str,
     max_open_positions: int,
     settlement_rows: Sequence[Mapping[str, Any] | Any] | None = None,
+    official_settlements: Mapping[str, Mapping[str, Any]] | None = None,
+    reference_price_source: str = "single_venue",
+    reference_provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    settled_fills = estimate_replay_fill_pnls(report.fills, settlement_rows or [])
+    settled_fills = estimate_replay_fill_pnls(
+        report.fills,
+        settlement_rows or [],
+        official_settlements=official_settlements,
+    )
     institutional_metrics: dict[str, Any] = dict(compute_metrics(settled_fills))
     settlement_sources = sorted(
         {
@@ -258,7 +324,9 @@ def _metrics_payload(
             settlement_sources[0] if len(settlement_sources) == 1 else "mixed"
         )
     institutional_metrics["settled_trades"] = sum(
-        1 for fill in settled_fills if fill.get("settlement_source") == "replay_final_snapshot"
+        1
+        for fill in settled_fills
+        if fill.get("settlement_source") in {"kalshi_official", "replay_final_snapshot"}
     )
     return {
         "feed_db": str(feed_db),
@@ -271,6 +339,8 @@ def _metrics_payload(
         "settled_positions": getattr(report, "settled_positions", 0),
         "notional": round(sum(fill.notional for fill in report.fills), 6),
         "max_open_positions": max_open_positions,
+        "reference_price_source": reference_price_source,
+        "reference_price_provenance": dict(reference_provenance or {}),
         "institutional_metrics": institutional_metrics,
     }
 
@@ -287,10 +357,33 @@ def _config_text(*, args: argparse.Namespace, feed_db: Path, run_id: str) -> str
             f"max_position_dollars = {args.max_position_dollars}",
             f"max_open_positions = {args.max_open_positions}",
             f"max_spread = {args.max_spread}",
+            f'reference_price_source = "{args.reference_price_source}"',
             f"settle_on_market_rollover = {str(not args.no_settle_on_market_rollover).lower()}",
             "",
         ]
     )
+
+
+def _venue_observations_from_raw(raw: Mapping[str, Any]) -> list[VenueObservation]:
+    payload = raw.get("btc_venue_observations") or raw.get("venue_observations") or []
+    if not isinstance(payload, list):
+        return []
+    observations: list[VenueObservation] = []
+    for item in payload:
+        if not isinstance(item, Mapping):
+            continue
+        venue = item.get("venue") or item.get("exchange") or item.get("source")
+        ts = item.get("ts") or item.get("timestamp")
+        price = item.get("price")
+        if price is None:
+            price = item.get("btc_price")
+        if venue is None or ts is None or price is None:
+            continue
+        try:
+            observations.append(VenueObservation(venue=str(venue), ts=_parse_dt(ts), price=float(price)))
+        except (TypeError, ValueError):
+            continue
+    return observations
 
 
 def _parse_dt(value: Any) -> datetime:

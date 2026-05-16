@@ -13,6 +13,7 @@ from kalshibtc.execution.paper import PaperExecutor
 from kalshibtc.execution.risk import RiskManager
 from kalshibtc.main import BotPipeline, MarketStateBuilder
 from kalshibtc.market.contract import ContractWindow
+from kalshibtc.strategy.contrarian_spread_reversion import ContrarianSpreadReversionStrategy
 from kalshibtc.strategy.late_window_only import LateWindowOnlyStrategy
 from kalshibtc.strategy.signals import Signal
 from kalshibtc.strategy.simple_directional import SimpleDirectionalStrategy
@@ -349,3 +350,98 @@ def test_metrics_report_win_rate_ev_and_drawdown_for_strategy_fills() -> None:
     assert metrics["win_rate"] == pytest.approx(2 / 3)
     assert metrics["ev_per_trade"] == pytest.approx(5 / 3)
     assert metrics["max_drawdown"] == pytest.approx(1.0)
+
+
+def test_contrarian_spread_reversion_buys_cheap_no_when_above_strike_yes_is_expensive() -> None:
+    strategy = ContrarianSpreadReversionStrategy()
+    state = _state_before_close(
+        100_125.0,
+        seconds_to_close=420,
+        slope=1.8,
+        yes_bid=0.78,
+        yes_ask=0.82,
+        no_bid=0.19,
+        no_ask=0.22,
+    )
+
+    signal = strategy.on_tick(state)
+
+    assert signal.side == "long_below"
+    assert signal.reason == "above strike: fade expensive YES by buying cheap NO"
+    assert signal.confidence >= 0.60
+
+
+def test_contrarian_spread_reversion_buys_cheap_yes_when_below_strike_no_is_expensive() -> None:
+    strategy = ContrarianSpreadReversionStrategy()
+    state = _state_before_close(
+        99_875.0,
+        seconds_to_close=420,
+        slope=-1.8,
+        yes_bid=0.17,
+        yes_ask=0.20,
+        no_bid=0.78,
+        no_ask=0.82,
+    )
+
+    signal = strategy.on_tick(state)
+
+    assert signal.side == "long_above"
+    assert signal.reason == "below strike: fade expensive NO by buying cheap YES"
+    assert signal.confidence >= 0.60
+
+
+def test_contrarian_spread_reversion_rejects_wide_spread_and_final_seconds() -> None:
+    strategy = ContrarianSpreadReversionStrategy(max_cheap_leg_spread=0.03, min_seconds_to_close=30)
+
+    wide = strategy.on_tick(
+        _state_before_close(
+            100_125.0,
+            seconds_to_close=420,
+            slope=1.8,
+            yes_bid=0.78,
+            yes_ask=0.82,
+            no_bid=0.10,
+            no_ask=0.18,
+        )
+    )
+    too_late = strategy.on_tick(
+        _state_before_close(
+            100_125.0,
+            seconds_to_close=20,
+            slope=1.8,
+            yes_bid=0.78,
+            yes_ask=0.82,
+            no_bid=0.18,
+            no_ask=0.21,
+        )
+    )
+
+    assert wide.side == "none"
+    assert wide.reason == "cheap hedge leg spread too wide"
+    assert too_late.side == "none"
+    assert too_late.reason == "too close to close for contrarian hedge"
+
+
+def test_risk_allows_contrarian_cross_strike_hedge_signal() -> None:
+    strategy = ContrarianSpreadReversionStrategy()
+    state = _state_before_close(
+        100_125.0,
+        seconds_to_close=420,
+        slope=1.8,
+        yes_bid=0.78,
+        yes_ask=0.82,
+        no_bid=0.19,
+        no_ask=0.22,
+    )
+    signal = strategy.on_tick(state)
+
+    decision = RiskManager(RiskLimits(base_size_dollars=10.0, max_open_positions=2, max_spread=0.05)).evaluate(
+        state,
+        signal,
+        open_positions=0,
+    )
+
+    assert decision.allowed is True
+    assert decision.side == "long_below"
+    assert decision.entry_price == pytest.approx(0.22)
+    assert "price_not_below_strike" not in decision.blocked_by

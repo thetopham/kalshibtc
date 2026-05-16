@@ -17,6 +17,13 @@ EXPECTED_STRATEGIES = {
     "breakout_momentum",
     "late_window_only",
     "spread_aware_momentum",
+    "contrarian_spread_reversion",
+    "pair_arb",
+    "pair_arb_grid",
+    "pair_arb_passive",
+    "inventory_vol_rebalance",
+    "inventory_vol_regime",
+    "volatility_hedge",
     "no_trade_baseline",
 }
 
@@ -77,6 +84,14 @@ def test_strategy_runs_dashboard_scans_comparison_payload_and_ignores_incomplete
         "signals": 2,
         "fills": 1,
         "notional": 25.0,
+        "institutional_metrics": {
+            "win_rate": 0.5,
+            "ev_per_trade": 1.25,
+            "max_drawdown": 2.0,
+            "sharpe": 1.1,
+            "profit_factor": 2.5,
+            "settlement_source": "replay_final_snapshot",
+        },
     }))
     with sqlite3.connect(good / "results.sqlite3") as conn:
         conn.execute("CREATE TABLE replay_signals (id INTEGER PRIMARY KEY, ts TEXT, strategy TEXT, side TEXT, confidence REAL, reason TEXT, allowed INTEGER, blocked_by_json TEXT, raw_json TEXT)")
@@ -97,6 +112,10 @@ def test_strategy_runs_dashboard_scans_comparison_payload_and_ignores_incomplete
     assert data["runs"][0]["strategy"] == "simple_directional"
     assert data["runs"][0]["run_id"] == "run-a"
     assert data["runs"][0]["href"] == "/strategy/simple_directional/run-a"
+    assert data["runs"][0]["institutional_metrics"]["win_rate"] == 0.5
+    assert data["runs"][0]["win_rate"] == 0.5
+    assert data["runs"][0]["ev_per_trade"] == 1.25
+    assert data["runs"][0]["max_drawdown"] == 2.0
     assert data["ignored_runs"][0]["run_id"] == "broken"
 
     detail = dashboard.collect_strategy_run_detail_data(
@@ -124,7 +143,14 @@ def test_strategy_runs_dashboard_html_has_comparison_and_drilldown_landmarks(tmp
                 "signals": 2,
                 "fills": 1,
                 "notional": 25.0,
+                "win_rate": 0.5,
+                "ev_per_trade": 1.25,
+                "max_drawdown": 2.0,
+                "sharpe": 1.1,
+                "profit_factor": 2.5,
+                "settlement_source": "replay_final_snapshot",
                 "href": "/strategy/simple_directional/run-a",
+                "delete_href": "/api/strategies/simple_directional/run-a",
             }
         ],
         "ignored_runs": [],
@@ -134,6 +160,12 @@ def test_strategy_runs_dashboard_html_has_comparison_and_drilldown_landmarks(tmp
 
     assert "Strategy comparison" in html
     assert "id=\"strategy-runs-table\"" in html
+    assert "win rate" in html.lower()
+    assert "EV/trade" in html
+    assert "Sharpe" in html
+    assert "Delete" in html
+    assert "confirmDeleteRun" in html
+    assert "data-method=\"DELETE\"" in html
     assert "/api/strategies" in html
     assert "/strategy/simple_directional/run-a" in html
     assert "paper-ledger.sqlite3" not in html
@@ -150,6 +182,42 @@ def test_strategy_runs_dashboard_html_has_comparison_and_drilldown_landmarks(tmp
         "fills": [{"ts": "2026-05-15T12:00:00+00:00", "side": "long_above", "entry_price": 0.55, "contracts": 45.45, "notional": 25.0}],
     })
     assert "Strategy run drilldown" in detail_html
+    assert "win rate" in detail_html.lower()
+    assert "EV/trade" in detail_html
     assert "id=\"strategy-signals-table\"" in detail_html
     assert "id=\"strategy-fills-table\"" in detail_html
     assert "above strike + trend up" in detail_html
+
+
+def test_strategy_run_delete_removes_only_requested_run_directory(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "runs"
+    target = runs_dir / "simple_directional" / "delete-me"
+    sibling = runs_dir / "simple_directional" / "keep-me"
+    for run_dir in (target, sibling):
+        run_dir.mkdir(parents=True)
+        (run_dir / "config.toml").write_text('strategy = "simple_directional"\n')
+        (run_dir / "metrics.json").write_text(json.dumps({"strategy": "simple_directional", "run_id": run_dir.name}))
+        with sqlite3.connect(run_dir / "results.sqlite3") as conn:
+            conn.execute("CREATE TABLE replay_signals (id INTEGER PRIMARY KEY, ts TEXT, strategy TEXT, side TEXT, confidence REAL, reason TEXT, allowed INTEGER, blocked_by_json TEXT, raw_json TEXT)")
+            conn.execute("CREATE TABLE replay_fills (id INTEGER PRIMARY KEY, ts TEXT, strategy TEXT, side TEXT, entry_price REAL, contracts REAL, notional REAL, raw_json TEXT)")
+
+    result = dashboard.delete_strategy_run(runs_dir=runs_dir, strategy="simple_directional", run_id="delete-me")
+
+    assert result["deleted"] is True
+    assert result["strategy"] == "simple_directional"
+    assert result["run_id"] == "delete-me"
+    assert not target.exists()
+    assert sibling.exists()
+
+
+def test_strategy_run_delete_rejects_live_slot_and_path_traversal(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "runs"
+    live = runs_dir / "live" / "simple_directional"
+    live.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="live strategy slots"):
+        dashboard.delete_strategy_run(runs_dir=runs_dir, strategy="simple_directional", run_id="live")
+    with pytest.raises(ValueError, match="unsafe"):
+        dashboard.delete_strategy_run(runs_dir=runs_dir, strategy="..", run_id="escape")
+
+    assert live.exists()
