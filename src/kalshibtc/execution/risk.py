@@ -41,9 +41,9 @@ class RiskManager:
             blocked_by.append("confidence_below_min")
         if not book_is_valid(state.orderbook):
             blocked_by.append("invalid_orderbook")
-        if signal.side == "long_above" and state.price <= state.strike:
+        if signal.side == "long_above" and state.price <= state.strike and "contrarian" not in signal.strategy:
             blocked_by.append("price_not_above_strike")
-        if signal.side == "long_below" and state.price >= state.strike:
+        if signal.side == "long_below" and state.price >= state.strike and "contrarian" not in signal.strategy:
             blocked_by.append("price_not_below_strike")
 
         entry_price = entry_price_for_signal(signal.side, state.orderbook)
