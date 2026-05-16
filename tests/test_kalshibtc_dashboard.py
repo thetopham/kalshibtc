@@ -211,6 +211,12 @@ def test_stream_dashboard_uses_clean_1s_state_and_demotes_legacy_fields(tmp_path
     assert "Kalshi BTC Stream" in html
     assert "/api/stream" in html
     assert "Execution Decision" in html
+    assert "decision-hero" in html
+    assert "data-refresh-ms" in html
+    assert "<canvas id=\"price-chart\"" in html
+    assert "refreshCountdown" in html
+    assert "Distance from strike" in html
+    assert "Copy API JSON" in html
     assert "Recent graph points" in html
     assert "YES / NO orderbook" in html
     assert "Raw payload" in html
@@ -247,6 +253,10 @@ def test_status_dashboard_reads_paper_schema_and_has_required_review_sections(tm
 
     assert "Kalshi BTC 1s Paper Status" in html
     assert "Paper PnL Review" in html
+    assert "status-summary" in html
+    assert "<canvas id=\"equity-chart\"" in html
+    assert "Open paper positions" in html
+    assert "Settlement source" in html
     assert "Paper Review Buckets" in html
     assert "Recent paper trades" in html
     assert "Grouped by signal" in html

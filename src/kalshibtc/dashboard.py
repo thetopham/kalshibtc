@@ -116,37 +116,46 @@ def render_stream_dashboard_html(data: Mapping[str, Any]) -> str:
             f"<td>{_fmt(point.get('target_price'))}</td><td>{_fmt(point.get('seconds_to_close'))}</td></tr>"
             for point in history[-20:]
         )
+        chart_points_json = _h(json.dumps(history[-90:], default=str))
+        distance = _distance(latest.get('btc_price'), latest.get('strike'))
+        decision_class = _decision_class(decision.get('action'))
         body = f"""
+        <section class="decision-hero {decision_class}">
+          <div>
+            <p class="eyebrow">SimpleDirectionalStrategy · simulated/paper only</p>
+            <h2>Execution Decision</h2>
+            <div class="decision-action">{_h(decision.get('action'))}</div>
+            <p>{_h(decision.get('reason'))}</p>
+          </div>
+          <div class="decision-grid">
+            {_mini_metric('Size', _money(decision.get('size_dollars')), 'paper dollars')}
+            {_mini_metric('Confidence', _pct(decision.get('confidence')), 'strategy score')}
+            {_mini_metric('Blocked by', ', '.join(decision.get('blocked_by') or []) or 'none', 'risk gates')}
+          </div>
+        </section>
         <section class="cards">
           {_card('Recorder freshness', _h(stream.get('freshness', {}).get('status')), _h(stream.get('freshness', {}).get('age_seconds')) + 's')}
-          {_card('Latest BTC price', _fmt(latest.get('btc_price')), _h(latest.get('above_below_strike')))}
-          {_card('Market ticker', _h(latest.get('market_ticker')), 'market/strike/seconds-to-close')}
-          {_card('Strike / target', f"{_fmt(latest.get('strike'))} / {_fmt(latest.get('target_price'))}", f"{_fmt(latest.get('seconds_to_close'))}s")}
+          {_card('Latest BTC price', _money(latest.get('btc_price')), _h(latest.get('above_below_strike')))}
+          {_card('Distance from strike', _money(distance), f"strike {_money(latest.get('strike'))}")}
+          {_card('Seconds to close', _fmt(latest.get('seconds_to_close')), _h(latest.get('market_ticker')))}
         </section>
-        <section><h2>Execution Decision</h2>
-          <table><tbody>
-            {_kv('action', decision.get('action'))}
-            {_kv('size dollars', decision.get('size_dollars'))}
-            {_kv('blocked_by', ', '.join(decision.get('blocked_by') or []) or 'none')}
-            {_kv('reason', decision.get('reason'))}
-            {_kv('confidence', decision.get('confidence'))}
-          </tbody></table>
-        </section>
-        <section><h2>YES / NO orderbook</h2>
+        <section class="split"><div><h2>YES / NO orderbook</h2>
           <table><tbody>
             {_kv('YES bid', orderbook.get('yes_bid'))}{_kv('YES ask', orderbook.get('yes_ask'))}
             {_kv('NO bid', orderbook.get('no_bid'))}{_kv('NO ask', orderbook.get('no_ask'))}
             {_kv('spread', orderbook.get('spread'))}{_kv('status', orderbook.get('status'))}
-          </tbody></table>
+          </tbody></table></div>
+          <div><h2>Slopes</h2><table><tbody>
+            {_kv('slope_10s', slopes.get('slope_10s'))}{_kv('slope_30s', slopes.get('slope_30s'))}{_kv('slope_60s', slopes.get('slope_60s'))}
+          </tbody></table></div>
         </section>
-        <section><h2>Slopes</h2><table><tbody>
-          {_kv('slope_10s', slopes.get('slope_10s'))}{_kv('slope_30s', slopes.get('slope_30s'))}{_kv('slope_60s', slopes.get('slope_60s'))}
-        </tbody></table></section>
         <section><h2>Recent graph points</h2>
+          <canvas id="price-chart" width="960" height="260" aria-label="BTC price versus strike chart"></canvas>
           <div id="stream-chart">Read-only chart source: /api/stream history</div>
           <table><thead><tr><th>ts</th><th>BTC</th><th>target</th><th>sec close</th></tr></thead><tbody>{graph_rows}</tbody></table>
         </section>
-        <section><h2>Raw payload</h2><pre>{_h(json.dumps(_safe_raw_payload(latest.get('raw_payload')), indent=2, sort_keys=True))}</pre></section>
+        <section><h2>Raw payload</h2><button type="button" onclick="copyApiJson('/api/stream')">Copy API JSON</button><pre>{_h(json.dumps(_safe_raw_payload(latest.get('raw_payload')), indent=2, sort_keys=True))}</pre></section>
+        <script type="application/json" id="stream-history-data">{chart_points_json}</script>
         """
     return _page(
         title=str(data.get("title") or STREAM_TITLE),
@@ -178,36 +187,44 @@ def render_status_dashboard_html(data: Mapping[str, Any]) -> str:
         for name, rows in (perf.get("review_buckets") or {}).items()
     )
     recent_rows = "".join(
-        f"<tr><td>{_h(row.get('created_at'))}</td><td>{_h(row.get('market_ticker'))}</td><td>{_h(row.get('side'))}</td><td>{_h(row.get('status'))}</td><td>{_fmt(row.get('notional'))}</td></tr>"
+        f"<tr><td>{_h(row.get('created_at'))}</td><td>{_h(row.get('market_ticker'))}</td><td>{_h(row.get('side'))}</td><td>{_h(row.get('status'))}</td><td>{_fmt(row.get('notional'))}</td><td>{_h(row.get('settlement_source'))}</td></tr>"
         for row in perf.get("recent_trades", [])
+    )
+    open_position_rows = "".join(
+        f"<tr><td>{_h(row.get('created_at'))}</td><td>{_h(row.get('market_ticker'))}</td><td>{_h(row.get('side'))}</td><td>{_fmt(row.get('entry_price'))}</td><td>{_fmt(row.get('notional'))}</td><td>{_h(row.get('market_close_time'))}</td></tr>"
+        for row in perf.get("open_positions", [])
     )
     signal_rows = _group_rows(perf.get("grouped_by_signal", []), label_key="action")
     market_rows = _group_rows(perf.get("grouped_by_market", []), label_key="market_ticker")
     blocker_rows = "".join(
         f"<tr><td>{_h(row.get('blocker'))}</td><td>{row.get('count')}</td></tr>" for row in data.get("top_blockers", [])
     )
+    equity_json = _h(json.dumps(perf.get('equity_curve', []), default=str))
     body = f"""
     <p class="boundary">{_h(data.get('boundary'))}</p>
-    <section class="cards">
-      {_card('Paper realized PnL', _fmt(metrics.get('realized_pnl')), 'settled')}
-      {_card('Paper unrealized PnL', _fmt(metrics.get('unrealized_pnl')), 'open marks when available')}
-      {_card('Paper total PnL', _fmt(metrics.get('total_pnl')), 'realized + unrealized')}
-      {_card('Win rate', _fmt(metrics.get('win_rate')), f"{metrics.get('closed_positions', 0)} settled / {metrics.get('open_positions', 0)} open")}
-      {_card('Average trade', _fmt(metrics.get('average_trade')), f"avg win {_fmt(metrics.get('avg_win'))} / avg loss {_fmt(metrics.get('avg_loss'))}")}
+    <section id="status-summary" class="cards status-summary">
+      {_card('Paper realized PnL', _money(metrics.get('realized_pnl')), 'settled')}
+      {_card('Paper total PnL', _money(metrics.get('total_pnl')), 'realized + unrealized')}
+      {_card('Win rate', _pct(metrics.get('win_rate')), f"{metrics.get('closed_positions', 0)} settled / {metrics.get('open_positions', 0)} open")}
+      {_card('Average trade', _money(metrics.get('average_trade')), f"avg win {_money(metrics.get('avg_win'))} / avg loss {_money(metrics.get('avg_loss'))}")}
+      {_card('Latest prediction', _h(data.get('latest_prediction_timestamp')), 'paper executor freshness')}
     </section>
     <section><h2>Paper Trading Performance</h2><table><tbody>
       {_kv('snapshot DB path', data.get('snapshot_db_path'))}{_kv('results DB path', data.get('results_db_path'))}
       {_kv('latest snapshot timestamp', data.get('latest_snapshot_timestamp'))}{_kv('latest prediction timestamp', data.get('latest_prediction_timestamp'))}
       {_kv('settled trades', metrics.get('closed_positions'))}{_kv('open trades', metrics.get('open_positions'))}
+      {_kv('Settlement source', 'per-trade: kalshi_official or coinbase_estimate')}
     </tbody></table></section>
+    <section><h2>Open paper positions</h2><table><thead><tr><th>created</th><th>market</th><th>side</th><th>entry</th><th>notional</th><th>close</th></tr></thead><tbody>{open_position_rows}</tbody></table></section>
     <section><h2>Active service status</h2><table><tbody>{service_rows}</tbody></table></section>
-    <section><h2>Equity curve</h2><div id="equity-curve">Read-only paper equity curve</div><pre>{_h(json.dumps(perf.get('equity_curve', []), indent=2))}</pre></section>
+    <section><h2>Equity curve</h2><canvas id="equity-chart" width="960" height="260" aria-label="Paper equity curve"></canvas><div id="equity-curve">Read-only paper equity curve</div><pre>{_h(json.dumps(perf.get('equity_curve', []), indent=2))}</pre></section>
     <section><h2>Paper PnL Review</h2><table><thead><tr><th>created</th><th>market</th><th>side</th><th>entry</th><th>status</th><th>PnL</th></tr></thead><tbody>{review_rows}</tbody></table></section>
     <section><h2>Paper Review Buckets</h2>{bucket_sections}</section>
-    <section><h2>Recent paper trades</h2><table><tbody>{recent_rows}</tbody></table></section>
+    <section><h2>Recent paper trades</h2><table><thead><tr><th>created</th><th>market</th><th>side</th><th>status</th><th>notional</th><th>Settlement source</th></tr></thead><tbody>{recent_rows}</tbody></table></section>
     <section><h2>Grouped by signal</h2><table><tbody>{signal_rows}</tbody></table></section>
     <section><h2>Grouped by market</h2><table><tbody>{market_rows}</tbody></table></section>
     <section><h2>Top blockers</h2><table><tbody>{blocker_rows}</tbody></table></section>
+    <script type="application/json" id="equity-data">{equity_json}</script>
     """
     return _page(
         title=str(data.get("title") or STATUS_TITLE),
@@ -307,6 +324,7 @@ def _paper_performance(path: Path) -> JsonDict:
         "review_trades": [],
         "review_buckets": {name: [] for name in _bucket_names()},
         "recent_trades": [],
+        "open_positions": [],
         "grouped_by_signal": [],
         "grouped_by_market": [],
         "top_blockers": [],
@@ -330,6 +348,7 @@ def _paper_performance(path: Path) -> JsonDict:
         "review_trades": list(reversed(trades))[:50],
         "review_buckets": _review_buckets(trades, predictions),
         "recent_trades": list(reversed(trades))[:25],
+        "open_positions": [t for t in reversed(trades) if str(t.get("status") or "").upper() == "OPEN"],
         "grouped_by_signal": _group_by(predictions, key="action", pnl_by_prediction=_pnl_by_prediction(trades)),
         "grouped_by_market": _group_by(trades, key="market_ticker"),
         "top_blockers": _top_blockers(predictions),
@@ -619,9 +638,17 @@ def main_status(argv: list[str] | None = None) -> int:
 
 def _page(*, title: str, heading: str, subheading: str, body: str) -> str:
     return f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>{_h(title)}</title><style>
-body{{font-family:system-ui,-apple-system,sans-serif;background:#0b1020;color:#e6edf3;margin:24px}}a{{color:#7dd3fc}}section{{background:#111827;border:1px solid #243244;border-radius:12px;margin:16px 0;padding:16px}}table{{border-collapse:collapse;width:100%}}td,th{{border-bottom:1px solid #243244;padding:6px;text-align:left}}pre{{white-space:pre-wrap;max-height:360px;overflow:auto}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}}.card{{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:12px}}.boundary{{color:#fbbf24}}
-</style></head><body><h1>{_h(heading)}</h1><p>{subheading}</p>{body}</body></html>"""
+<html data-refresh-ms="1000"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{_h(title)}</title><style>
+:root{{color-scheme:dark;--bg:#07111f;--panel:#0f172a;--panel2:#111827;--line:#26364d;--text:#e6edf3;--muted:#94a3b8;--good:#22c55e;--bad:#ef4444;--warn:#fbbf24;--blue:#38bdf8}}*{{box-sizing:border-box}}body{{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:radial-gradient(circle at top left,#123052,#07111f 42%);color:var(--text);margin:0;padding:24px}}header{{position:sticky;top:0;z-index:5;background:rgba(7,17,31,.92);backdrop-filter:blur(10px);border:1px solid var(--line);border-radius:16px;padding:16px 18px;margin-bottom:18px}}h1{{margin:0 0 6px;font-size:28px}}h2{{margin-top:0}}.muted,small{{color:var(--muted)}}section{{background:rgba(17,24,39,.92);border:1px solid var(--line);border-radius:16px;margin:16px 0;padding:16px;box-shadow:0 12px 28px rgba(0,0,0,.18)}}table{{border-collapse:collapse;width:100%;font-size:14px}}td,th{{border-bottom:1px solid var(--line);padding:8px;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;max-height:360px;overflow:auto;background:#020617;border:1px solid var(--line);border-radius:12px;padding:12px}}button{{background:#164e63;color:#ecfeff;border:1px solid #0891b2;border-radius:10px;padding:8px 10px;cursor:pointer}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}}.card{{background:linear-gradient(180deg,#0f172a,#0b1220);border:1px solid #334155;border-radius:14px;padding:14px}}.card strong{{color:#cbd5e1}}.card span{{display:block;font-size:24px;font-weight:800;margin:4px 0}}.boundary{{color:var(--warn);font-weight:700}}.split{{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}}.decision-hero{{display:grid;grid-template-columns:minmax(260px,1fr) minmax(260px,1fr);gap:18px;align-items:center;border-width:2px}}.decision-hero.buy-yes,.decision-hero.buy-no{{border-color:rgba(34,197,94,.65)}}.decision-hero.no-trade{{border-color:rgba(251,191,36,.65)}}.decision-action{{font-size:48px;font-weight:900;letter-spacing:-.04em}}.eyebrow{{text-transform:uppercase;letter-spacing:.12em;color:var(--muted);font-size:12px}}.decision-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}}.mini{{background:#020617;border:1px solid var(--line);border-radius:12px;padding:12px}}.mini b{{display:block;font-size:20px}}canvas{{width:100%;max-height:280px;background:#020617;border:1px solid var(--line);border-radius:12px}}.topline{{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}}
+</style></head><body><header><div class="topline"><div><h1>{_h(heading)}</h1><p class="muted">{subheading}</p></div><div class="muted">Auto-refresh in <span id="refreshCountdown">1.0</span>s</div></div></header>{body}<script>
+const refreshMs = Number(document.documentElement.dataset.refreshMs || 1000);
+let remaining = refreshMs;
+setInterval(() => {{ remaining -= 100; if (remaining <= 0) location.reload(); const el=document.getElementById('refreshCountdown'); if (el) el.textContent=(remaining/1000).toFixed(1); }}, 100);
+function copyApiJson(path){{ fetch(path).then(r=>r.text()).then(t=>navigator.clipboard && navigator.clipboard.writeText(t)); }}
+function drawLineChart(canvasId, dataId, xKey, yKeys){{ const c=document.getElementById(canvasId), d=document.getElementById(dataId); if(!c||!d) return; let rows=[]; try{{rows=JSON.parse(d.textContent)}}catch(e){{return}}; if(!rows.length) return; const ctx=c.getContext('2d'), w=c.width, h=c.height, pad=28; ctx.clearRect(0,0,w,h); const vals=[]; rows.forEach(r=>yKeys.forEach(k=>{{const v=Number(r[k]); if(Number.isFinite(v)) vals.push(v)}})); if(!vals.length) return; const min=Math.min(...vals), max=Math.max(...vals), span=(max-min)||1; const x=i=>pad+(w-pad*2)*(i/Math.max(1,rows.length-1)); const y=v=>h-pad-(h-pad*2)*((v-min)/span); ctx.strokeStyle='#334155'; ctx.beginPath(); ctx.moveTo(pad,pad); ctx.lineTo(pad,h-pad); ctx.lineTo(w-pad,h-pad); ctx.stroke(); yKeys.forEach((k,idx)=>{{ctx.strokeStyle=idx?'#fbbf24':'#38bdf8'; ctx.lineWidth=2; ctx.beginPath(); rows.forEach((r,i)=>{{const v=Number(r[k]); if(!Number.isFinite(v)) return; const xx=x(i), yy=y(v); if(i===0) ctx.moveTo(xx,yy); else ctx.lineTo(xx,yy);}}); ctx.stroke(); }}); }}
+drawLineChart('price-chart','stream-history-data','ts',['btc_price','target_price']);
+drawLineChart('equity-chart','equity-data','ts',['equity']);
+</script></body></html>"""
 
 
 def _card(title: str, value: Any, note: Any = "") -> str:
@@ -634,6 +661,37 @@ def _kv(key: str, value: Any) -> str:
 
 def _group_rows(rows: list[Mapping[str, Any]], *, label_key: str) -> str:
     return "".join(f"<tr><td>{_h(row.get(label_key))}</td><td>{row.get('count')}</td><td>{_fmt(row.get('realized_pnl'))}</td></tr>" for row in rows)
+
+
+def _mini_metric(label: str, value: Any, note: Any = "") -> str:
+    return f'<div class="mini"><span class="muted">{_h(label)}</span><b>{_h(value)}</b><small>{_h(note)}</small></div>'
+
+
+def _decision_class(action: Any) -> str:
+    text = str(action or "").lower().replace("_", "-")
+    return text if text in {"buy-yes", "buy-no", "no-trade"} else "no-trade"
+
+
+def _distance(price: Any, strike: Any) -> float | None:
+    price_f = _float(price)
+    strike_f = _float(strike)
+    if price_f is None or strike_f is None:
+        return None
+    return price_f - strike_f
+
+
+def _money(value: Any) -> str:
+    value_f = _float(value)
+    if value_f is None:
+        return "-"
+    return f"${value_f:,.2f}"
+
+
+def _pct(value: Any) -> str:
+    value_f = _float(value)
+    if value_f is None:
+        return "-"
+    return f"{value_f * 100:.1f}%"
 
 
 def _safe_raw_payload(payload: Any) -> Any:
