@@ -21,8 +21,11 @@ dev = [
 ]
 
 [project.scripts]
+kbtc15-1s-dashboard = "kalshibtc.dashboard:main"
 kbtc15-1s-paper = "kalshibtc.paper_signal_executor:main"
 kbtc15-1s-recorder = "kalshibtc.record_1s_snapshots:main"
+kbtc15-1s-status-dashboard = "kalshibtc.dashboard:main_status"
+kbtc15-1s-stream-dashboard = "kalshibtc.dashboard:main_stream"
 
 [tool.setuptools.packages.find]
 where = ["src"]
