@@ -6,15 +6,24 @@ Current question:
 
 > Does simple slope + above/below have edge, and where, or is it just noise?
 
-Do not add ML, market making, EV blending, new indicators, dashboards, live orders, or strategy complexity until paper PnL review shows evidence for a specific next change.
+Do not add ML, market making, EV blending, new indicators, live orders, or strategy complexity until paper PnL review shows evidence for a specific next change. Keep the two active dashboards, but keep them read-only and aligned to this 1s recorder + 1s paper executor.
 
 ## Active entrypoints
+
+Preferred runtime paths:
+
+```text
+runtime/snapshots/realtime-snapshots-1s.sqlite3
+runtime/results/paper-results-1s.sqlite3
+```
+
+The commands still accept explicit old compatibility paths such as `data/realtime-snapshots-1s.sqlite3` and `data-live-prod/paper-results-1s.sqlite3`. Do not move/delete local DB files as part of dashboard cleanup.
 
 Recorder:
 
 ```bash
 kbtc15-1s-recorder \
-  --snapshot-db data/realtime-snapshots-1s.sqlite3 \
+  --snapshot-db runtime/snapshots/realtime-snapshots-1s.sqlite3 \
   --emit-min-interval-seconds 1 \
   --loop
 ```
@@ -23,7 +32,7 @@ Equivalent module form:
 
 ```bash
 python -m kalshibtc.record_1s_snapshots \
-  --snapshot-db data/realtime-snapshots-1s.sqlite3 \
+  --snapshot-db runtime/snapshots/realtime-snapshots-1s.sqlite3 \
   --emit-min-interval-seconds 1 \
   --loop
 ```
@@ -32,8 +41,8 @@ Paper executor:
 
 ```bash
 kbtc15-1s-paper \
-  --snapshot-db data/realtime-snapshots-1s.sqlite3 \
-  --results-db data-live-prod/paper-results-1s.sqlite3 \
+  --snapshot-db runtime/snapshots/realtime-snapshots-1s.sqlite3 \
+  --results-db runtime/results/paper-results-1s.sqlite3 \
   --loop --interval-seconds 1
 ```
 
@@ -41,27 +50,61 @@ Equivalent module form:
 
 ```bash
 python -m kalshibtc.paper_signal_executor \
-  --snapshot-db data/realtime-snapshots-1s.sqlite3 \
-  --results-db data-live-prod/paper-results-1s.sqlite3 \
+  --snapshot-db runtime/snapshots/realtime-snapshots-1s.sqlite3 \
+  --results-db runtime/results/paper-results-1s.sqlite3 \
   --loop --interval-seconds 1
 ```
 
-The active installed script aliases are `kbtc15-1s-recorder` and `kbtc15-1s-paper`.
+Dashboard:
+
+```bash
+kbtc15-1s-dashboard \
+  --snapshot-db runtime/snapshots/realtime-snapshots-1s.sqlite3 \
+  --results-db runtime/results/paper-results-1s.sqlite3 \
+  --host 127.0.0.1 --port 8792
+```
+
+The active installed script aliases are `kbtc15-1s-recorder`, `kbtc15-1s-paper`, and `kbtc15-1s-dashboard`.
 
 Recorder v1 is deliberately small and read-only: it polls public Coinbase BTC spot plus Kalshi public market/orderbook endpoints, then writes compatible SQLite rows. A later source swap can put an authenticated read-only Kalshi websocket behind the same `realtime_snapshots_1s` writer without restoring the legacy CLI.
+
+## Active dashboards
+
+Target architecture:
+
+```text
+kbtc15-1s-recorder
+  -> writes snapshot DB
+
+kbtc15-1s-paper
+  -> reads snapshot DB
+  -> writes paper results DB
+
+kbtc15-1s-dashboard
+  -> read-only
+  -> stream page from latest snapshot/state
+  -> status page from paper results/stats
+```
+
+Keep both useful dashboards:
+
+- Kalshi BTC Stream: `/` and `/api/stream`. This is the live market/orderbook/decision view: current market, strike/target, seconds-to-close, BTC price, slope fields, YES/NO top of book, graph points, simple `BUY_YES` / `BUY_NO` / `NO_TRADE` decision, and raw payload/debug.
+- Kalshi BTC 1s Paper Status: `/status` and `/api/dashboard` (also `/api/status`). This is the paper stats/review view: paper PnL cards, equity curve, Paper PnL Review, Paper Review Buckets, recent paper trades, grouped-by-signal/market stats, top blockers, and active service status.
+
+Both dashboards are read-only. They must not imply live orders are enabled, and they must not surface old model probability / EV / scanner / live-demo/prod concepts as the current operator decision. Old implementation details belong in `archive/legacy-15m/` or raw debug payloads only.
 
 ## Database split
 
 Keep these databases separate:
 
 ```text
-data/realtime-snapshots-1s.sqlite3
+runtime/snapshots/realtime-snapshots-1s.sqlite3
   Recorder-owned stream DB.
   Stores normalized 1s BTC/Kalshi snapshots in `realtime_snapshots_1s`.
   `kbtc15-1s-recorder` creates/upserts this table.
   The paper executor only SELECTs from this DB.
 
-data-live-prod/paper-results-1s.sqlite3
+runtime/results/paper-results-1s.sqlite3
   Paper-executor results DB.
   Stores generated signals, fake fills, exits, and PnL.
 ```
@@ -111,6 +154,7 @@ Important boundary:
 src/kalshibtc/
   __init__.py
   config.py                    # BotConfig and RiskLimits defaults for the modular path
+  dashboard.py                 # read-only Stream + Paper Status dashboard
   main.py                      # MarketStateBuilder, BotPipeline, strategy -> risk -> executor wiring
   record_1s_snapshots.py       # read-only active recorder CLI into realtime_snapshots_1s
   paper_signal_executor.py     # thin CLI/live 1s paper loop over snapshot DB into results DB
@@ -161,7 +205,7 @@ If something from the archive becomes necessary again, move only the small neede
 
 ## Paper PnL review before complexity
 
-Review `data-live-prod/paper-results-1s.sqlite3` by:
+Review `runtime/results/paper-results-1s.sqlite3` (or the explicit old results DB path you passed) by:
 
 - total PnL
 - win rate
@@ -188,8 +232,10 @@ Full local checks:
 ```bash
 uv run python -m kalshibtc.record_1s_snapshots --help
 uv run python -m kalshibtc.paper_signal_executor --help
+uv run python -m kalshibtc.dashboard --help
 uv run kbtc15-1s-recorder --help
 uv run kbtc15-1s-paper --help
+uv run kbtc15-1s-dashboard --help
 uv run pytest
 uv run python -m compileall src tests
 uv run ruff check .
