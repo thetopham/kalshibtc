@@ -13,6 +13,7 @@ from kalshibtc.execution.paper import PaperExecutor
 from kalshibtc.execution.risk import RiskManager
 from kalshibtc.main import BotPipeline, MarketStateBuilder
 from kalshibtc.market.contract import ContractWindow
+from kalshibtc.strategy.late_window_only import LateWindowOnlyStrategy
 from kalshibtc.strategy.signals import Signal
 from kalshibtc.strategy.simple_directional import SimpleDirectionalStrategy
 from kalshibtc.strategy.slope import SlopeTracker
@@ -29,10 +30,26 @@ def _tick(price: float, seconds: int) -> Tick:
     )
 
 
-def _book(yes_ask: float = 0.54, no_ask: float = 0.47) -> OrderBookSnapshot:
+def _tick_before_close(price: float, seconds_to_close: int) -> Tick:
+    return Tick(
+        ts=datetime(2026, 5, 15, 12, 15, tzinfo=UTC) - timedelta(seconds=seconds_to_close),
+        price=price,
+        bid=price - 1,
+        ask=price + 1,
+        source="test",
+        symbol="BTC-USD",
+    )
+
+
+def _book(
+    yes_ask: float = 0.54,
+    no_ask: float = 0.47,
+    *,
+    market_ticker: str = "KXBTC15M-TEST",
+) -> OrderBookSnapshot:
     return OrderBookSnapshot(
         ts=datetime(2026, 5, 15, 12, 0, 31, tzinfo=UTC),
-        market_ticker="KXBTC15M-TEST",
+        market_ticker=market_ticker,
         yes_bid=0.52,
         yes_ask=yes_ask,
         no_bid=0.45,
@@ -53,6 +70,32 @@ def _state(price: float, slope: float, *, yes_ask: float = 0.54, no_ask: float =
     return builder.from_tick_and_book(
         tick=_tick(price, 31),
         orderbook=_book(yes_ask=yes_ask, no_ask=no_ask),
+        slope_30s=slope,
+    )
+
+
+def _state_before_close(
+    price: float,
+    seconds_to_close: int,
+    slope: float,
+    *,
+    yes_bid: float = 0.52,
+    yes_ask: float = 0.54,
+    no_bid: float = 0.45,
+    no_ask: float = 0.47,
+):
+    tick = _tick_before_close(price, seconds_to_close)
+    book = OrderBookSnapshot(
+        ts=tick.ts,
+        market_ticker="KXBTC15M-TEST",
+        yes_bid=yes_bid,
+        yes_ask=yes_ask,
+        no_bid=no_bid,
+        no_ask=no_ask,
+    )
+    return MarketStateBuilder(contract=_contract()).from_tick_and_book(
+        tick=tick,
+        orderbook=book,
         slope_30s=slope,
     )
 
@@ -80,6 +123,32 @@ def test_simple_directional_strategy_returns_none_when_strike_and_slope_do_not_a
     signal = SimpleDirectionalStrategy().on_tick(_state(100_125.0, -3.0))
 
     assert signal == Signal(side="none", reason="no alignment", confidence=0.0, strategy="simple_directional")
+
+
+def test_late_window_only_requires_final_minute_wide_distance_and_decent_book() -> None:
+    strategy = LateWindowOnlyStrategy()
+
+    assert strategy.on_tick(_state_before_close(100_200.0, 90, 0.0)).reason == "outside final entry window"
+    assert strategy.on_tick(_state_before_close(100_005.0, 45, 0.0)).reason == "too close to strike in late window"
+    assert strategy.on_tick(_state_before_close(100_200.0, 45, 0.0, yes_ask=0.92)).reason == "late window price too expensive"
+    assert strategy.on_tick(_state_before_close(100_200.0, 45, 0.0, yes_bid=0.50, yes_ask=0.58)).reason == "late window spread too wide"
+
+
+def test_late_window_only_emits_single_high_conviction_side_in_final_minute() -> None:
+    strategy = LateWindowOnlyStrategy()
+
+    above = strategy.on_tick(_state_before_close(100_200.0, 45, 0.0, yes_bid=0.52, yes_ask=0.56))
+    below = strategy.on_tick(_state_before_close(99_800.0, 45, 0.0, no_bid=0.52, no_ask=0.56))
+
+    assert above == Signal(
+        side="long_above",
+        reason="final minute above strike with tradable book",
+        confidence=pytest.approx(0.95),
+        strategy="late_window_only",
+    )
+    assert below.side == "long_below"
+    assert below.reason == "final minute below strike with tradable book"
+    assert below.confidence == pytest.approx(0.95)
 
 
 def test_slope_tracker_uses_older_window_tick_for_velocity() -> None:
@@ -181,6 +250,76 @@ def test_replay_engine_reuses_same_strategy_without_live_execution() -> None:
     assert report.total_signals >= 1
     assert report.fills[-1].mode == "paper"
     assert report.fills[-1].side == "long_above"
+
+
+def test_replay_engine_settles_positions_at_market_rollover() -> None:
+    ticks = [
+        _tick(99_950.0, 0),
+        _tick(99_930.0, 30),
+        Tick(ts=datetime(2026, 5, 15, 12, 15, 1, tzinfo=UTC), price=99_900.0, source="test"),
+        Tick(ts=datetime(2026, 5, 15, 12, 15, 2, tzinfo=UTC), price=100_080.0, source="test"),
+        Tick(ts=datetime(2026, 5, 15, 12, 15, 32, tzinfo=UTC), price=100_140.0, source="test"),
+    ]
+    books = [
+        _book(no_ask=0.47, market_ticker="KXBTC15M-A"),
+        _book(no_ask=0.47, market_ticker="KXBTC15M-A"),
+        _book(no_ask=0.47, market_ticker="KXBTC15M-B"),
+        _book(yes_ask=0.54, market_ticker="KXBTC15M-B"),
+        _book(yes_ask=0.54, market_ticker="KXBTC15M-B"),
+    ]
+    replay = ReplayEngine(
+        config=BotConfig(),
+        contract=_contract(),
+        strategies=[SimpleDirectionalStrategy()],
+        risk_manager=RiskManager(RiskLimits(base_size_dollars=5.0, max_open_positions=1)),
+        executor=PaperExecutor(),
+        settle_on_market_rollover=True,
+    )
+
+    report = replay.run(ticks=ticks, books=books)
+
+    assert len(report.fills) == 2
+    assert [fill.market_ticker for fill in report.fills] == ["KXBTC15M-A", "KXBTC15M-B"]
+    assert report.settled_positions >= 1
+
+
+def test_replay_engine_uses_per_book_contract_metadata_after_market_rollover() -> None:
+    ticks = [
+        Tick(ts=datetime(2026, 5, 15, 12, 14, 45, tzinfo=UTC), price=100_080.0, source="test"),
+        Tick(ts=datetime(2026, 5, 15, 12, 15, 45, tzinfo=UTC), price=100_080.0, source="test"),
+    ]
+    books = [
+        OrderBookSnapshot(
+            ts=ticks[0].ts,
+            market_ticker="KXBTC15M-A",
+            yes_bid=0.52,
+            yes_ask=0.54,
+            no_bid=0.45,
+            no_ask=0.47,
+        ),
+        OrderBookSnapshot(
+            ts=ticks[1].ts,
+            market_ticker="KXBTC15M-B",
+            yes_bid=0.52,
+            yes_ask=0.54,
+            no_bid=0.45,
+            no_ask=0.47,
+            raw={"strike": 100_000.0, "market_close_time": "2026-05-15T12:30:00+00:00"},
+        ),
+    ]
+    replay = ReplayEngine(
+        config=BotConfig(),
+        contract=_contract(),
+        strategies=[LateWindowOnlyStrategy(max_seconds_to_close=60.0, min_distance=50.0)],
+        risk_manager=RiskManager(RiskLimits(base_size_dollars=5.0, max_open_positions=10)),
+        executor=PaperExecutor(),
+        settle_on_market_rollover=True,
+    )
+
+    report = replay.run(ticks=ticks, books=books)
+
+    assert report.results[0].signal.reason == "final minute above strike with tradable book"
+    assert report.results[1].signal.reason == "outside final entry window"
 
 
 def test_replay_engine_rejects_mismatched_tick_and_book_lengths() -> None:

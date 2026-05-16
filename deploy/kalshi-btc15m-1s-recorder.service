@@ -1,20 +1,22 @@
 [Unit]
-Description=Kalshi BTC 15m read-only 1s snapshot recorder
+Description=Kalshi BTC read-only 1s feed recorder
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=/home/matt/workspace/kalshi-btc-15m-bot
-ExecStart=/home/matt/workspace/kalshi-btc-15m-bot/.venv/bin/kbtc15-1s-recorder --snapshot-db data/realtime-snapshots-1s.sqlite3 --loop --emit-min-interval-seconds 1
+ExecStart=/home/matt/workspace/kalshi-btc-15m-bot/.venv/bin/kbtc-feed --snapshot-db feed/kalshi-btc-1s.sqlite3 --loop --emit-min-interval-seconds 1
 Restart=always
 RestartSec=10
+StandardOutput=append:/home/matt/workspace/kalshi-btc-15m-bot/logs/feed.log
+StandardError=append:/home/matt/workspace/kalshi-btc-15m-bot/logs/feed.log
 
-# Safety: read-only public-data recorder. It writes local SQLite snapshots and has no order-submission path.
+# Safety: read-only public-data/feed recorder. It writes local SQLite snapshots and has no order-submission path.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
-ReadWritePaths=/home/matt/workspace/kalshi-btc-15m-bot/data
+ReadWritePaths=/home/matt/workspace/kalshi-btc-15m-bot/feed /home/matt/workspace/kalshi-btc-15m-bot/logs
 
 [Install]
 WantedBy=default.target
