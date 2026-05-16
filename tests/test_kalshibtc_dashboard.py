@@ -212,7 +212,7 @@ def test_stream_dashboard_uses_clean_1s_state_and_demotes_legacy_fields(tmp_path
     assert "/api/stream" in html
     assert "Execution Decision" in html
     assert "decision-hero" in html
-    assert "data-refresh-ms" in html
+    assert "data-refresh-ms=\"15000\"" in html
     assert "<canvas id=\"price-chart\"" in html
     assert "refreshCountdown" in html
     assert "Distance from strike" in html
@@ -257,6 +257,7 @@ def test_status_dashboard_reads_paper_schema_and_has_required_review_sections(tm
     assert "<canvas id=\"equity-chart\"" in html
     assert "Open paper positions" in html
     assert "Settlement source" in html
+    assert "data-refresh-ms=\"15000\"" in html
     assert "Paper Review Buckets" in html
     assert "Recent paper trades" in html
     assert "Grouped by signal" in html

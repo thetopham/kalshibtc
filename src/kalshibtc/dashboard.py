@@ -306,8 +306,10 @@ def _state_from_snapshot(row: sqlite3.Row) -> MarketState | None:
 def _latest_snapshot_rows(path: Path, *, limit: int) -> list[sqlite3.Row]:
     if not path.exists():
         return []
-    with sqlite3.connect(path) as conn:
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0) as conn:
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA busy_timeout=2000")
         if not _table_exists(conn, STREAM_TABLE):
             return []
         rows = conn.execute(
@@ -331,8 +333,10 @@ def _paper_performance(path: Path) -> JsonDict:
     }
     if not path.exists():
         return empty
-    with sqlite3.connect(path) as conn:
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0) as conn:
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA busy_timeout=2000")
         if not _table_exists(conn, "paper_trades"):
             return empty
         trades = [dict(row) for row in conn.execute("SELECT * FROM paper_trades ORDER BY created_at ASC").fetchall()]
@@ -340,7 +344,15 @@ def _paper_performance(path: Path) -> JsonDict:
         predictions: list[dict[str, Any]] = []
         if _table_exists(conn, "predictions"):
             latest_prediction = conn.execute("SELECT MAX(created_at) FROM predictions").fetchone()[0]
-            predictions = [dict(row) for row in conn.execute("SELECT * FROM predictions ORDER BY created_at ASC").fetchall()]
+            # Keep status/dashboard requests cheap under browser auto-refresh. The
+            # paper PnL tables are trade-sourced; predictions are used here only
+            # for recent signal grouping and blocker summaries.
+            predictions = [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM predictions ORDER BY created_at DESC LIMIT 5000"
+                ).fetchall()
+            ]
     return {
         "latest_prediction_timestamp": latest_prediction,
         "metrics": _metrics(trades),
@@ -558,16 +570,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
     history_limit: int
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path in {"/", "/stream"}:
-            self._send_html(render_stream_dashboard_html(self._stream_data()))
-        elif self.path == "/status":
-            self._send_html(render_status_dashboard_html(self._status_data()))
-        elif self.path == "/api/stream":
-            self._send_json(self._stream_data())
-        elif self.path in {"/api/dashboard", "/api/status"}:
-            self._send_json(self._status_data())
-        else:
-            self.send_error(404)
+        try:
+            if self.path in {"/", "/stream"}:
+                self._send_html(render_stream_dashboard_html(self._stream_data()))
+            elif self.path == "/status":
+                self._send_html(render_status_dashboard_html(self._status_data()))
+            elif self.path == "/api/stream":
+                self._send_json(self._stream_data())
+            elif self.path in {"/api/dashboard", "/api/status"}:
+                self._send_json(self._status_data())
+            else:
+                self.send_error(404)
+        except BrokenPipeError:
+            return
+        except (ConnectionResetError, sqlite3.Error, OSError) as exc:
+            self._send_json({"ok": False, "error": type(exc).__name__, "message": str(exc)}, status=503)
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         return
@@ -586,9 +603,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def _send_json(self, data: Mapping[str, Any]) -> None:
+    def _send_json(self, data: Mapping[str, Any], *, status: int = 200) -> None:
         payload = json.dumps(data, default=str, indent=2).encode("utf-8")
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
@@ -618,6 +635,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     handler = type("ConfiguredDashboardHandler", (DashboardHandler,), {"snapshot_db": snapshot_db, "results_db": results_db, "history_limit": args.history_limit})
     server = ThreadingHTTPServer((args.host, args.port), handler)
+    server.daemon_threads = True
     print(f"kbtc15-1s-dashboard serving read-only dashboards on http://{args.host}:{args.port}")
     try:
         server.serve_forever()
@@ -638,7 +656,7 @@ def main_status(argv: list[str] | None = None) -> int:
 
 def _page(*, title: str, heading: str, subheading: str, body: str) -> str:
     return f"""<!doctype html>
-<html data-refresh-ms="1000"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{_h(title)}</title><style>
+<html data-refresh-ms="15000"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{_h(title)}</title><style>
 :root{{color-scheme:dark;--bg:#07111f;--panel:#0f172a;--panel2:#111827;--line:#26364d;--text:#e6edf3;--muted:#94a3b8;--good:#22c55e;--bad:#ef4444;--warn:#fbbf24;--blue:#38bdf8}}*{{box-sizing:border-box}}body{{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:radial-gradient(circle at top left,#123052,#07111f 42%);color:var(--text);margin:0;padding:24px}}header{{position:sticky;top:0;z-index:5;background:rgba(7,17,31,.92);backdrop-filter:blur(10px);border:1px solid var(--line);border-radius:16px;padding:16px 18px;margin-bottom:18px}}h1{{margin:0 0 6px;font-size:28px}}h2{{margin-top:0}}.muted,small{{color:var(--muted)}}section{{background:rgba(17,24,39,.92);border:1px solid var(--line);border-radius:16px;margin:16px 0;padding:16px;box-shadow:0 12px 28px rgba(0,0,0,.18)}}table{{border-collapse:collapse;width:100%;font-size:14px}}td,th{{border-bottom:1px solid var(--line);padding:8px;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;max-height:360px;overflow:auto;background:#020617;border:1px solid var(--line);border-radius:12px;padding:12px}}button{{background:#164e63;color:#ecfeff;border:1px solid #0891b2;border-radius:10px;padding:8px 10px;cursor:pointer}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}}.card{{background:linear-gradient(180deg,#0f172a,#0b1220);border:1px solid #334155;border-radius:14px;padding:14px}}.card strong{{color:#cbd5e1}}.card span{{display:block;font-size:24px;font-weight:800;margin:4px 0}}.boundary{{color:var(--warn);font-weight:700}}.split{{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}}.decision-hero{{display:grid;grid-template-columns:minmax(260px,1fr) minmax(260px,1fr);gap:18px;align-items:center;border-width:2px}}.decision-hero.buy-yes,.decision-hero.buy-no{{border-color:rgba(34,197,94,.65)}}.decision-hero.no-trade{{border-color:rgba(251,191,36,.65)}}.decision-action{{font-size:48px;font-weight:900;letter-spacing:-.04em}}.eyebrow{{text-transform:uppercase;letter-spacing:.12em;color:var(--muted);font-size:12px}}.decision-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}}.mini{{background:#020617;border:1px solid var(--line);border-radius:12px;padding:12px}}.mini b{{display:block;font-size:20px}}canvas{{width:100%;max-height:280px;background:#020617;border:1px solid var(--line);border-radius:12px}}.topline{{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}}
 </style></head><body><header><div class="topline"><div><h1>{_h(heading)}</h1><p class="muted">{subheading}</p></div><div class="muted">Auto-refresh in <span id="refreshCountdown">1.0</span>s</div></div></header>{body}<script>
 const refreshMs = Number(document.documentElement.dataset.refreshMs || 1000);
