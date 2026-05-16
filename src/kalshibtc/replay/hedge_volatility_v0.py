@@ -46,6 +46,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--settlement-price", type=float, default=None)
     parser.add_argument("--settlements-csv", default=None, help="CSV with market_ticker,settlement_price columns.")
     parser.add_argument(
+        "--settlements-from-feed-db",
+        action="store_true",
+        help="Load per-market settlements from feed DB market_settlements.",
+    )
+    parser.add_argument(
         "--settlement-source",
         choices=["manual", "kalshi", "coinbase_1m_avg", "chainlink_1m_avg"],
         default="manual",
@@ -53,8 +58,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="Print JSON summary.")
     parser.add_argument("--overwrite", action="store_true", help="Allow replacing an existing run directory.")
     args = parser.parse_args(argv)
-    if args.settlement_price is not None and args.settlements_csv:
-        print("--settlement-price and --settlements-csv cannot be used together", file=sys.stderr)
+    settlement_arg_count = sum(
+        1
+        for enabled in (
+            args.settlement_price is not None,
+            bool(args.settlements_csv),
+            bool(args.settlements_from_feed_db),
+        )
+        if enabled
+    )
+    if settlement_arg_count > 1:
+        print("settlement args are mutually exclusive and cannot be used together", file=sys.stderr)
         return 2
 
     feed_db = resolve_feed_db(args.feed_db)
@@ -83,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
             volatility_window=args.volatility_window,
             settlement_price=args.settlement_price,
             settlements_csv=args.settlements_csv,
+            settlements_from_feed_db=args.settlements_from_feed_db,
             settlement_source=args.settlement_source,
             overwrite=args.overwrite,
         )
@@ -111,11 +126,13 @@ def run_replay(
     volatility_window: int = 30,
     settlement_price: float | None = None,
     settlements_csv: str | Path | None = None,
+    settlements_from_feed_db: bool = False,
     settlement_source: SettlementSource = "manual",
     overwrite: bool = False,
 ) -> dict[str, Any]:
-    if settlement_price is not None and settlements_csv is not None:
-        raise ValueError("settlement_price and settlements_csv cannot be used together")
+    settlement_arg_count = sum(1 for enabled in (settlement_price is not None, settlements_csv is not None, settlements_from_feed_db) if enabled)
+    if settlement_arg_count > 1:
+        raise ValueError("settlement args are mutually exclusive")
     feed_path = Path(feed_db)
     run_dir = Path(runs_dir) / "replay" / STRATEGY_NAME / run_id
     if run_dir.exists() and not overwrite:
@@ -263,6 +280,16 @@ def run_replay(
             positions=positions,
             strikes=strikes,
             settlement_prices=_load_settlements_csv(Path(settlements_csv)),
+            total_replayed_markets=len(positions),
+        )
+        _write_settlement_by_market(run_dir=run_dir, results_db=results_db, settlement=settlement)
+        summary.update(settlement["aggregate"])
+    if settlements_from_feed_db:
+        settlement = evaluate_settlements_by_market(
+            positions=positions,
+            strikes=strikes,
+            settlement_prices=_load_settlements_from_feed_db(feed_path),
+            total_replayed_markets=len(positions),
         )
         _write_settlement_by_market(run_dir=run_dir, results_db=results_db, settlement=settlement)
         summary.update(settlement["aggregate"])
@@ -357,6 +384,7 @@ def evaluate_settlements_by_market(
     positions: dict[str, HedgePosition],
     strikes: dict[str, float],
     settlement_prices: dict[str, float],
+    total_replayed_markets: int | None = None,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     for market_ticker, position in sorted(positions.items()):
@@ -398,6 +426,7 @@ def evaluate_settlements_by_market(
     total_unpaired_directional_pnl = sum(float(row["unpaired_directional_pnl"] or 0.0) for row in rows)
     aggregate = {
         "settled_markets": len(rows),
+        "unsettled_markets": max(0, (total_replayed_markets if total_replayed_markets is not None else len(positions)) - len(rows)),
         "total_gross_payout": _round(total_gross_payout),
         "total_cost": _round(total_cost),
         "total_realized_pnl": _round(total_realized_pnl),
@@ -417,6 +446,18 @@ def _load_settlements_csv(path: Path) -> dict[str, float]:
         if not required.issubset(reader.fieldnames or set()):
             raise ValueError("settlements CSV must contain market_ticker,settlement_price columns")
         return {str(row["market_ticker"]): float(row["settlement_price"]) for row in reader}
+
+
+def _load_settlements_from_feed_db(feed_db: Path) -> dict[str, float]:
+    with sqlite3.connect(f"file:{feed_db}?mode=ro", uri=True) as conn:
+        rows = conn.execute(
+            """
+            SELECT market_ticker, settlement_price
+            FROM market_settlements
+            WHERE settlement_price IS NOT NULL
+            """
+        ).fetchall()
+    return {str(market_ticker): float(settlement_price) for market_ticker, settlement_price in rows}
 
 
 def _write_settlement_by_market(*, run_dir: Path, results_db: Path, settlement: dict[str, Any]) -> None:

@@ -516,3 +516,95 @@ def test_cli_rejects_manual_settlement_price_and_settlements_csv_together(tmp_pa
 
     assert code == 2
     assert "cannot be used together" in capsys.readouterr().err
+
+
+def ensure_market_settlements_schema(con):
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_settlements (
+            market_ticker TEXT PRIMARY KEY,
+            market_open_time TEXT,
+            market_close_time TEXT,
+            strike REAL,
+            settlement_price REAL,
+            winning_side TEXT,
+            source TEXT,
+            status TEXT,
+            settled_at TEXT,
+            fetched_at TEXT,
+            raw_json TEXT
+        )
+        """
+    )
+
+
+def test_replay_uses_market_settlements_from_feed_db(tmp_path):
+    feed_db = tmp_path / "feed.sqlite3"
+    runs_dir = tmp_path / "runs"
+    create_feed_db(feed_db)
+    con = sqlite3.connect(feed_db)
+    ensure_market_settlements_schema(con)
+    con.execute(
+        """
+        INSERT INTO market_settlements (
+            market_ticker, market_open_time, market_close_time, strike, settlement_price,
+            winning_side, source, status, settled_at, fetched_at, raw_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "KXBTCD-26MAY151215-T50000",
+            "2026-05-15T12:00:00+00:00",
+            "2026-05-15T12:15:00+00:00",
+            50_000,
+            50_100,
+            "yes",
+            "feed_last_price_proxy",
+            "settled_proxy",
+            "2026-05-15T12:15:00+00:00",
+            "2026-05-15T12:16:30+00:00",
+            "{}",
+        ),
+    )
+    con.commit()
+
+    summary = run_replay(
+        feed_db=feed_db,
+        runs_dir=runs_dir,
+        run_id="feed-settlements",
+        from_ts=None,
+        to_ts=None,
+        settlements_from_feed_db=True,
+    )
+
+    assert summary["settled_markets"] == 1
+    assert summary["unsettled_markets"] == 1
+    assert summary["total_realized_pnl"] == 0.06
+    assert summary["total_paired_locked_edge"] == 0.06
+    assert summary["total_unpaired_directional_pnl"] == 0.0
+    run_dir = runs_dir / "replay" / "hedge_volatility_v0" / "feed-settlements"
+    assert json.loads((run_dir / "settlement.json").read_text())["unsettled_markets"] == 1
+    rows = sqlite3.connect(run_dir / "results.sqlite3").execute("select market_ticker, realized_pnl from settlement_by_market").fetchall()
+    assert rows == [("KXBTCD-26MAY151215-T50000", 0.06)]
+
+
+def test_replay_settlement_args_are_mutually_exclusive_for_feed_db(tmp_path, capsys):
+    feed_db = tmp_path / "feed.sqlite3"
+    runs_dir = tmp_path / "runs"
+    create_feed_db(feed_db)
+
+    code = main(
+        [
+            "--feed-db",
+            str(feed_db),
+            "--runs-dir",
+            str(runs_dir),
+            "--run-id",
+            "bad-feed-settlement-args",
+            "--settlement-price",
+            "50100",
+            "--settlements-from-feed-db",
+        ]
+    )
+
+    assert code == 2
+    assert "settlement args are mutually exclusive" in capsys.readouterr().err
