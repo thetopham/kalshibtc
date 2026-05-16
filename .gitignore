@@ -5,10 +5,21 @@ __pycache__/
 *.egg-info/
 *.pyc
 .env
-configs/*.local.toml
 *.key
 *.pem
+
+# Active local runtime state. Keep these directories in the workspace, but never commit DBs/logs/runs.
+feed/*.sqlite3
+feed/*.sqlite3-*
+logs/
+runs/
+
+# Historical local DBs/configs/secrets moved out of the top-level workspace.
+archive/local-artifacts/
+
+# Legacy names from the pre-feed/replay layout, in case they are recreated locally.
+configs/*.local.toml
 data/*.sqlite3
 data/*.sqlite3-*
 data-live*/
-logs/
+runtime/

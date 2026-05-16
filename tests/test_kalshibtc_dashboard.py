@@ -282,9 +282,9 @@ def test_active_dashboard_scripts_and_deploy_service_are_read_only() -> None:
     pyproject = tomllib.loads((root / "pyproject.toml").read_text())
     scripts = pyproject["project"]["scripts"]
 
-    assert scripts["kbtc15-1s-dashboard"] == "kalshibtc.dashboard:main"
-    assert scripts["kbtc15-1s-stream-dashboard"] == "kalshibtc.dashboard:main_stream"
-    assert scripts["kbtc15-1s-status-dashboard"] == "kalshibtc.dashboard:main_status"
+    assert scripts["kbtc-dashboard"] == "kalshibtc.dashboard:main"
+    assert "kbtc15" not in scripts
+    assert "kbtc15-1s-dashboard" not in scripts
 
 
 def test_dashboard_help_commands_work() -> None:
@@ -297,28 +297,27 @@ def test_dashboard_help_commands_work() -> None:
         capture_output=True,
     )
     assert module_help.returncode == 0
-    assert "kbtc15-1s-dashboard" in module_help.stdout
     assert "--snapshot-db" in module_help.stdout
     assert "--results-db" in module_help.stdout
 
     script_help = subprocess.run(
-        ["uv", "run", "kbtc15-1s-dashboard", "--help"],
+        ["uv", "run", "kbtc-dashboard", "--help"],
         cwd=root,
         check=False,
         text=True,
         capture_output=True,
     )
     assert script_help.returncode == 0
-    assert "kbtc15-1s-dashboard" in script_help.stdout
+    assert "--snapshot-db" in script_help.stdout
 
 
 def test_active_dashboard_deploy_service_is_read_only() -> None:
     root = Path(__file__).resolve().parents[1]
     service = root / "deploy" / "kalshi-btc15m-1s-dashboard.service"
     text = service.read_text()
-    assert "kbtc15-1s-dashboard" in text
-    assert "runtime/snapshots/realtime-snapshots-1s.sqlite3" in text
-    assert "runtime/results/paper-results-1s.sqlite3" in text
+    assert "kbtc-dashboard" in text
+    assert "feed/kalshi-btc-1s.sqlite3" in text
+    assert "runs" in text
     assert "EnvironmentFile" not in text
     for term in BANNED_DASHBOARD_HTML_TERMS:
         assert term not in text

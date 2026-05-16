@@ -1,22 +1,22 @@
 [Unit]
-Description=Kalshi BTC 15m read-only 1s dashboard
+Description=Kalshi BTC read-only feed/replay dashboard
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=/home/matt/workspace/kalshi-btc-15m-bot
-ExecStart=/home/matt/workspace/kalshi-btc-15m-bot/.venv/bin/kbtc15-1s-dashboard --host 0.0.0.0 --port 8792 --snapshot-db runtime/snapshots/realtime-snapshots-1s.sqlite3 --results-db runtime/results/paper-results-1s.sqlite3
+ExecStart=/home/matt/workspace/kalshi-btc-15m-bot/.venv/bin/kbtc-dashboard --host 0.0.0.0 --port 8792 --snapshot-db feed/kalshi-btc-1s.sqlite3 --results-db runs/latest/results.sqlite3
 Restart=always
 RestartSec=5
 
-# Safety: read-only dashboard. It reads snapshot/results SQLite DBs and does not
-# load Kalshi credentials or expose routes that can place, cancel, or exit orders.
+# Safety: read-only dashboard. It reads feed/run SQLite DBs and does not load
+# Kalshi credentials or expose routes that can place, cancel, or exit orders.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=read-only
 ProtectSystem=full
-ReadWritePaths=/home/matt/workspace/kalshi-btc-15m-bot/runtime /home/matt/workspace/kalshi-btc-15m-bot/data
+ReadWritePaths=/home/matt/workspace/kalshi-btc-15m-bot/feed /home/matt/workspace/kalshi-btc-15m-bot/runs /home/matt/workspace/kalshi-btc-15m-bot/logs
 
 [Install]
 WantedBy=default.target

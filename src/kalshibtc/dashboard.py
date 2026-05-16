@@ -19,9 +19,11 @@ from .market.contract import ContractWindow
 from .market.state import MarketState
 from .record_1s_snapshots import STREAM_TABLE
 from .runtime_paths import (
+    DEFAULT_RUNS_DIR,
     PREFERRED_RESULTS_DB,
     PREFERRED_SNAPSHOT_DB,
     resolve_results_db,
+    resolve_runs_dir,
     resolve_snapshot_db,
 )
 from .strategy.simple_directional import SimpleDirectionalStrategy
@@ -29,6 +31,9 @@ from .strategy.simple_directional import SimpleDirectionalStrategy
 BOUNDARY_TEXT = "Read-only dashboard. No live orders. Active system is 1s recorder + 1s paper executor."
 STREAM_TITLE = "Kalshi BTC Stream"
 STATUS_TITLE = "Kalshi BTC 1s Paper Status"
+STRATEGY_RUNS_TITLE = "Kalshi BTC Strategy Runs"
+STRATEGY_RUN_TITLE = "Kalshi BTC Strategy Run"
+STRATEGY_BOUNDARY_TEXT = "Read-only replay/backtest dashboard. No order submission."
 ACTIVE_SERVICES = (
     "kalshi-btc15m-1s-recorder.service",
     "kalshi-btc15m-1s-paper.service",
@@ -71,6 +76,113 @@ def collect_stream_dashboard_data(*, snapshot_db: str | Path | None = None, hist
             "history_limit": history_limit,
         },
     }
+
+
+def collect_strategy_runs_dashboard_data(
+    *,
+    runs_dir: str | Path | None = None,
+    max_runs_per_strategy: int = 25,
+    max_total_runs: int = 200,
+) -> JsonDict:
+    runs_path = resolve_runs_dir(runs_dir)
+    runs: list[JsonDict] = []
+    ignored: list[JsonDict] = []
+    if runs_path.exists():
+        for strategy_dir in sorted(path for path in runs_path.iterdir() if path.is_dir()):
+            run_dirs = sorted((path for path in strategy_dir.iterdir() if path.is_dir()), reverse=True)[:max_runs_per_strategy]
+            for run_dir in run_dirs:
+                if len(runs) >= max_total_runs:
+                    break
+                try:
+                    run = _run_summary_from_dir(run_dir)
+                except (OSError, json.JSONDecodeError, ValueError) as exc:
+                    ignored.append({"strategy": strategy_dir.name, "run_id": run_dir.name, "reason": str(exc)})
+                    continue
+                runs.append(run)
+            if len(runs) >= max_total_runs:
+                break
+    runs.sort(key=lambda item: str(item.get("created_at") or item.get("run_id") or ""), reverse=True)
+    return {
+        "title": STRATEGY_RUNS_TITLE,
+        "api_path": "/api/strategies",
+        "boundary": STRATEGY_BOUNDARY_TEXT,
+        "runs_dir_path": str(runs_path),
+        "max_runs_per_strategy": max_runs_per_strategy,
+        "max_total_runs": max_total_runs,
+        "runs": runs,
+        "ignored_runs": ignored,
+    }
+
+
+def collect_strategy_run_detail_data(*, runs_dir: str | Path | None = None, strategy: str, run_id: str) -> JsonDict:
+    runs_path = resolve_runs_dir(runs_dir)
+    run_dir = _run_dir_for_route(runs_path=runs_path, strategy=strategy, run_id=run_id)
+    run = _run_summary_from_dir(run_dir)
+    return {
+        "title": STRATEGY_RUN_TITLE,
+        "api_path": f"/api/strategies/{_url_component(strategy)}/{_url_component(run_id)}",
+        "boundary": STRATEGY_BOUNDARY_TEXT,
+        "run": run,
+        "config_text": (run_dir / "config.toml").read_text(encoding="utf-8"),
+        "signals": _read_result_rows(run_dir / "results.sqlite3", "replay_signals", limit=200),
+        "fills": _read_result_rows(run_dir / "results.sqlite3", "replay_fills", limit=200),
+    }
+
+
+def render_strategy_runs_dashboard_html(data: Mapping[str, Any]) -> str:
+    rows = "".join(
+        "<tr>"
+        f"<td>{_h(run.get('strategy'))}</td><td><a href=\"{_h(run.get('href'))}\">{_h(run.get('run_id'))}</a></td>"
+        f"<td>{_fmt(run.get('snapshots'))}</td><td>{_fmt(run.get('signals'))}</td><td>{_fmt(run.get('fills'))}</td><td>{_fmt(run.get('notional'))}</td>"
+        "</tr>"
+        for run in data.get("runs", [])
+    )
+    ignored = data.get("ignored_runs") or []
+    ignored_rows = "".join(
+        f"<tr><td>{_h(row.get('strategy'))}</td><td>{_h(row.get('run_id'))}</td><td>{_h(row.get('reason'))}</td></tr>"
+        for row in ignored
+    )
+    body = f"""
+    <p class="boundary">{_h(data.get('boundary'))}</p>
+    <section><h2>Strategy comparison</h2><table id="strategy-runs-table"><thead><tr><th>strategy</th><th>run</th><th>snapshots</th><th>signals</th><th>fills</th><th>notional</th></tr></thead><tbody>{rows}</tbody></table></section>
+    <section><h2>Run artifacts</h2><table><tbody>{_kv('runs dir', data.get('runs_dir_path'))}{_kv('API', data.get('api_path'))}{_kv('scan cap', f"{data.get('max_total_runs')} total / {data.get('max_runs_per_strategy')} per strategy")}</tbody></table></section>
+    <section><h2>Ignored/incomplete runs</h2><table><tbody>{ignored_rows}</tbody></table></section>
+    """
+    return _page(
+        title=str(data.get("title") or STRATEGY_RUNS_TITLE),
+        heading=STRATEGY_RUNS_TITLE,
+        subheading=f"API {_h(data.get('api_path'))} | {_h(data.get('boundary'))}",
+        body=body,
+        refresh_ms=0,
+    )
+
+
+def render_strategy_run_detail_html(data: Mapping[str, Any]) -> str:
+    run = data.get("run") if isinstance(data.get("run"), Mapping) else {}
+    signal_rows = "".join(
+        f"<tr><td>{_h(row.get('ts'))}</td><td>{_h(row.get('side'))}</td><td>{_fmt(row.get('confidence'))}</td><td>{_h(row.get('allowed'))}</td><td>{_h(row.get('reason'))}</td></tr>"
+        for row in data.get("signals", [])
+    )
+    fill_rows = "".join(
+        f"<tr><td>{_h(row.get('ts'))}</td><td>{_h(row.get('side'))}</td><td>{_fmt(row.get('entry_price'))}</td><td>{_fmt(row.get('contracts'))}</td><td>{_fmt(row.get('notional'))}</td></tr>"
+        for row in data.get("fills", [])
+    )
+    body = f"""
+    <p class="boundary">{_h(data.get('boundary'))}</p>
+    <section><h2>Strategy run drilldown</h2><table><tbody>
+      {_kv('strategy', run.get('strategy'))}{_kv('run id', run.get('run_id'))}{_kv('snapshots', run.get('snapshots'))}{_kv('signals', run.get('signals'))}{_kv('fills', run.get('fills'))}{_kv('notional', run.get('notional'))}{_kv('results DB', run.get('results_db'))}
+    </tbody></table></section>
+    <section><h2>Signals</h2><table id="strategy-signals-table"><thead><tr><th>ts</th><th>side</th><th>confidence</th><th>allowed</th><th>reason</th></tr></thead><tbody>{signal_rows}</tbody></table></section>
+    <section><h2>Fills</h2><table id="strategy-fills-table"><thead><tr><th>ts</th><th>side</th><th>entry</th><th>contracts</th><th>notional</th></tr></thead><tbody>{fill_rows}</tbody></table></section>
+    <section><h2>Config</h2><pre>{_h(data.get('config_text'))}</pre></section>
+    """
+    return _page(
+        title=str(data.get("title") or STRATEGY_RUN_TITLE),
+        heading=STRATEGY_RUN_TITLE,
+        subheading=f"API {_h(data.get('api_path'))} | {_h(data.get('boundary'))}",
+        body=body,
+        refresh_ms=5000,
+    )
 
 
 def collect_status_dashboard_data(
@@ -235,6 +347,102 @@ def render_status_dashboard_html(data: Mapping[str, Any]) -> str:
         body=body,
         refresh_ms=5000,
     )
+
+
+def _run_dir_for_route(*, runs_path: Path, strategy: str, run_id: str) -> Path:
+    normal = runs_path / strategy / run_id
+    if normal.exists():
+        return normal
+    # Live-paper strategy slots are stored as runs/live/<strategy> but exposed as
+    # /strategy/<strategy>/live so replay and live slots share one URL shape.
+    live_slot = runs_path / "live" / strategy
+    if run_id == "live" and live_slot.exists():
+        return live_slot
+    return normal
+
+
+def _run_summary_from_dir(run_dir: Path) -> JsonDict:
+    metrics_path = run_dir / "metrics.json"
+    config_path = run_dir / "config.toml"
+    results_path = run_dir / "results.sqlite3"
+    if not metrics_path.is_file() or not config_path.is_file() or not results_path.is_file():
+        raise ValueError("missing config.toml, metrics.json, or results.sqlite3")
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    if not isinstance(metrics, Mapping):
+        raise ValueError("metrics.json must contain an object")
+    strategy = str(metrics.get("strategy") or run_dir.parent.name)
+    run_id = str(metrics.get("run_id") or run_dir.name)
+    return {
+        "strategy": strategy,
+        "run_id": run_id,
+        "created_at": metrics.get("created_at") or run_id,
+        "snapshots": metrics.get("snapshots", 0),
+        "signals": metrics.get("signals", 0),
+        "fills": metrics.get("fills", 0),
+        "notional": metrics.get("notional", 0.0),
+        "settled_positions": metrics.get("settled_positions", 0),
+        "max_open_positions": metrics.get("max_open_positions"),
+        "blockers": _result_blockers(results_path),
+        "run_dir": str(run_dir),
+        "results_db": str(results_path),
+        "href": f"/strategy/{_url_component(strategy)}/{_url_component(run_id)}",
+        "api_href": f"/api/strategies/{_url_component(strategy)}/{_url_component(run_id)}",
+    }
+
+
+def _result_blockers(path: Path) -> dict[str, int]:
+    if not path.exists():
+        return {}
+    blockers: Counter[str] = Counter()
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA busy_timeout=2000")
+        if _table_exists(conn, "replay_signals"):
+            rows = conn.execute(
+                "SELECT blocked_by_json FROM replay_signals WHERE allowed = 0 ORDER BY id DESC LIMIT 5000"
+            ).fetchall()
+            for row in rows:
+                for blocker in _json_loads(row["blocked_by_json"], default=[]):
+                    blockers[str(blocker)] += 1
+        elif _table_exists(conn, "predictions"):
+            columns = _table_columns(conn, "predictions")
+            select = "reasons_json, stake_dollars" if "stake_dollars" in columns else "reasons_json, 0.0 AS stake_dollars"
+            rows = conn.execute(f"SELECT {select} FROM predictions ORDER BY id DESC LIMIT 5000").fetchall()
+            for row in rows:
+                stake = _float(row["stake_dollars"])
+                if stake is not None and stake > 0:
+                    continue
+                for reason in _json_loads(row["reasons_json"], default=[]):
+                    text = str(reason)
+                    if text in {"max_open_positions", "spread_too_wide", "invalid_orderbook", "signal_none"}:
+                        blockers[text] += 1
+    finally:
+        conn.close()
+    return dict(blockers)
+
+
+def _read_result_rows(path: Path, table: str, *, limit: int) -> list[JsonDict]:
+    if table not in {"replay_signals", "replay_fills"}:
+        raise ValueError(f"unsupported results table: {table}")
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA busy_timeout=2000")
+        if not _table_exists(conn, table):
+            return []
+        rows = conn.execute(f"SELECT * FROM {table} ORDER BY id DESC LIMIT ?", (max(1, limit),)).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def _url_component(value: Any) -> str:
+    text = str(value)
+    safe = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_- .:"
+    return "".join(ch if ch in safe else "_" for ch in text).replace(" ", "%20")
 
 
 def _stream_latest_from_row(row: sqlite3.Row) -> JsonDict:
@@ -570,6 +778,7 @@ def _systemd_user_service_status(names: Iterable[str]) -> dict[str, JsonDict]:
 class DashboardHandler(BaseHTTPRequestHandler):
     snapshot_db: Path
     results_db: Path
+    runs_dir: Path
     history_limit: int
 
     def do_GET(self) -> None:  # noqa: N802
@@ -578,16 +787,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_html(render_stream_dashboard_html(self._stream_data()))
             elif self.path == "/status":
                 self._send_html(render_status_dashboard_html(self._status_data()))
+            elif self.path == "/strategies":
+                self._send_html(render_strategy_runs_dashboard_html(self._strategy_runs_data()))
+            elif self.path.startswith("/strategy/"):
+                detail = self._strategy_detail_from_path(html_path=True)
+                self._send_html(render_strategy_run_detail_html(detail))
             elif self.path == "/api/stream":
                 self._send_json(self._stream_data())
             elif self.path in {"/api/dashboard", "/api/status"}:
                 self._send_json(self._status_data())
+            elif self.path == "/api/strategies":
+                self._send_json(self._strategy_runs_data())
+            elif self.path.startswith("/api/strategies/"):
+                self._send_json(self._strategy_detail_from_path(html_path=False))
             else:
                 self.send_error(404)
-        except BrokenPipeError:
+        except (BrokenPipeError, ConnectionResetError):
             return
-        except (ConnectionResetError, sqlite3.Error, OSError) as exc:
-            self._send_json({"ok": False, "error": type(exc).__name__, "message": str(exc)}, status=503)
+        except (sqlite3.Error, OSError) as exc:
+            try:
+                self._send_json({"ok": False, "error": type(exc).__name__, "message": str(exc)}, status=503)
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         return
@@ -597,6 +818,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _status_data(self) -> JsonDict:
         return collect_status_dashboard_data(snapshot_db=self.snapshot_db, results_db=self.results_db)
+
+    def _strategy_runs_data(self) -> JsonDict:
+        return collect_strategy_runs_dashboard_data(runs_dir=self.runs_dir)
+
+    def _strategy_detail_from_path(self, *, html_path: bool) -> JsonDict:
+        prefix = "/strategy/" if html_path else "/api/strategies/"
+        parts = self.path.removeprefix(prefix).split("/", 1)
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            raise FileNotFoundError("strategy/run path requires strategy and run_id")
+        return collect_strategy_run_detail_data(runs_dir=self.runs_dir, strategy=parts[0], run_id=parts[1])
 
     def _send_html(self, body: str) -> None:
         payload = body.encode("utf-8")
@@ -621,22 +852,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8792)
     parser.add_argument("--snapshot-db", default=None, help=f"Snapshot DB. Default: {PREFERRED_SNAPSHOT_DB}, with legacy fallback.")
     parser.add_argument("--results-db", default=None, help=f"Paper results DB. Default: {PREFERRED_RESULTS_DB}, with legacy fallback.")
+    parser.add_argument("--runs-dir", default=None, help=f"Strategy replay runs dir. Default: {DEFAULT_RUNS_DIR}")
     parser.add_argument("--history-limit", type=int, default=120)
-    parser.add_argument("--once", choices=("stream-html", "status-html", "stream-json", "status-json"), help="Render once and exit instead of serving HTTP.")
+    parser.add_argument("--once", choices=("stream-html", "status-html", "strategies-html", "stream-json", "status-json", "strategies-json"), help="Render once and exit instead of serving HTTP.")
     args = parser.parse_args(argv)
     snapshot_db = resolve_snapshot_db(args.snapshot_db)
     results_db = resolve_results_db(args.results_db)
+    runs_dir = resolve_runs_dir(args.runs_dir)
     if args.once:
         if args.once == "stream-html":
             print(render_stream_dashboard_html(collect_stream_dashboard_data(snapshot_db=snapshot_db, history_limit=args.history_limit)))
         elif args.once == "status-html":
             print(render_status_dashboard_html(collect_status_dashboard_data(snapshot_db=snapshot_db, results_db=results_db)))
+        elif args.once == "strategies-html":
+            print(render_strategy_runs_dashboard_html(collect_strategy_runs_dashboard_data(runs_dir=runs_dir)))
         elif args.once == "stream-json":
             print(json.dumps(collect_stream_dashboard_data(snapshot_db=snapshot_db, history_limit=args.history_limit), indent=2, default=str))
-        else:
+        elif args.once == "status-json":
             print(json.dumps(collect_status_dashboard_data(snapshot_db=snapshot_db, results_db=results_db), indent=2, default=str))
+        else:
+            print(json.dumps(collect_strategy_runs_dashboard_data(runs_dir=runs_dir), indent=2, default=str))
         return 0
-    handler = type("ConfiguredDashboardHandler", (DashboardHandler,), {"snapshot_db": snapshot_db, "results_db": results_db, "history_limit": args.history_limit})
+    handler = type("ConfiguredDashboardHandler", (DashboardHandler,), {"snapshot_db": snapshot_db, "results_db": results_db, "runs_dir": runs_dir, "history_limit": args.history_limit})
     server = ThreadingHTTPServer((args.host, args.port), handler)
     server.daemon_threads = True
     print(f"kbtc15-1s-dashboard serving read-only dashboards on http://{args.host}:{args.port}")
@@ -658,7 +895,7 @@ def main_status(argv: list[str] | None = None) -> int:
 
 
 def _page(*, title: str, heading: str, subheading: str, body: str, refresh_ms: int, stream_api_path: str | None = None) -> str:
-    refresh_js = _stream_refresh_js(stream_api_path) if stream_api_path else _reload_refresh_js()
+    refresh_js = _stream_refresh_js(stream_api_path) if stream_api_path else _reload_refresh_js(refresh_ms)
     return f"""<!doctype html>
 <html data-refresh-ms="{int(refresh_ms)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{_h(title)}</title><style>
 :root{{color-scheme:dark;--bg:#07111f;--panel:#0f172a;--panel2:#111827;--line:#26364d;--text:#e6edf3;--muted:#94a3b8;--good:#22c55e;--bad:#ef4444;--warn:#fbbf24;--blue:#38bdf8}}*{{box-sizing:border-box}}body{{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:radial-gradient(circle at top left,#123052,#07111f 42%);color:var(--text);margin:0;padding:24px}}header{{position:sticky;top:0;z-index:5;background:rgba(7,17,31,.92);backdrop-filter:blur(10px);border:1px solid var(--line);border-radius:16px;padding:16px 18px;margin-bottom:18px}}h1{{margin:0 0 6px;font-size:28px}}h2{{margin-top:0}}.muted,small{{color:var(--muted)}}section{{background:rgba(17,24,39,.92);border:1px solid var(--line);border-radius:16px;margin:16px 0;padding:16px;box-shadow:0 12px 28px rgba(0,0,0,.18)}}table{{border-collapse:collapse;width:100%;font-size:14px}}td,th{{border-bottom:1px solid var(--line);padding:8px;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;max-height:360px;overflow:auto;background:#020617;border:1px solid var(--line);border-radius:12px;padding:12px}}button{{background:#164e63;color:#ecfeff;border:1px solid #0891b2;border-radius:10px;padding:8px 10px;cursor:pointer}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}}.card{{background:linear-gradient(180deg,#0f172a,#0b1220);border:1px solid #334155;border-radius:14px;padding:14px}}.card strong{{color:#cbd5e1}}.card span{{display:block;font-size:24px;font-weight:800;margin:4px 0}}.boundary{{color:var(--warn);font-weight:700}}.split{{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}}.decision-hero{{display:grid;grid-template-columns:minmax(260px,1fr) minmax(260px,1fr);gap:18px;align-items:center;border-width:2px}}.decision-hero.buy-yes,.decision-hero.buy-no{{border-color:rgba(34,197,94,.65)}}.decision-hero.no-trade{{border-color:rgba(251,191,36,.65)}}.decision-action{{font-size:48px;font-weight:900;letter-spacing:-.04em}}.eyebrow{{text-transform:uppercase;letter-spacing:.12em;color:var(--muted);font-size:12px}}.decision-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}}.mini{{background:#020617;border:1px solid var(--line);border-radius:12px;padding:12px}}.mini b{{display:block;font-size:20px}}canvas{{width:100%;max-height:280px;background:#020617;border:1px solid var(--line);border-radius:12px}}.topline{{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}}
@@ -692,7 +929,9 @@ def _mini_metric(label: str, value: Any, note: Any = "", *, value_id: str | None
     return f'<div class="mini"><span class="muted">{_h(label)}</span><b{value_attr}>{_h(value)}</b><small>{_h(note)}</small></div>'
 
 
-def _reload_refresh_js() -> str:
+def _reload_refresh_js(refresh_ms: int) -> str:
+    if refresh_ms <= 0:
+        return ""
     return """
 let remaining = refreshMs;
 setInterval(() => { remaining -= 100; if (remaining <= 0) location.reload(); const el=document.getElementById('refreshCountdown'); if (el) el.textContent=(remaining/1000).toFixed(1); }, 100);
@@ -859,6 +1098,10 @@ def row_get(row: sqlite3.Row | Mapping[str, Any], key: str) -> Any:
     if isinstance(row, sqlite3.Row):
         return row[key] if key in row.keys() else None
     return row.get(key)
+
+
+def _table_columns(conn: sqlite3.Connection, name: str) -> set[str]:
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({name})")}
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:

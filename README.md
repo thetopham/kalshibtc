@@ -1,85 +1,73 @@
-# kalshibtc — boring 1s Kalshi BTC paper bot
+# kalshibtc — Kalshi BTC feed and strategy replay lab
 
 ## Current focus
 
-This repo is now narrowed to the 1-second Kalshi BTC paper bot in `src/kalshibtc/`.
+This repo is now a feed/research system:
 
-Active question:
+1. record a read-only Kalshi BTC 1s feed into one canonical SQLite tape
+2. keep process logs separate from data
+3. replay/backtest strategies against that feed into immutable run directories
+4. keep dashboards read-only
 
-> Does simple BTC price-vs-strike plus 30s slope have edge, and where, or is it just noise?
+No active live-order package or `kbtc15` console script remains in the active import path. Historical 15m/live/scanner code is reference-only under `archive/legacy-15m/`.
 
-Do not add ML, market making, EV blending, new indicators, live orders, or strategy complexity until paper PnL review shows a specific weakness worth fixing. The two active dashboards are retained as read-only operator views over the clean 1s system.
+## Canonical runtime layout
+
+```text
+feed/kalshi-btc-1s.sqlite3      # authoritative 1s feed tape
+runs/                           # replay/backtest outputs, one immutable dir per run
+logs/                           # process logs only
+```
+
+Avoid using `data/` or `data-live-prod/` for new work. Existing files there are historical compatibility artifacts.
 
 ## Active commands
 
-Preferred runtime paths for new services/docs:
-
-```text
-runtime/snapshots/realtime-snapshots-1s.sqlite3
-runtime/results/paper-results-1s.sqlite3
-```
-
-The CLIs still accept explicit old paths such as `data/realtime-snapshots-1s.sqlite3` and `data-live-prod/paper-results-1s.sqlite3` for local compatibility. Do not move or delete existing DB files just to adopt the preferred path.
-
-Run the read-only 1s recorder to keep the snapshot DB fresh:
+Record the feed:
 
 ```bash
-kbtc15-1s-recorder \
-  --snapshot-db runtime/snapshots/realtime-snapshots-1s.sqlite3 \
+kbtc-feed \
+  --snapshot-db feed/kalshi-btc-1s.sqlite3 \
   --emit-min-interval-seconds 1 \
   --loop
 ```
 
-Equivalent module form:
+Replay a strategy against the feed:
 
 ```bash
-python -m kalshibtc.record_1s_snapshots \
-  --snapshot-db runtime/snapshots/realtime-snapshots-1s.sqlite3 \
-  --emit-min-interval-seconds 1 \
-  --loop
+kbtc-replay \
+  --feed-db feed/kalshi-btc-1s.sqlite3 \
+  --runs-dir runs \
+  --strategy simple_directional
 ```
 
-Then run the 1s paper executor over that recorder-owned snapshot DB:
+Run the read-only dashboard:
 
 ```bash
-kbtc15-1s-paper \
-  --snapshot-db runtime/snapshots/realtime-snapshots-1s.sqlite3 \
-  --results-db runtime/results/paper-results-1s.sqlite3 \
-  --loop --interval-seconds 1
-```
-
-Equivalent module form:
-
-```bash
-python -m kalshibtc.paper_signal_executor \
-  --snapshot-db runtime/snapshots/realtime-snapshots-1s.sqlite3 \
-  --results-db runtime/results/paper-results-1s.sqlite3 \
-  --loop --interval-seconds 1
-```
-
-The recorder writes only `realtime_snapshots_1s` rows to the snapshot DB. The executor only SELECTs from the snapshot DB and writes signals, fake fills, exits, and PnL to the separate results DB.
-
-Recorder v1 is a tiny read-only public-data poller: Coinbase BTC spot plus Kalshi public market/orderbook endpoints. It has no credentials and no order-submission path; a later PR can swap in a read-only websocket source behind the same SQLite writer.
-
-Run the read-only dashboard server:
-
-```bash
-kbtc15-1s-dashboard \
-  --snapshot-db runtime/snapshots/realtime-snapshots-1s.sqlite3 \
-  --results-db runtime/results/paper-results-1s.sqlite3 \
+kbtc-dashboard \
+  --snapshot-db feed/kalshi-btc-1s.sqlite3 \
+  --results-db runs/latest/results.sqlite3 \
   --host 127.0.0.1 --port 8792
 ```
 
-Dashboard pages/API:
+## Strategy/replay model
 
-- `/` and `/api/stream`: Kalshi BTC Stream, showing live market/orderbook state, current strike/seconds-to-close, graph points, simple `BUY_YES` / `BUY_NO` / `NO_TRADE` decision, and raw debug payload.
-- `/status` and `/api/dashboard` (also `/api/status`): Kalshi BTC 1s Paper Status, showing paper PnL, Paper PnL Review, Paper Review Buckets, recent paper trades, grouped stats, blockers, and active service status.
+Strategies live in `src/kalshibtc/strategy/` and should remain pure:
 
-Both dashboards are read-only. They do not load live trading credentials and do not place, cancel, or exit live orders.
+```text
+MarketState -> Signal
+```
 
-## V1 strategy
+Replay reads only from the feed DB and writes outputs under:
 
-`SimpleDirectionalStrategy` remains deliberately boring:
+```text
+runs/<strategy>/<run-id>/
+  config.toml
+  metrics.json
+  results.sqlite3
+```
+
+The initial strategy remains deliberately boring:
 
 ```python
 if price > strike and slope_30s > 0:
@@ -90,61 +78,38 @@ else:
     no_trade
 ```
 
-Strategy emits `Signal`. `RiskManager` sizes or blocks. `PaperExecutor` creates fake fills. No live order code is in the paper executor path.
-
 ## Active package map
 
 ```text
 src/kalshibtc/
-  dashboard.py                    # active read-only stream + paper status dashboard CLI
-  record_1s_snapshots.py          # active read-only recorder CLI for realtime_snapshots_1s
-  paper_signal_executor.py       # thin 1s paper loop CLI
-  main.py                        # MarketStateBuilder and strategy/risk/executor pipeline
-  config.py                      # small 1s defaults
-  datafeed/                      # feed models and lightweight recorder seam
-  market/                        # contract, state, pricing, read-only public settlement client
-  strategy/                      # Signal, slope tracker, SimpleDirectionalStrategy
-  execution/                     # RiskManager, PaperExecutor, disabled live boundary
-  storage/                       # SQLite schema/helpers and PaperSignalStore
-  backtest/                      # replay/metrics seams
+  record_1s_snapshots.py       # read-only feed recorder CLI; writes realtime_snapshots_1s
+  replay/cli.py                # feed DB -> immutable run outputs
+  dashboard.py                 # read-only dashboard
+  runtime_paths.py             # canonical feed/runs/log paths
+  datafeed/                    # feed models and websocket boundary
+  market/                      # contract, state, pricing, public settlement lookup
+  strategy/                    # Signal protocol and strategy implementations
+  execution/                   # paper fill/risk seams only
+  storage/                     # SQLite helpers/result store compatibility
+  backtest/                    # replay engine/metrics primitives
 ```
 
-## Archived legacy code
+`src/kalshibtc/datafeed/websocket.py` is still the seam for a package-local live websocket adapter. The old websocket implementation is available as reference in `archive/legacy-15m/src/kalshi_btc_15m_bot/streaming.py`; port only the feed/auth/parser pieces, not live-order or dashboard code.
 
-The old scanner/model/dashboard/live-order surface has been moved out of the active package path:
+## Safety boundary
 
-```text
-archive/legacy-15m/
-```
-
-That archive includes the old `kalshi_btc_15m_bot` package, old tests, configs, deploy templates, and historical notes. Treat it as reference only. If a piece is needed again, move only that small piece into `src/kalshibtc/` behind tests.
-
-## Paper PnL review before complexity
-
-Review `runtime/results/paper-results-1s.sqlite3` (or the explicit old results DB path you passed) before adding strategy complexity:
-
-- total PnL
-- win rate
-- average PnL
-- PnL by side
-- PnL by seconds-to-expiry bucket
-- PnL by distance-from-strike bucket
-- PnL by slope-at-entry bucket
-- PnL by hold-time bucket
+- Feed recorder writes local feed observations only.
+- Replay/backtest reads feed observations and writes run outputs only.
+- Dashboard is read-only.
+- Active package must not import `kalshi_btc_15m_bot`.
+- Live-order/scanner code is archive-only reference.
 
 ## Checks
 
-This host currently uses `uv run` because bare `python`/`pytest` may not be on PATH:
-
 ```bash
-uv run python -m kalshibtc.record_1s_snapshots --help
-uv run python -m kalshibtc.paper_signal_executor --help
-uv run python -m kalshibtc.dashboard --help
-uv run kbtc15-1s-recorder --help
-uv run kbtc15-1s-paper --help
-uv run kbtc15-1s-dashboard --help
-uv run pytest tests/test_kalshibtc_1s_recorder.py -q
-uv run pytest tests/test_kalshibtc_modular_core.py -q
+uv run kbtc-feed --help
+uv run kbtc-replay --help
+uv run kbtc-dashboard --help
 uv run pytest
 uv run python -m compileall src tests
 uv run ruff check .

@@ -1,16 +1,44 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
 
-PREFERRED_SNAPSHOT_DB = Path("runtime/snapshots/realtime-snapshots-1s.sqlite3")
-PREFERRED_RESULTS_DB = Path("runtime/results/paper-results-1s.sqlite3")
-LEGACY_SNAPSHOT_DB = Path("data/realtime-snapshots-1s.sqlite3")
-LEGACY_RESULTS_DB = Path("data-live-prod/paper-results-1s.sqlite3")
+DEFAULT_FEED_DB = Path("feed/kalshi-btc-1s.sqlite3")
+DEFAULT_RUNS_DIR = Path("runs")
+DEFAULT_LOG_DIR = Path("logs")
 
-SNAPSHOT_DB_ENV_VARS = ("KALSHIBTC_1S_SNAPSHOT_DB", "KALSHIBTC_SNAPSHOT_DB")
-RESULTS_DB_ENV_VARS = ("KALSHIBTC_1S_RESULTS_DB", "KALSHIBTC_RESULTS_DB")
+FEED_DB_ENV_VAR = "KALSHIBTC_FEED_DB"
+RUNS_DIR_ENV_VAR = "KALSHIBTC_RUNS_DIR"
+LOG_DIR_ENV_VAR = "KALSHIBTC_LOG_DIR"
+
+# Backward-compatible aliases for imports that existed during the earlier 1s cleanup.
+PREFERRED_SNAPSHOT_DB = DEFAULT_FEED_DB
+PREFERRED_RESULTS_DB = DEFAULT_RUNS_DIR / "paper-results-1s.sqlite3"
+
+
+def resolve_feed_db(
+    value: str | Path | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> Path:
+    return _resolve_path(value, env_name=FEED_DB_ENV_VAR, default=DEFAULT_FEED_DB, env=env)
+
+
+def resolve_runs_dir(
+    value: str | Path | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> Path:
+    return _resolve_path(value, env_name=RUNS_DIR_ENV_VAR, default=DEFAULT_RUNS_DIR, env=env)
+
+
+def resolve_log_dir(
+    value: str | Path | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> Path:
+    return _resolve_path(value, env_name=LOG_DIR_ENV_VAR, default=DEFAULT_LOG_DIR, env=env)
 
 
 def resolve_snapshot_db(
@@ -18,13 +46,8 @@ def resolve_snapshot_db(
     *,
     env: Mapping[str, str] | None = None,
 ) -> Path:
-    return _resolve_runtime_path(
-        value,
-        env_names=SNAPSHOT_DB_ENV_VARS,
-        preferred=PREFERRED_SNAPSHOT_DB,
-        legacy=LEGACY_SNAPSHOT_DB,
-        env=env,
-    )
+    """Compatibility wrapper: snapshot DB is now the canonical feed DB."""
+    return resolve_feed_db(value, env=env)
 
 
 def resolve_results_db(
@@ -32,32 +55,31 @@ def resolve_results_db(
     *,
     env: Mapping[str, str] | None = None,
 ) -> Path:
-    return _resolve_runtime_path(
-        value,
-        env_names=RESULTS_DB_ENV_VARS,
-        preferred=PREFERRED_RESULTS_DB,
-        legacy=LEGACY_RESULTS_DB,
-        env=env,
-    )
+    """Compatibility wrapper for old paper executor callers.
+
+    New replay/backtest runs should use resolve_runs_dir() and create immutable
+    per-run result directories instead of one mutable results database.
+    """
+    if value not in (None, ""):
+        return Path(value)
+    values = os.environ if env is None else env
+    env_value = values.get("KALSHIBTC_RESULTS_DB") or values.get("KALSHIBTC_1S_RESULTS_DB")
+    if env_value:
+        return Path(env_value)
+    return PREFERRED_RESULTS_DB
 
 
-def _resolve_runtime_path(
+def _resolve_path(
     value: str | Path | None,
     *,
-    env_names: Sequence[str],
-    preferred: Path,
-    legacy: Path,
+    env_name: str,
+    default: Path,
     env: Mapping[str, str] | None,
 ) -> Path:
     if value not in (None, ""):
         return Path(value)
     values = os.environ if env is None else env
-    for name in env_names:
-        env_value = values.get(name)
-        if env_value:
-            return Path(env_value)
-    if preferred.exists():
-        return preferred
-    if legacy.exists():
-        return legacy
-    return preferred
+    env_value = values.get(env_name)
+    if env_value:
+        return Path(env_value)
+    return default
