@@ -67,6 +67,8 @@ class BotPipeline:
             signal = strategy.on_tick(state)
             risk = self.risk_manager.evaluate(state, signal, open_positions=open_positions)
             fill = self.executor.execute(state, risk)
+            if fill is not None and hasattr(strategy, "on_fill"):
+                strategy.on_fill(state, fill)
             if fill is not None:
                 open_positions += 1
             results.append(PipelineResult(signal=signal, risk=risk, fill=fill))

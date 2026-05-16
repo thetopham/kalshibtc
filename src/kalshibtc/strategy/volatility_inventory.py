@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ..execution.paper import PaperFill
 from ..market.pricing import entry_price_for_signal
 from ..market.state import MarketState
 from .signals import Signal
@@ -20,6 +21,12 @@ class VolatilityInventoryConfig:
     max_notional_per_add: float = 250.0
     floor_price: float = 0.05
     min_confidence: float = 0.65
+    max_momentum_entry_price: float = 0.85
+    hedge_entry_threshold: float = 0.30
+    hedge_cheap_25_multiplier: float = 1.5
+    hedge_cheap_20_multiplier: float = 2.0
+    hedge_cheap_15_multiplier: float = 3.0
+    late_hedge_multiplier: float = 1.25
     low_atr_multiplier: float = 0.25
     normal_atr_multiplier: float = 1.0
     high_atr_multiplier: float = 2.0
@@ -145,7 +152,7 @@ class VolatilityInventoryStrategy:
             self._record_snapshots(state)
             return signal
 
-        target_notional = self._target_notional(features, reason)
+        target_notional = self._target_notional(features, reason, price=price)
         estimated_shares = target_notional / max(price, self.config.floor_price)
         confidence = min(0.95, self.config.min_confidence + features.volatility_regime_score * 0.03)
         signal = self._signal(
@@ -157,7 +164,6 @@ class VolatilityInventoryStrategy:
             features=features,
             allow_price_strike_mismatch=reason != "expansion momentum pyramid",
         )
-        self._positions[side].add(qty=estimated_shares, price=price)
         self._record_decision(state, signal, features, entry_price=price)
         self._record_snapshots(state)
         return signal
@@ -166,19 +172,50 @@ class VolatilityInventoryStrategy:
         if features.distance_from_strike_abs < self.config.min_distance_from_strike:
             return "none", "flat/low volatility near strike"
         if features.expansion_regime:
-            return ("long_above" if features.distance_from_strike > 0 else "long_below"), "expansion momentum pyramid"
-        if features.stabilization_regime:
-            return ("long_below" if features.distance_from_strike > 0 else "long_above"), "stabilization crushed-side accumulation"
+            momentum_side = "long_above" if features.distance_from_strike > 0 else "long_below"
+            hedge_side = self._opposite_side(momentum_side)
+            momentum_price = entry_price_for_signal(momentum_side, state.orderbook)
+            hedge_price = entry_price_for_signal(hedge_side, state.orderbook)
+            if hedge_price is not None and hedge_price <= self.config.hedge_entry_threshold:
+                return hedge_side, "expansion cheap hedge accumulation"
+            if momentum_price is not None and momentum_price <= self.config.max_momentum_entry_price:
+                return momentum_side, "expansion momentum pyramid"
+            blockers = []
+            if momentum_price is None or momentum_price > self.config.max_momentum_entry_price:
+                blockers.append("momentum too expensive")
+            if hedge_price is None or hedge_price > self.config.hedge_entry_threshold:
+                blockers.append("hedge not cheap")
+            return "none", f"expansion gates blocked: {', '.join(blockers)}"
         if features.compression_regime and features.distance_from_strike_abs >= self.config.min_distance_from_strike:
-            return ("long_below" if features.distance_from_strike > 0 else "long_above"), "late compression crushed-side accumulation"
+            hedge_side = "long_below" if features.distance_from_strike > 0 else "long_above"
+            hedge_price = entry_price_for_signal(hedge_side, state.orderbook)
+            if hedge_price is not None and hedge_price <= self.config.hedge_entry_threshold:
+                return hedge_side, "late cheap hedge accumulation"
         return "none", "flat/low volatility no inventory add"
 
-    def _target_notional(self, features: VolatilityFeatures, reason: str) -> float:
+    def _target_notional(self, features: VolatilityFeatures, reason: str, *, price: float) -> float:
         volatility = self._volatility_multiplier(features)
         distance = self._distance_multiplier(features)
-        velocity = self._velocity_multiplier(features, reason)
-        target = self.config.base_notional * volatility * distance * velocity
+        if "hedge" in reason:
+            target = self.config.base_notional * volatility * distance * self._hedge_cheapness_multiplier(price)
+            if features.compression_regime:
+                target *= self.config.late_hedge_multiplier
+        else:
+            velocity = self._velocity_multiplier(features, reason)
+            target = self.config.base_notional * volatility * distance * velocity
         return round(min(self.config.max_notional_per_add, max(0.0, target)), 6)
+
+    def _hedge_cheapness_multiplier(self, price: float) -> float:
+        if price < 0.15:
+            return self.config.hedge_cheap_15_multiplier
+        if price < 0.20:
+            return self.config.hedge_cheap_20_multiplier
+        if price < 0.25:
+            return self.config.hedge_cheap_25_multiplier
+        return 1.0
+
+    def _opposite_side(self, side: str) -> str:
+        return "long_below" if side == "long_above" else "long_above"
 
     def _volatility_multiplier(self, features: VolatilityFeatures) -> float:
         ratio = features.atr_1m / max(self.config.min_atr_1m, 1e-9)
@@ -248,6 +285,12 @@ class VolatilityInventoryStrategy:
                 features=features,
             )
         )
+
+    def on_fill(self, state: MarketState, fill: PaperFill) -> None:
+        if fill.side not in self._positions:
+            return
+        self._positions[fill.side].add(qty=fill.contracts, price=fill.entry_price)
+        self._record_snapshots(state)
 
     def _record_snapshots(self, state: MarketState) -> None:
         above = self._positions["long_above"]
