@@ -13,7 +13,6 @@ from typing import Any
 import requests
 
 from .datafeed.models import Tick
-from .runtime_paths import PREFERRED_SNAPSHOT_DB, resolve_snapshot_db
 from .strategy.slope import SlopeTracker
 
 KALSHI_PUBLIC_BASE_URL = "https://external-api.kalshi.com/trade-api/v2"
@@ -371,11 +370,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--snapshot-db",
-        default=None,
-        help=(
-            "Recorder-owned SQLite DB that receives realtime_snapshots_1s rows. "
-            f"Defaults to {PREFERRED_SNAPSHOT_DB}, falling back to the old data/ path if already present."
-        ),
+        default="data/realtime-snapshots-1s.sqlite3",
+        help="Recorder-owned SQLite DB that receives realtime_snapshots_1s rows.",
     )
     parser.add_argument(
         "--emit-min-interval-seconds",
@@ -407,9 +403,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Exit non-zero after this many consecutive public-data errors in loop mode.",
     )
     args = parser.parse_args(argv)
-    snapshot_db = resolve_snapshot_db(args.snapshot_db)
 
-    recorder = RealtimeSnapshotRecorder(snapshot_db)
+    recorder = RealtimeSnapshotRecorder(args.snapshot_db)
     source = PublicRestSnapshotSource(
         kalshi_base_url=args.kalshi_base_url,
         coinbase_spot_url=args.coinbase_spot_url,
@@ -447,7 +442,7 @@ def main(argv: list[str] | None = None) -> int:
             _emit(
                 {
                     "event": "record_1s_snapshot",
-                    "snapshot_db": str(snapshot_db),
+                    "snapshot_db": str(args.snapshot_db),
                     "market_ticker": payload["market_ticker"],
                     "ts": snapshot_row_from_payload(payload)["ts"],
                     "recorded": recorded,
