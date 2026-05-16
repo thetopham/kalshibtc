@@ -22,11 +22,9 @@ from .paper_performance import collect_paper_trading_performance
 DEFAULT_DASHBOARD_PORT = 8792
 DEFAULT_REFRESH_SECONDS = 10
 DEFAULT_SERVICE_NAMES = (
-    "kalshi-btc15m-dashboard.service",
-    "kalshi-btc15m-live-prod.service",
-    "kalshi-btc15m-live-demo.service",
-    "kalshi-btc15m-paper.service",
+    "kalshi-btc15m-1s-recorder.service",
     "kalshi-btc15m-1s-paper.service",
+    "kalshi-btc15m-dashboard.service",
 )
 STREAM_WARNING_HISTORY_LIMIT = 8
 STREAM_CHART_HISTORY_LIMIT = 900
@@ -130,18 +128,12 @@ def collect_dashboard_data(
     """
     generated_at = datetime.now(UTC).isoformat()
     try:
-        status = bot.status()
+        bot.status()
         status_error = None
     except Exception as exc:  # noqa: BLE001 - dashboard should fail closed and display the error.
-        status = {}
         status_error = str(exc)
 
     config = bot.config
-    safety = status.get("safety") or bot._safety_payload()  # noqa: SLF001 - dashboard is same package.
-    live = status.get("live") or {}
-    live_account = live.get("account") or {}
-    performance = status.get("performance") or {}
-    paper_account = status.get("paper_account") or {}
     paper_results_path = _dashboard_paper_results_path(config)
     paper_performance = collect_paper_trading_performance(
         paper_results_path,
@@ -151,46 +143,32 @@ def collect_dashboard_data(
     return {
         "generated_at": generated_at,
         "status_error": status_error,
-        "boundary": safety.get("boundary", "unknown"),
+        "boundary": "Read-only dashboard. No live orders. Active status page shows 1s paper trading data only.",
         "strategy": {
             "name": "Kalshi BTC 15m",
             "series_ticker": config.kalshi.series_ticker,
             "trading_mode": config.trading_mode,
-            "enable_live_orders": config.enable_live_orders,
-            "live_environment": config.live.environment,
+            "enable_live_orders": False,
+            "live_environment": "none",
             "market_data_provider": config.market_data.provider,
             "candle_granularity_seconds": config.market_data.granularity_seconds,
             "scan_interval_seconds": scan_interval_seconds,
-            "ledger_path": str(config.ledger_path),
             "paper_results_1s_path": str(paper_results_path),
-            "data_dir": str(config.data_dir),
         },
         "portfolio": {
-            "paper_cash": _float_or_none(paper_account.get("cash")),
-            "paper_realized_pnl": _float_or_none(paper_account.get("realized_pnl")),
-            "paper_open_notional": _float_or_none(paper_account.get("open_notional")),
-            "paper_equity": _float_or_none(performance.get("total_equity")),
-            "paper_unrealized_pnl": _float_or_none(performance.get("open_unrealized_pnl")),
-            "paper_win_rate": _float_or_none(performance.get("win_rate")),
-            "paper_expectancy_dollars": _float_or_none(performance.get("expectancy_dollars")),
-            "paper_total_trades": _int_or_none(performance.get("total_trades")),
-            "paper_closed_trades": _int_or_none(performance.get("closed_trades")),
-            "paper_open_trades": _int_or_none(performance.get("open_trades")),
-            "live_balance_dollars": _float_or_none(live_account.get("balance_dollars")),
-            "live_portfolio_value_dollars": _float_or_none(live_account.get("portfolio_value_dollars")),
-            "live_remote_positions": _int_or_none(live_account.get("nonzero_positions")),
-            "live_realized_pnl": _float_or_none(live.get("realized_pnl")),
-            "live_account_error": live_account.get("error"),
+            "paper_realized_pnl": _float_or_none(paper_performance.get("metrics", {}).get("realized_pnl")),
+            "paper_unrealized_pnl": _float_or_none(paper_performance.get("metrics", {}).get("unrealized_pnl")),
+            "paper_total_pnl": _float_or_none(paper_performance.get("metrics", {}).get("total_pnl")),
+            "paper_win_rate": _float_or_none(paper_performance.get("metrics", {}).get("win_rate")),
+            "paper_total_trades": _int_or_none(paper_performance.get("metrics", {}).get("total_trades")),
+            "paper_closed_trades": _int_or_none(paper_performance.get("metrics", {}).get("closed_positions")),
+            "paper_open_trades": _int_or_none(paper_performance.get("metrics", {}).get("open_positions")),
         },
-        "open_paper_positions": status.get("open_positions", []),
-        "open_live_positions": live.get("open_positions", []),
-        "latest_predictions": status.get("latest_predictions", []),
-        "latest_paper_trades": status.get("latest_trades", []),
-        "latest_live_orders": live.get("latest_orders", status.get("latest_live_orders", [])),
-        "latest_live_fills": live.get("latest_fills", status.get("latest_live_fills", [])),
+        "open_paper_positions": paper_performance.get("open_positions", []),
+        "latest_predictions": [],
+        "latest_paper_trades": paper_performance.get("recent_trades", []),
         "paper_performance": paper_performance,
         "services": _service_statuses(service_names) if include_service_status else {},
-        "raw_status": status,
     }
 
 
@@ -201,8 +179,8 @@ def render_dashboard_html(data: Mapping[str, Any], *, api_path: str = "/api/dash
     paper_perf = _mapping(data.get("paper_performance"))
     paper_metrics = _mapping(paper_perf.get("metrics"))
     boundary = str(data.get("boundary") or "unknown")
-    mode = str(strategy.get("trading_mode") or "unknown")
-    live_enabled = bool(strategy.get("enable_live_orders"))
+    mode = "1s paper"
+    live_enabled = False
     generated_at = str(data.get("generated_at") or "unknown")
     status_error = data.get("status_error")
     refresh_seconds = DEFAULT_REFRESH_SECONDS
@@ -260,32 +238,31 @@ def render_dashboard_html(data: Mapping[str, Any], *, api_path: str = "/api/dash
   <header>
     <div>
       <h1>Kalshi BTC 15m Dashboard</h1>
-      <div class="sub">Generated {esc(generated_at)} · refreshes in browser · API <a href="{esc(api_path)}">{esc(api_path)}</a></div>
+      <div class="sub">1s Paper Trading Status · Generated {esc(generated_at)} · refreshes in browser · API <a href="{esc(api_path)}">{esc(api_path)}</a></div>
     </div>
     <div class="pillrow">
       <span class="pill live">mode: {esc(mode)}</span>
-      <span class="pill">env: {esc(strategy.get('live_environment'))}</span>
+      <span class="pill">orders: disabled</span>
       <span class="pill">scan: {_format_seconds(strategy.get('scan_interval_seconds'))}</span>
       <span class="pill">candles: {_format_seconds(strategy.get('candle_granularity_seconds'))}</span>
     </div>
   </header>
   {_alert(status_error) if status_error else ""}
   <section class="grid kpis">
-    {_kpi('Live balance', _money_or_dash(portfolio.get('live_balance_dollars')), 'Authenticated Kalshi account cash', portfolio.get('live_balance_dollars'))}
-    {_kpi('Live portfolio', _money_or_dash(portfolio.get('live_portfolio_value_dollars')), f"remote positions: {portfolio.get('live_remote_positions') if portfolio.get('live_remote_positions') is not None else '—'}", portfolio.get('live_portfolio_value_dollars'))}
-    {_kpi('Live realized PnL', _signed_money_or_dash(portfolio.get('live_realized_pnl')), 'Bot-owned live fills only', portfolio.get('live_realized_pnl'))}
-    {_kpi('Paper equity', _money_or_dash(portfolio.get('paper_equity')), f"win rate: {_pct_or_dash(portfolio.get('paper_win_rate'))}", portfolio.get('paper_equity'))}
+    {_kpi('Paper realized PnL', _signed_money_or_dash(portfolio.get('paper_realized_pnl')), f"closed: {portfolio.get('paper_closed_trades') if portfolio.get('paper_closed_trades') is not None else '—'}", portfolio.get('paper_realized_pnl'))}
+    {_kpi('Paper unrealized PnL', _signed_money_or_dash(portfolio.get('paper_unrealized_pnl')), f"open: {portfolio.get('paper_open_trades') if portfolio.get('paper_open_trades') is not None else '—'}", portfolio.get('paper_unrealized_pnl'))}
+    {_kpi('Paper total PnL', _signed_money_or_dash(portfolio.get('paper_total_pnl')), f"trades: {portfolio.get('paper_total_trades') if portfolio.get('paper_total_trades') is not None else '—'}", portfolio.get('paper_total_pnl'))}
+    {_kpi('Paper win rate', _pct_or_dash(portfolio.get('paper_win_rate')), '1s paper results DB only', portfolio.get('paper_win_rate'))}
   </section>
   <section class="grid two">
     <div class="panel">
       <h2>Boundary</h2>
       <p>{esc(boundary)}</p>
       <div class="pillrow">
-        <span class="pill">orders: {esc('enabled with caps' if live_enabled else 'disabled')}</span>
-        <span class="pill">market data: {esc(strategy.get('market_data_provider'))}</span>
+        <span class="pill">No live orders</span>
+        <span class="pill">1s paper results only</span>
         <span class="pill mono">{esc(strategy.get('series_ticker'))}</span>
       </div>
-      {('<p class="red">Live account error: ' + esc(portfolio.get('live_account_error')) + '</p>') if portfolio.get('live_account_error') else ''}
     </div>
     <div class="panel">
       <h2>Services</h2>
@@ -293,34 +270,11 @@ def render_dashboard_html(data: Mapping[str, Any], *, api_path: str = "/api/dash
     </div>
   </section>
   {_paper_performance_panel(paper_perf, paper_metrics)}
-  <section class="grid two">
-    <div class="panel">
-      <h2>Open live positions</h2>
-      {_rows(data.get('open_live_positions'), _live_position_row, 'No bot-owned live positions.')}
-    </div>
-    <div class="panel">
-      <h2>Open paper positions</h2>
-      {_rows(data.get('open_paper_positions'), _paper_position_row, 'No open paper positions.')}
-    </div>
-  </section>
-  <section class="grid two">
-    <div class="panel">
-      <h2>Latest predictions</h2>
-      {_rows(data.get('latest_predictions'), _prediction_row, 'No predictions yet.')}
-    </div>
-    <div class="panel">
-      <h2>Latest live orders/fills</h2>
-      <h3 class="tiny muted">Orders</h3>
-      {_rows(data.get('latest_live_orders'), _live_order_row, 'No live orders yet.')}
-      <h3 class="tiny muted">Fills</h3>
-      {_rows(data.get('latest_live_fills'), _live_fill_row, 'No live fills yet.')}
-    </div>
-  </section>
   <section class="panel" style="margin-top:14px">
-    <h2>Latest paper trades</h2>
-    {_rows(data.get('latest_paper_trades'), _paper_trade_row, 'No paper trades yet.')}
+    <h2>Recent 1s paper trades</h2>
+    {_rows(data.get('latest_paper_trades'), _paper_performance_trade_row, 'No 1s paper trades yet.')}
   </section>
-  <footer>Read-only dashboard. It calls status surfaces only and has no route that can scan, submit, cancel, or exit orders. Ledger: <span class="mono">{esc(strategy.get('ledger_path'))}</span></footer>
+  <footer>Read-only dashboard. It calls status surfaces only and has no route that can scan, submit, cancel, or exit orders. Shows 1s paper results only.</footer>
 </main>
 </body>
 </html>"""
@@ -1080,20 +1034,17 @@ def _mapping(value: Any) -> Mapping[str, Any]:
 
 
 def _dashboard_snapshot_path(config: Any) -> Path:
+    preferred = Path("runtime/snapshots/realtime-snapshots-1s.sqlite3").resolve()
     recorder_owned = Path("data/realtime-snapshots-1s.sqlite3").resolve()
     configured = getattr(config, "realtime_snapshots_path", None)
     configured_path = Path(configured) if configured is not None else None
     data_dir = Path(getattr(config, "data_dir", Path("data")))
     data_dir_candidate = data_dir / "realtime-snapshots-1s.sqlite3"
 
-    if configured_path is not None and recorder_owned.exists():
-        try:
-            if configured_path.resolve() != recorder_owned:
-                return recorder_owned
-        except OSError:
-            return recorder_owned
     if configured_path is not None and configured_path.exists():
         return configured_path
+    if preferred.exists():
+        return preferred
     if data_dir_candidate.exists():
         return data_dir_candidate
     if recorder_owned.exists():
@@ -1104,17 +1055,20 @@ def _dashboard_snapshot_path(config: Any) -> Path:
 
 
 def _dashboard_paper_results_path(config: Any) -> Path:
+    preferred = Path("runtime/results/paper-results-1s.sqlite3").resolve()
     configured = getattr(config, "paper_results_1s_path", None)
     if configured is not None:
         return Path(configured)
+    if preferred.exists():
+        return preferred
+    compatibility = Path("data-live-prod/paper-results-1s.sqlite3").resolve()
+    if compatibility.exists():
+        return compatibility
     data_dir = Path(getattr(config, "data_dir", Path("data")))
     one_second_results = data_dir / "paper-results-1s.sqlite3"
     if one_second_results.exists():
         return one_second_results
-    legacy = getattr(config, "ledger_path", None)
-    if legacy is not None:
-        return Path(legacy)
-    return one_second_results
+    return preferred
 
 
 def _rows(value: Any, renderer: Any, empty: str) -> str:
@@ -1218,7 +1172,7 @@ def _paper_performance_panel(perf: Mapping[str, Any], metrics: Mapping[str, Any]
     <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap">
       <div>
         <h2>Paper Trading Performance</h2>
-        <div class="muted tiny">SQLite-backed paper PnL from <span class="mono">{esc(perf.get('ledger_path'))}</span></div>
+        <div class="muted tiny">SQLite-backed 1s paper PnL results DB</div>
       </div>
       <div class="pillrow">{gap_html}</div>
     </div>

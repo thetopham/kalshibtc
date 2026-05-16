@@ -30,6 +30,8 @@ class FakeBot:
             enable_live_orders=True,
             data_dir=ledger_path.parent,
             ledger_path=ledger_path,
+            paper_results_1s_path=ledger_path,
+            realtime_snapshots_path=ledger_path.parent / "realtime-snapshots-1s.sqlite3",
             kalshi=SimpleNamespace(series_ticker="KXBTC15M"),
             live=SimpleNamespace(environment="production"),
             market_data=SimpleNamespace(provider="coinbase", granularity_seconds=900),
@@ -91,24 +93,37 @@ class FakeBot:
         }
 
 
-def test_collect_dashboard_data_projects_live_and_strategy_fields() -> None:
+def test_collect_dashboard_data_projects_1s_paper_only_fields() -> None:
     data = collect_dashboard_data(
         FakeBot(),
         include_service_status=False,
         scan_interval_seconds=60,
     )
 
-    assert data["boundary"] == "guarded live IOC limit orders enabled"
+    assert data["boundary"] == "Read-only dashboard. No live orders. Active status page shows 1s paper trading data only."
     assert data["strategy"]["trading_mode"] == "live"
     assert data["strategy"]["scan_interval_seconds"] == 60
     assert data["strategy"]["candle_granularity_seconds"] == 900
-    assert data["portfolio"]["live_balance_dollars"] == 24.50
-    assert data["portfolio"]["paper_equity"] == 1000.0
-    assert data["latest_predictions"][0]["action"] == "BUY_YES"
+    assert "live_balance_dollars" not in data["portfolio"]
+    assert "live_portfolio_value_dollars" not in data["portfolio"]
+    assert "live_realized_pnl" not in data["portfolio"]
+    assert "paper_total_pnl" in data["portfolio"]
+    assert data["latest_predictions"] == []
+    assert isinstance(data["latest_paper_trades"], list)
+    assert "open_live_positions" not in data
+    assert "latest_live_orders" not in data
+    assert "latest_live_fills" not in data
 
 
-def test_default_dashboard_services_include_1s_paper_executor() -> None:
-    assert "kalshi-btc15m-1s-paper.service" in DEFAULT_SERVICE_NAMES
+def test_default_dashboard_services_include_only_active_1s_paper_stack() -> None:
+    assert DEFAULT_SERVICE_NAMES == (
+        "kalshi-btc15m-1s-recorder.service",
+        "kalshi-btc15m-1s-paper.service",
+        "kalshi-btc15m-dashboard.service",
+    )
+    assert "kalshi-btc15m-live-prod.service" not in DEFAULT_SERVICE_NAMES
+    assert "kalshi-btc15m-live-demo.service" not in DEFAULT_SERVICE_NAMES
+    assert "kalshi-btc15m-paper.service" not in DEFAULT_SERVICE_NAMES
 
 
 def _write_paper_performance_db(ledger_path: Path) -> None:
@@ -437,11 +452,21 @@ def test_render_dashboard_html_includes_cards_and_read_only_boundary() -> None:
     text = render_dashboard_html(data)
 
     assert "Kalshi BTC 15m Dashboard" in text
-    assert "Live balance" in text
-    assert "$24.50" in text
+    assert "1s Paper Trading Status" in text
+    assert "Live balance" not in text
+    assert "Live portfolio" not in text
+    assert "Live realized PnL" not in text
+    assert "Open live positions" not in text
+    assert "Latest live orders/fills" not in text
+    assert "live-prod" not in text
+    assert "live-demo" not in text
+    assert "paper-ledger.sqlite3" not in text
+    assert "kalshi-btc15m-paper.service" not in text
+    assert "orders enabled with caps" not in text
+    assert "$24.50" not in text
     assert "scan: 60s" in text
     assert "candles: 900s" in text
-    assert "guarded live IOC limit orders enabled" in text
+    assert "No live orders" in text
     assert "no route that can scan, submit, cancel, or exit orders" in text
     assert "KALSHI_API_KEY" not in text
 
