@@ -27,6 +27,9 @@ class HedgeVolatilityConfig:
     add_contracts: float = 1.0
     max_contracts_per_market: float = 25.0
     max_imbalance_ratio: float = 1.5
+    rebalance_after_target: bool = True
+    max_unpaired_contracts: float = 2.0
+    prefer_smaller_side_when_paired_cost_below_target: bool = True
 
     @property
     def add_target_pair_cost(self) -> float:
@@ -201,6 +204,24 @@ class HedgeVolatilityV0:
                     max_imbalance_ratio=self.config.max_imbalance_ratio,
                 )
                 continue
+            if self._would_increase_directional_imbalance(
+                side=side,
+                position=position,
+                current_cost=current_cost,
+            ):
+                self._log(
+                    "REJECT",
+                    state,
+                    reason="would_increase_directional_imbalance",
+                    trend_side=trend_side,
+                    position=position,
+                    side=side,
+                    price=price,
+                    projected_yes_contracts=projected_yes,
+                    projected_no_contracts=projected_no,
+                    max_unpaired_contracts=self.config.max_unpaired_contracts,
+                )
+                continue
             reason = f"add_improves_combined_cost_trend_{trend_side}"
             decision = HedgeDecision(
                 side=side,
@@ -222,6 +243,27 @@ class HedgeVolatilityV0:
                 projected_combined_average_cost=projected_cost,
             )
         return decisions
+
+    def _would_increase_directional_imbalance(
+        self,
+        *,
+        side: str,
+        position: HedgePosition,
+        current_cost: float | None,
+    ) -> bool:
+        if not self.config.rebalance_after_target:
+            return False
+        if not self.config.prefer_smaller_side_when_paired_cost_below_target:
+            return False
+        if current_cost is None or current_cost > self.config.add_target_pair_cost:
+            return False
+        yes_contracts = position.yes_contracts
+        no_contracts = position.no_contracts
+        unpaired = abs(yes_contracts - no_contracts)
+        if unpaired <= self.config.max_unpaired_contracts:
+            return False
+        larger_side = "yes" if yes_contracts > no_contracts else "no"
+        return side == larger_side
 
     def _gate(self, state: MarketState, *, recent_volatility: float | None) -> str | None:
         if self._trend_side(state) == "flat":

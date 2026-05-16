@@ -104,6 +104,10 @@ def test_run_replay_writes_results_db_and_summary(tmp_path):
     assert summary["fills"] == 3
     assert summary["final_yes_contracts"] == 3
     assert summary["final_no_contracts"] == 3
+    assert summary["final_unpaired_yes_contracts"] == 0
+    assert summary["final_unpaired_no_contracts"] == 0
+    assert summary["max_unpaired_contracts_seen"] <= 1
+    assert summary["imbalance_rejects"] == 0
     assert summary["avg_yes_entry"] == 0.62
     assert summary["avg_no_entry"] == 0.36
     assert summary["combined_average_cost"] == 0.98

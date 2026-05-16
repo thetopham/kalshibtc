@@ -201,3 +201,42 @@ def test_imbalance_cap_rejects_over_adding_one_side():
     decisions = strategy.decide(state, position)
 
     assert [decision.side for decision in decisions] == []
+
+
+def test_when_yes_larger_and_paired_cost_below_target_rejects_yes_add_but_allows_no():
+    strategy = HedgeVolatilityV0(
+        HedgeVolatilityConfig(
+            target_pair_cost=0.98,
+            max_unpaired_contracts=2,
+            prefer_smaller_side_when_paired_cost_below_target=True,
+        )
+    )
+    position = HedgePosition(market_ticker="KXBTC")
+    now = datetime.now(UTC)
+    position.add_fill(side="yes", price=0.50, contracts=5, ts=now, reason="seed")
+    position.add_fill(side="no", price=0.45, contracts=3, ts=now, reason="seed")
+    state = make_state(yes_ask=0.40, no_ask=0.35, slope_30s=8.0)
+
+    decisions = strategy.decide(state, position)
+
+    assert [(decision.side, decision.price) for decision in decisions] == [("no", 0.35)]
+
+
+def test_allows_larger_side_add_when_unpaired_inventory_is_within_cap():
+    strategy = HedgeVolatilityV0(
+        HedgeVolatilityConfig(
+            target_pair_cost=0.98,
+            max_unpaired_contracts=2,
+            max_imbalance_ratio=2.0,
+            prefer_smaller_side_when_paired_cost_below_target=True,
+        )
+    )
+    position = HedgePosition(market_ticker="KXBTC")
+    now = datetime.now(UTC)
+    position.add_fill(side="yes", price=0.50, contracts=4, ts=now, reason="seed")
+    position.add_fill(side="no", price=0.45, contracts=3, ts=now, reason="seed")
+    state = make_state(yes_ask=0.40, no_ask=0.46, slope_30s=8.0)
+
+    decisions = strategy.decide(state, position)
+
+    assert [(decision.side, decision.price) for decision in decisions] == [("yes", 0.40)]

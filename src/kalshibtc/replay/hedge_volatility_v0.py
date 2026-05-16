@@ -133,6 +133,7 @@ def run_replay(
     seed_fills = 0
     add_fills = 0
     paired_costs: list[float] = []
+    unpaired_counts_seen: list[float] = []
     buy_both_costs: list[float] = []
     orderbook_snapshots_logged = 0
     volatility_tracker = RecentVolatility(window=volatility_window)
@@ -181,6 +182,8 @@ def run_replay(
                         add_fills += 1
                     if position.combined_average_cost is not None:
                         paired_costs.append(position.combined_average_cost)
+                if position.fills:
+                    unpaired_counts_seen.append(abs(position.yes_contracts - position.no_contracts))
             else:
                 reason = _infer_reject_reason(
                     state,
@@ -213,6 +216,7 @@ def run_replay(
         seed_fills=seed_fills,
         add_fills=add_fills,
         paired_costs=paired_costs,
+        unpaired_counts_seen=unpaired_counts_seen,
         buy_both_costs=buy_both_costs,
     )
     if settlement_price is not None:
@@ -551,9 +555,14 @@ def _summary_payload(
     seed_fills: int,
     add_fills: int,
     paired_costs: list[float],
+    unpaired_counts_seen: list[float],
     buy_both_costs: list[float],
 ) -> dict[str, Any]:
     final_position = _latest_position(positions.values())
+    final_yes = final_position.yes_contracts if final_position else 0.0
+    final_no = final_position.no_contracts if final_position else 0.0
+    final_unpaired_yes = max(0.0, final_yes - final_no)
+    final_unpaired_no = max(0.0, final_no - final_yes)
     return {
         "strategy": STRATEGY_NAME,
         "run_id": run_id,
@@ -567,6 +576,11 @@ def _summary_payload(
         "orderbook_snapshots_logged": orderbook_snapshots_logged,
         "seed_fills": seed_fills,
         "add_fills": add_fills,
+        "final_unpaired_yes_contracts": _round(final_unpaired_yes),
+        "final_unpaired_no_contracts": _round(final_unpaired_no),
+        "max_unpaired_contracts_seen": _round(max(unpaired_counts_seen) if unpaired_counts_seen else 0.0),
+        "imbalance_rejects": reject_counts.get("would_increase_directional_imbalance", 0)
+        + reject_counts.get("max_imbalance_ratio_exceeded", 0),
         "best_paired_cost": _round(min(paired_costs) if paired_costs else None),
         "worst_paired_cost": _round(max(paired_costs) if paired_costs else None),
         "final_paired_cost": _round(final_position.combined_average_cost if final_position else None),
@@ -578,8 +592,8 @@ def _summary_payload(
         "markets_processed": len(positions),
         "snapshots_processed": snapshots_processed,
         "fills": fills,
-        "final_yes_contracts": _round(final_position.yes_contracts if final_position else 0.0),
-        "final_no_contracts": _round(final_position.no_contracts if final_position else 0.0),
+        "final_yes_contracts": _round(final_yes),
+        "final_no_contracts": _round(final_no),
         "avg_yes_entry": _round(final_position.avg_yes_entry if final_position else None),
         "avg_no_entry": _round(final_position.avg_no_entry if final_position else None),
         "combined_average_cost": _round(final_position.combined_average_cost if final_position else None),
