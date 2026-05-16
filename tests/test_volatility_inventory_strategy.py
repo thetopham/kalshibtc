@@ -9,8 +9,9 @@ import pytest
 
 from kalshibtc.config import RiskLimits
 from kalshibtc.datafeed.models import OrderBookSnapshot, Tick
+from kalshibtc.execution.paper import PaperFill
 from kalshibtc.execution.risk import RiskManager
-from kalshibtc.main import MarketStateBuilder
+from kalshibtc.main import BotPipeline, MarketStateBuilder
 from kalshibtc.market.contract import ContractWindow
 from kalshibtc.replay.cli import main as replay_main
 from kalshibtc.strategy.registry import create_strategy, strategy_names
@@ -30,15 +31,23 @@ def _contract() -> ContractWindow:
     )
 
 
-def _state(price: float, seconds: int, *, yes_ask: float = 0.55, no_ask: float = 0.45):
+def _state(
+    price: float,
+    seconds: int,
+    *,
+    yes_ask: float = 0.55,
+    no_ask: float = 0.45,
+    yes_bid: float | None = None,
+    no_bid: float | None = None,
+):
     ts = datetime(2026, 5, 15, 12, 0, tzinfo=UTC) + timedelta(seconds=seconds)
     tick = Tick(ts=ts, price=price, source="test", symbol="BTC-USD")
     book = OrderBookSnapshot(
         ts=ts,
         market_ticker="KXBTC15M-VOL",
-        yes_bid=max(0.01, yes_ask - 0.02),
+        yes_bid=max(0.01, yes_ask - 0.02) if yes_bid is None else yes_bid,
         yes_ask=yes_ask,
-        no_bid=max(0.01, no_ask - 0.02),
+        no_bid=max(0.01, no_ask - 0.02) if no_bid is None else no_bid,
         no_ask=no_ask,
     )
     return MarketStateBuilder(contract=_contract()).from_tick_and_book(
@@ -63,7 +72,7 @@ def test_feature_builder_detects_velocity_away_and_expansion_regime() -> None:
     assert features.stabilization_regime is False
 
 
-def test_expansion_regime_causes_momentum_side_add() -> None:
+def test_expansion_regime_pyramids_momentum_when_hedge_is_not_cheap() -> None:
     strategy = VolatilityInventoryStrategy(
         VolatilityInventoryConfig(
             min_atr_1m=5.0,
@@ -75,7 +84,7 @@ def test_expansion_regime_causes_momentum_side_add() -> None:
     for state in [_state(100_000.0, 0), _state(99_980.0, 10), _state(99_930.0, 20)]:
         strategy.on_tick(state)
 
-    signal = strategy.on_tick(_state(99_820.0, 30, yes_ask=0.22, no_ask=0.78))
+    signal = strategy.on_tick(_state(99_820.0, 30, yes_ask=0.34, no_ask=0.78))
 
     assert signal.side == "long_below"
     assert signal.reason == "expansion momentum pyramid"
@@ -83,30 +92,125 @@ def test_expansion_regime_causes_momentum_side_add() -> None:
     assert signal.features["expansion_regime"] is True
 
 
-def test_stabilization_after_expansion_causes_crushed_side_add() -> None:
+def test_expansion_adds_cheap_hedge_without_waiting_for_stabilization() -> None:
     strategy = VolatilityInventoryStrategy(
         VolatilityInventoryConfig(
             min_atr_1m=5.0,
             expansion_velocity_threshold=2.0,
-            slowdown_threshold=1.0,
             base_notional=10.0,
             max_notional_per_add=200.0,
+            hedge_entry_threshold=0.30,
         )
     )
     for state in [
         _state(100_000.0, 0),
         _state(99_970.0, 10),
-        _state(99_880.0, 20, yes_ask=0.30, no_ask=0.70),
-        _state(99_780.0, 30, yes_ask=0.20, no_ask=0.82),
+        _state(99_880.0, 20, yes_ask=0.32, no_ask=0.70),
     ]:
         strategy.on_tick(state)
 
-    signal = strategy.on_tick(_state(99_790.0, 40, yes_ask=0.18, no_ask=0.84))
+    signal = strategy.on_tick(_state(99_740.0, 30, yes_ask=0.24, no_ask=0.82))
 
     assert signal.side == "long_above"
-    assert signal.reason == "stabilization crushed-side accumulation"
-    assert signal.features["stabilization_regime"] is True
+    assert signal.reason == "expansion cheap hedge accumulation"
+    assert signal.features["expansion_regime"] is True
+    assert signal.features["stabilization_regime"] is False
     assert signal.target_notional > 0
+
+
+def test_expansion_skips_expensive_momentum_and_waits_for_cheap_hedge() -> None:
+    strategy = VolatilityInventoryStrategy(
+        VolatilityInventoryConfig(
+            min_atr_1m=5.0,
+            expansion_velocity_threshold=2.0,
+            base_notional=10.0,
+            max_momentum_entry_price=0.85,
+            hedge_entry_threshold=0.30,
+        )
+    )
+    for state in [_state(100_000.0, 0), _state(99_970.0, 10), _state(99_900.0, 20)]:
+        strategy.on_tick(state)
+
+    signal = strategy.on_tick(_state(99_760.0, 30, yes_ask=0.34, no_ask=0.88))
+
+    assert signal.side == "none"
+    assert signal.reason == "expansion gates blocked: momentum too expensive, hedge not cheap"
+    assert signal.target_notional == 0.0
+
+
+def test_hedge_sizing_scales_up_as_contract_gets_cheaper() -> None:
+    base_config = dict(
+        min_atr_1m=5.0,
+        expansion_velocity_threshold=2.0,
+        base_notional=10.0,
+        max_notional_per_add=500.0,
+        hedge_entry_threshold=0.30,
+    )
+    normal = VolatilityInventoryStrategy(VolatilityInventoryConfig(**base_config))
+    very_cheap = VolatilityInventoryStrategy(VolatilityInventoryConfig(**base_config))
+    prefix = [_state(100_000.0, 0), _state(99_970.0, 10), _state(99_900.0, 20)]
+    for strategy in (normal, very_cheap):
+        for state in prefix:
+            strategy.on_tick(state)
+
+    normal_signal = normal.on_tick(_state(99_760.0, 30, yes_ask=0.28, no_ask=0.82))
+    very_cheap_signal = very_cheap.on_tick(_state(99_760.0, 30, yes_ask=0.14, no_ask=0.82))
+
+    assert normal_signal.side == "long_above"
+    assert very_cheap_signal.side == "long_above"
+    assert very_cheap_signal.target_notional > normal_signal.target_notional
+    assert very_cheap_signal.estimated_shares == pytest.approx(very_cheap_signal.target_notional / 0.14)
+    assert very_cheap_signal.estimated_shares > normal_signal.estimated_shares
+
+
+class RejectingExecutor:
+    def execute(self, state, decision):
+        return None
+
+
+class AcceptingExecutor:
+    def execute(self, state, decision):
+        if not decision.allowed or decision.entry_price is None:
+            return None
+        return PaperFill(
+            strategy=decision.signal.strategy,
+            market_ticker=state.contract.ticker,
+            side=decision.side,
+            entry_price=decision.entry_price,
+            notional=decision.size_dollars,
+            contracts=decision.size_dollars / decision.entry_price,
+            ts=state.tick.ts,
+        )
+
+
+def test_inventory_updates_only_after_confirmed_paper_fill() -> None:
+    rejecting = VolatilityInventoryStrategy(
+        VolatilityInventoryConfig(min_atr_1m=5.0, expansion_velocity_threshold=2.0, base_notional=10.0)
+    )
+    accepting = VolatilityInventoryStrategy(
+        VolatilityInventoryConfig(min_atr_1m=5.0, expansion_velocity_threshold=2.0, base_notional=10.0)
+    )
+    states = [_state(100_000.0, 0), _state(99_970.0, 10), _state(99_900.0, 20), _state(99_760.0, 30, yes_ask=0.20, no_ask=0.82)]
+
+    reject_pipeline = BotPipeline(
+        strategies=[rejecting],
+        risk_manager=RiskManager(RiskLimits(base_size_dollars=1.0, max_position_dollars=500.0, max_open_positions=10)),
+        executor=RejectingExecutor(),
+    )
+    accept_pipeline = BotPipeline(
+        strategies=[accepting],
+        risk_manager=RiskManager(RiskLimits(base_size_dollars=1.0, max_position_dollars=500.0, max_open_positions=10)),
+        executor=AcceptingExecutor(),
+    )
+    for state in states:
+        reject_pipeline.on_state(state)
+        accept_pipeline.on_state(state)
+
+    rejected_position = rejecting.position_history[-1]
+    accepted_position = accepting.position_history[-1]
+    assert rejected_position.above_qty == 0.0
+    assert rejected_position.below_qty == 0.0
+    assert accepted_position.above_qty > 0.0 or accepted_position.below_qty > 0.0
 
 
 def test_low_atr_flat_market_produces_no_or_tiny_add() -> None:
@@ -131,13 +235,13 @@ def test_sizing_uses_notional_divided_by_price_not_fixed_shares() -> None:
     )
     for state in [_state(100_000.0, 0), _state(99_970.0, 10), _state(99_900.0, 20)]:
         strategy.on_tick(state)
-    state = _state(99_760.0, 30, yes_ask=0.20, no_ask=0.80)
+    state = _state(99_760.0, 30, yes_ask=0.18, no_ask=0.80)
     signal = strategy.on_tick(state)
 
     assert signal.target_notional > 20.0
-    assert signal.estimated_shares == pytest.approx(signal.target_notional / 0.80)
+    assert signal.estimated_shares == pytest.approx(signal.target_notional / 0.18)
 
-    decision = RiskManager(RiskLimits(base_size_dollars=1.0, max_position_dollars=500.0)).evaluate(state, signal)
+    decision = RiskManager(RiskLimits(base_size_dollars=1.0, max_position_dollars=500.0, max_spread=0.40)).evaluate(state, signal)
     assert decision.allowed is True
     assert decision.size_dollars == pytest.approx(signal.target_notional)
 
