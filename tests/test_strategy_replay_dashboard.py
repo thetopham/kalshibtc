@@ -129,6 +129,32 @@ def test_strategy_runs_dashboard_scans_comparison_payload_and_ignores_incomplete
     assert detail["fills"][0]["notional"] == 25.0
 
 
+def test_strategy_runs_overview_does_not_open_each_results_db_for_blockers(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "simple_directional" / "run-a"
+    run_dir.mkdir(parents=True)
+    (run_dir / "config.toml").write_text('strategy = "simple_directional"\nrun_id = "run-a"\n')
+    (run_dir / "metrics.json").write_text(json.dumps({
+        "strategy": "simple_directional",
+        "run_id": "run-a",
+        "snapshots": 3,
+        "signals": 2,
+        "fills": 1,
+    }))
+    # The overview page should be metadata-only. It must not open every
+    # results.sqlite3 just to compute blocker counts, because that makes the
+    # /strategies dashboard path scale with the number and size of old runs.
+    (run_dir / "results.sqlite3").write_text("not a sqlite database")
+
+    data = dashboard.collect_strategy_runs_dashboard_data(runs_dir=runs_dir)
+
+    assert len(data["runs"]) == 1
+    assert data["runs"][0]["run_id"] == "run-a"
+    assert data["runs"][0]["blockers"] == {}
+    assert data["ignored_runs"] == []
+
+
+
 def test_strategy_runs_dashboard_html_has_comparison_and_drilldown_landmarks(tmp_path: Path) -> None:
     data = {
         "title": "Kalshi BTC Strategy Runs",

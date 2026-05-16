@@ -7,12 +7,14 @@ import shutil
 import sqlite3
 import subprocess
 from collections import Counter, defaultdict
-from urllib.parse import unquote
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Lock
+from time import monotonic
 from typing import Any
+from urllib.parse import unquote
 
 from .config import RiskLimits
 from .datafeed.models import OrderBookSnapshot, Tick
@@ -60,16 +62,31 @@ LEGACY_HTML_KEYS = {
 }
 
 JsonDict = dict[str, Any]
+_ANALYTICS_CACHE_LOCK = Lock()
+_ANALYTICS_CACHE: dict[str, tuple[float, JsonDict]] = {}
 
 
-def collect_stream_dashboard_data(*, snapshot_db: str | Path | None = None, history_limit: int = 120) -> JsonDict:
+def collect_stream_dashboard_data(
+    *,
+    snapshot_db: str | Path | None = None,
+    history_limit: int = 120,
+    analytics_cache_ttl_seconds: float | None = None,
+) -> JsonDict:
     snapshot_path = resolve_snapshot_db(snapshot_db)
     rows = _latest_snapshot_rows(snapshot_path, limit=history_limit)
     latest = _stream_latest_from_row(rows[-1]) if rows else None
     history = [_history_point(row) for row in rows]
     complement = _complement_spread_payload(history)
-    complement_by_contract = _complement_by_contract_payload(snapshot_path)
-    temporal_basis_compression = _temporal_basis_compression_payload(snapshot_path)
+    complement_by_contract = _analytics_payload(
+        f"complement-by-contract:{snapshot_path}:200",
+        ttl_seconds=analytics_cache_ttl_seconds,
+        loader=lambda: _complement_by_contract_payload(snapshot_path),
+    )
+    temporal_basis_compression = _analytics_payload(
+        f"temporal-basis-compression:{snapshot_path}:200",
+        ttl_seconds=analytics_cache_ttl_seconds,
+        loader=lambda: _temporal_basis_compression_payload(snapshot_path),
+    )
     return {
         "title": STREAM_TITLE,
         "mode": "paper/research/read-only",
@@ -88,11 +105,25 @@ def collect_stream_dashboard_data(*, snapshot_db: str | Path | None = None, hist
     }
 
 
+def _analytics_payload(cache_key: str, *, ttl_seconds: float | None, loader: Callable[[], JsonDict]) -> JsonDict:
+    if ttl_seconds is None or ttl_seconds <= 0:
+        return loader()
+    now = monotonic()
+    with _ANALYTICS_CACHE_LOCK:
+        cached = _ANALYTICS_CACHE.get(cache_key)
+        if cached is not None and now - cached[0] < ttl_seconds:
+            return cached[1]
+        data = loader()
+        _ANALYTICS_CACHE[cache_key] = (monotonic(), data)
+        return data
+
+
 def collect_strategy_runs_dashboard_data(
     *,
     runs_dir: str | Path | None = None,
     max_runs_per_strategy: int = 25,
     max_total_runs: int = 200,
+    include_blockers: bool = False,
 ) -> JsonDict:
     runs_path = resolve_runs_dir(runs_dir)
     runs: list[JsonDict] = []
@@ -104,7 +135,7 @@ def collect_strategy_runs_dashboard_data(
                 if len(runs) >= max_total_runs:
                     break
                 try:
-                    run = _run_summary_from_dir(run_dir)
+                    run = _run_summary_from_dir(run_dir, include_blockers=include_blockers)
                 except (OSError, json.JSONDecodeError, ValueError) as exc:
                     ignored.append({"strategy": strategy_dir.name, "run_id": run_dir.name, "reason": str(exc)})
                     continue
@@ -128,6 +159,8 @@ def collect_strategy_run_detail_data(*, runs_dir: str | Path | None = None, stra
     runs_path = resolve_runs_dir(runs_dir)
     run_dir = _run_dir_for_route(runs_path=runs_path, strategy=strategy, run_id=run_id)
     run = _run_summary_from_dir(run_dir)
+    results_db = run_dir / "results.sqlite3"
+    phase_summary = _volatility_hedge_phase_summary(results_db)
     return {
         "title": STRATEGY_RUN_TITLE,
         "api_path": f"/api/strategies/{_url_component(strategy)}/{_url_component(run_id)}",
@@ -148,6 +181,7 @@ def collect_strategy_run_detail_data(*, runs_dir: str | Path | None = None, stra
         "inventory_vol_regime_research_metrics": _read_result_rows(run_dir / "results.sqlite3", "inventory_vol_regime_research_metrics", limit=200),
         "volatility_hedge_positions": _read_result_rows(run_dir / "results.sqlite3", "volatility_hedge_positions", limit=200),
         "volatility_hedge_events": _read_result_rows(run_dir / "results.sqlite3", "volatility_hedge_events", limit=120),
+        **phase_summary,
     }
 
 
@@ -234,16 +268,28 @@ def render_strategy_run_detail_html(data: Mapping[str, Any]) -> str:
     )
     volatility_hedge_rows = "".join(
         "<tr>"
-        f"<td>{_h(row.get('market_ticker'))}</td><td>{_fmt(row.get('up_qty'))}</td><td>{_fmt(row.get('up_avg_entry'))}</td>"
+        f"<td>{_h(row.get('market_ticker'))}</td><td>{_h(row.get('mode'))}</td><td>{_fmt(row.get('up_qty'))}</td><td>{_fmt(row.get('up_avg_entry'))}</td>"
         f"<td>{_fmt(row.get('down_qty'))}</td><td>{_fmt(row.get('down_avg_entry'))}</td><td>{_fmt(row.get('paired_qty'))}</td>"
-        f"<td>{_fmt(row.get('paired_cost'))}</td><td>{_fmt(row.get('edge'))}</td><td>{_fmt(row.get('locked_edge_dollars'))}</td>"
-        f"<td>{_fmt(row.get('imbalance_ratio'))}</td>"
+        f"<td>{_fmt(row.get('paired_cost'))}</td><td>{_fmt(row.get('locked_edge_dollars'))}</td><td>{_fmt(row.get('imbalance_ratio'))}</td>"
+        f"<td>{_h(row.get('larger_side'))}</td><td>{_fmt(row.get('repair_qty_needed'))}</td><td>{_fmt(row.get('settlement_EV'))}</td>"
+        f"<td>{_fmt(row.get('worst_case_pnl'))}</td><td>{_fmt(row.get('residual_up_qty'))}/{_fmt(row.get('residual_down_qty'))}</td>"
         "</tr>"
         for row in data.get("volatility_hedge_positions", [])
     )
     volatility_hedge_event_rows = "".join(
         f"<tr><td>{_h(row.get('ts'))}</td><td>{_h(row.get('event_type'))}</td><td>{_h(row.get('side'))}</td><td>{_fmt(row.get('price'))}</td><td>{_fmt(row.get('qty'))}</td><td>{_fmt(row.get('projected_paired_cost'))}</td><td>{_fmt(row.get('current_paired_cost'))}</td><td>{_fmt(row.get('slope'))}</td><td>{_fmt(row.get('atr'))}</td><td>{_fmt(row.get('distance_from_strike'))}</td><td>{_h(row.get('reason'))}</td></tr>"
         for row in data.get("volatility_hedge_events", [])[:200]
+    )
+    phase_counts = (data.get("volatility_hedge_phase_counts") if isinstance(data.get("volatility_hedge_phase_counts"), Mapping) else {}) or {}
+    fills_by_phase = (data.get("volatility_hedge_fills_by_phase") if isinstance(data.get("volatility_hedge_fills_by_phase"), Mapping) else {}) or {}
+    rejections_by_phase = (data.get("volatility_hedge_rejections_by_phase") if isinstance(data.get("volatility_hedge_rejections_by_phase"), Mapping) else {}) or {}
+    phase_rows = "".join(
+        f"<tr><td>{_h(phase)}</td><td>{_fmt(count)}</td><td>{_fmt(fills_by_phase.get(phase, 0))}</td><td>{_fmt(rejections_by_phase.get(phase, 0))}</td></tr>"
+        for phase, count in phase_counts.items()
+    )
+    current_phase_rows = "".join(
+        f"<tr><td>{_h(market)}</td><td>{_h(phase)}</td></tr>"
+        for market, phase in (data.get("volatility_hedge_current_phase_by_market") or {}).items()
     )
     body = f"""
     <p class="boundary">{_h(data.get('boundary'))}</p>
@@ -263,7 +309,8 @@ def render_strategy_run_detail_html(data: Mapping[str, Any]) -> str:
     <section><h2>Volatility overlay</h2><table id="inventory-research-metrics"><tbody>{inventory_research_rows}</tbody></table></section>
     <section><h2>Per-side inventory ladder</h2><p class="muted">Above/Below quantities, averages, reductions, exposure over time, and volatility-add events are persisted in inventory_vol_positions/events and inventory_vol_regime_positions/events.</p></section>
     <section><h2>Rejected seed attempts</h2><table id="rejected-seed-attempts-table"><thead><tr><th>ts</th><th>market</th><th>side</th><th>ask</th><th>reason</th></tr></thead><tbody>{rejected_seed_rows}</tbody></table></section>
-    <section><h2>VolatilityHedgeStrategy paired cost</h2><p class="muted">Paper-only synthetic hedge. Primary metric: UP avg + DOWN avg. Adds are rejected unless projected paired cost improves, ideally below 0.98 after estimated slippage/fees.</p><table id="volatility-hedge-positions-table"><thead><tr><th>market</th><th>UP qty</th><th>UP avg</th><th>DOWN qty</th><th>DOWN avg</th><th>paired qty</th><th>paired cost</th><th>edge</th><th>locked edge $</th><th>imbalance ratio</th></tr></thead><tbody>{volatility_hedge_rows}</tbody></table></section>
+    <section><h2>VolatilityHedge lifecycle phases</h2><table id="volatility-hedge-phase-counts"><thead><tr><th>phase</th><th>events</th><th>fills</th><th>rejections</th></tr></thead><tbody>{phase_rows}</tbody></table><h3>Current phase per active market</h3><table id="volatility-hedge-current-phase"><tbody>{current_phase_rows}</tbody></table></section>
+    <section><h2>VolatilityHedgeStrategy paired cost</h2><p class="muted">Paper-only synthetic hedge. Paired cost identifies hedge opportunity; settlement EV and worst-case PnL decide whether total inventory is worth holding. Balancer targets an evenish hedge with a healthy 3:2 lean.</p><table id="volatility-hedge-positions-table"><thead><tr><th>market</th><th>mode</th><th>UP qty</th><th>UP avg</th><th>DOWN qty</th><th>DOWN avg</th><th>paired qty</th><th>paired cost</th><th>locked edge $</th><th>imbalance ratio</th><th>larger side</th><th>repair qty needed</th><th>settlement EV</th><th>worst case PnL</th><th>residual UP/DOWN</th></tr></thead><tbody>{volatility_hedge_rows}</tbody></table></section>
     <section><h2>VolatilityHedgeStrategy decisions</h2><table id="volatility-hedge-events-table"><thead><tr><th>ts</th><th>type</th><th>side</th><th>price</th><th>qty</th><th>projected paired cost</th><th>current paired cost</th><th>slope</th><th>ATR</th><th>distance</th><th>reason</th></tr></thead><tbody>{volatility_hedge_event_rows}</tbody></table></section>
     <section><h2>Config</h2><pre>{_h(data.get('config_text'))}</pre></section>
     """
@@ -533,7 +580,7 @@ def _run_dir_for_route(*, runs_path: Path, strategy: str, run_id: str) -> Path:
     return normal
 
 
-def _run_summary_from_dir(run_dir: Path) -> JsonDict:
+def _run_summary_from_dir(run_dir: Path, *, include_blockers: bool = True) -> JsonDict:
     metrics_path = run_dir / "metrics.json"
     config_path = run_dir / "config.toml"
     results_path = run_dir / "results.sqlite3"
@@ -545,6 +592,8 @@ def _run_summary_from_dir(run_dir: Path) -> JsonDict:
     institutional = metrics.get("institutional_metrics")
     if not isinstance(institutional, Mapping):
         institutional = {}
+    metrics_blockers = metrics.get("blockers")
+    blockers = _result_blockers(results_path) if include_blockers else dict(metrics_blockers) if isinstance(metrics_blockers, Mapping) else {}
     strategy = str(metrics.get("strategy") or run_dir.parent.name)
     run_id = str(metrics.get("run_id") or run_dir.name)
     summary = {
@@ -558,7 +607,7 @@ def _run_summary_from_dir(run_dir: Path) -> JsonDict:
         "settled_positions": metrics.get("settled_positions", 0),
         "max_open_positions": metrics.get("max_open_positions"),
         "mode": metrics.get("mode"),
-        "blockers": _result_blockers(results_path),
+        "blockers": blockers,
         "run_dir": str(run_dir),
         "results_db": str(results_path),
         "href": f"/strategy/{_url_component(strategy)}/{_url_component(run_id)}",
@@ -613,6 +662,57 @@ def _result_blockers(path: Path) -> dict[str, int]:
     finally:
         conn.close()
     return dict(blockers)
+
+
+def _volatility_hedge_phase_summary(path: Path) -> JsonDict:
+    empty: JsonDict = {
+        "volatility_hedge_phase_counts": {},
+        "volatility_hedge_fills_by_phase": {},
+        "volatility_hedge_rejections_by_phase": {},
+        "volatility_hedge_current_phase_by_market": {},
+    }
+    if not path.exists():
+        return empty
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
+    try:
+        conn.execute("PRAGMA query_only=ON")
+        if not _column_exists(conn, "volatility_hedge_events", "lifecycle_phase"):
+            return empty
+        return {
+            "volatility_hedge_phase_counts": _group_count_sql(conn, "volatility_hedge_events", "lifecycle_phase"),
+            "volatility_hedge_fills_by_phase": _group_count_sql(conn, "volatility_hedge_events", "lifecycle_phase", where="event_type = 'fill'"),
+            "volatility_hedge_rejections_by_phase": _group_count_sql(conn, "volatility_hedge_events", "lifecycle_phase", where="event_type = 'decision'"),
+            "volatility_hedge_current_phase_by_market": _current_volatility_phase_by_market(conn),
+        }
+    finally:
+        conn.close()
+
+
+def _group_count_sql(conn: sqlite3.Connection, table: str, column: str, *, where: str | None = None) -> dict[str, int]:
+    if not _column_exists(conn, table, column):
+        return {}
+    sql = f"SELECT COALESCE({column}, 'UNKNOWN') AS bucket, COUNT(*) FROM {table}"
+    if where:
+        sql += f" WHERE {where}"
+    sql += f" GROUP BY {column}"
+    return {str(row[0]): int(row[1]) for row in conn.execute(sql).fetchall()}
+
+
+def _current_volatility_phase_by_market(conn: sqlite3.Connection) -> dict[str, str]:
+    if not _column_exists(conn, "volatility_hedge_positions", "lifecycle_phase"):
+        return {}
+    rows = conn.execute(
+        """
+        SELECT market_ticker, lifecycle_phase
+        FROM volatility_hedge_positions
+        WHERE lifecycle_phase IS NOT NULL
+        ORDER BY updated_at DESC
+        """
+    ).fetchall()
+    current: dict[str, str] = {}
+    for market, phase in rows:
+        current.setdefault(str(market), str(phase))
+    return current
 
 
 def _read_result_rows(path: Path, table: str, *, limit: int) -> list[JsonDict]:
@@ -1184,10 +1284,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
     results_db: Path
     runs_dir: Path
     history_limit: int
+    _cache_lock = Lock()
+    _payload_cache: dict[str, tuple[float, JsonDict]] = {}
 
     def do_GET(self) -> None:  # noqa: N802
         try:
-            if self.path in {"/", "/stream"}:
+            if self.path == "/health":
+                self._send_json(
+                    {
+                        "ok": True,
+                        "service": "kalshi-btc15m-1s-dashboard",
+                        "snapshot_db": str(self.snapshot_db),
+                        "results_db": str(self.results_db),
+                        "runs_dir": str(self.runs_dir),
+                    }
+                )
+            elif self.path == "/":
+                self._send_html(render_status_dashboard_html(self._status_data()))
+            elif self.path == "/stream":
                 self._send_html(render_stream_dashboard_html(self._stream_data()))
             elif self.path == "/status":
                 self._send_html(render_status_dashboard_html(self._status_data()))
@@ -1225,6 +1339,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     strategy=unquote(parts[0]),
                     run_id=unquote(parts[1]),
                 )
+                self._clear_cache()
                 self._send_json(result)
             else:
                 self.send_error(404)
@@ -1241,13 +1356,43 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return
 
     def _stream_data(self) -> JsonDict:
-        return collect_stream_dashboard_data(snapshot_db=self.snapshot_db, history_limit=self.history_limit)
+        return self._cached_data(
+            f"stream:{self.snapshot_db}:{self.history_limit}",
+            ttl_seconds=1.0,
+            loader=lambda: collect_stream_dashboard_data(
+                snapshot_db=self.snapshot_db,
+                history_limit=self.history_limit,
+                analytics_cache_ttl_seconds=300.0,
+            ),
+        )
 
     def _status_data(self) -> JsonDict:
-        return collect_status_dashboard_data(snapshot_db=self.snapshot_db, results_db=self.results_db)
+        return self._cached_data(
+            f"status:{self.snapshot_db}:{self.results_db}",
+            ttl_seconds=1.0,
+            loader=lambda: collect_status_dashboard_data(snapshot_db=self.snapshot_db, results_db=self.results_db),
+        )
 
     def _strategy_runs_data(self) -> JsonDict:
-        return collect_strategy_runs_dashboard_data(runs_dir=self.runs_dir)
+        return self._cached_data(
+            f"strategies:{self.runs_dir}",
+            ttl_seconds=15.0,
+            loader=lambda: collect_strategy_runs_dashboard_data(runs_dir=self.runs_dir),
+        )
+
+    def _cached_data(self, cache_key: str, *, ttl_seconds: float, loader: Callable[[], JsonDict]) -> JsonDict:
+        now = monotonic()
+        with self._cache_lock:
+            cached = self._payload_cache.get(cache_key)
+            if cached is not None and now - cached[0] < ttl_seconds:
+                return cached[1]
+            data = loader()
+            self._payload_cache[cache_key] = (monotonic(), data)
+            return data
+
+    def _clear_cache(self) -> None:
+        with self._cache_lock:
+            self._payload_cache.clear()
 
     def _strategy_detail_from_path(self, *, html_path: bool) -> JsonDict:
         prefix = "/strategy/" if html_path else "/api/strategies/"

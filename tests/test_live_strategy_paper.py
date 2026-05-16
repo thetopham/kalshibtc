@@ -129,6 +129,51 @@ def test_paper_executor_cli_accepts_all_strategies_and_live_multi_strategy_mode(
     assert (runs_dir / "live" / "no_trade_baseline" / "results.sqlite3").is_file()
 
 
+def test_volatility_hedge_live_config_writes_balancer_and_lifecycle_knobs(tmp_path: Path) -> None:
+    snapshot_db = tmp_path / "feed.sqlite3"
+    runs_dir = tmp_path / "runs"
+    _write_live_snapshot_db(snapshot_db)
+
+    summary = run_live_strategy_paper_once(
+        snapshot_db=snapshot_db,
+        runs_dir=runs_dir,
+        strategies=["volatility_hedge"],
+        limit=10,
+        no_official_settlement=True,
+    )
+
+    assert summary.strategies[0]["strategy"] == "volatility_hedge"
+    config_text = (runs_dir / "live" / "volatility_hedge" / "config.toml").read_text()
+    for knob in [
+        "target_lean_ratio",
+        "soft_imbalance_ratio",
+        "repair_imbalance_ratio",
+        "hard_imbalance_ratio",
+        "emergency_imbalance_ratio",
+        "require_seed_pair_cost_below",
+        "max_initial_ask_sum",
+        "allow_seed_loss",
+        "base_add_notional",
+        "repair_add_notional",
+        "max_contracts_per_add",
+        "max_notional_per_market",
+        "max_notional_per_side",
+        "max_worst_case_loss_per_market",
+        "max_settlement_ev_worsening",
+        "total_contract_seconds",
+        "observe_seconds",
+        "early_seed_until_seconds",
+        "main_harvest_until_seconds",
+        "repair_protect_until_seconds",
+        "stop_new_seed_seconds_before_expiry",
+        "stop_normal_add_seconds_before_expiry",
+    ]:
+        assert f"{knob} =" in config_text
+    assert "require_seed_pair_cost_below = 1.04" in config_text
+    assert "max_initial_ask_sum = 1.03" in config_text
+    assert "allow_seed_loss = true" in config_text
+
+
 def test_live_strategy_metrics_are_cumulative_across_loop_passes(tmp_path: Path) -> None:
     snapshot_db = tmp_path / "feed" / "kalshi-btc-1s.sqlite3"
     snapshot_db.parent.mkdir()

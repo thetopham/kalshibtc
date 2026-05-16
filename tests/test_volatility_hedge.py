@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-import sqlite3
+from typing import Any
 
-from kalshibtc.execution.volatility_hedge import VolatilityHedgeConfig, VolatilityHedgeManager, VolatilityHedgePosition
+from kalshibtc.execution.volatility_hedge import (
+    VolatilityHedgeConfig,
+    VolatilityHedgeManager,
+    VolatilityHedgePosition,
+)
 from kalshibtc.strategy.registry import create_strategy, strategy_names
 from kalshibtc.volatility_hedge_paper import VolatilityHedgePaperTrader
 
@@ -15,6 +20,63 @@ def _ts(offset: int = 0) -> datetime:
 
 def _manager(**kwargs: float) -> VolatilityHedgeManager:
     return VolatilityHedgeManager(VolatilityHedgeConfig(**kwargs))
+
+
+def _snapshot_db(path: Path, *, rows: list[dict[str, Any]]) -> None:
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE realtime_snapshots_1s (
+                ts TEXT NOT NULL,
+                market_ticker TEXT NOT NULL,
+                market_open_time TEXT,
+                market_close_time TEXT NOT NULL,
+                btc_price REAL NOT NULL,
+                strike REAL NOT NULL,
+                target_price REAL,
+                distance_from_strike REAL,
+                seconds_to_close REAL,
+                btc_velocity_30s REAL,
+                slope_30s REAL,
+                yes_bid REAL,
+                yes_ask REAL,
+                no_bid REAL,
+                no_ask REAL,
+                raw_json TEXT
+            )
+            """
+        )
+        for row in rows:
+            values = {
+                "market_open_time": _ts(-900).isoformat(),
+                "target_price": row.get("strike", 100_000.0),
+                "distance_from_strike": float(row.get("btc_price", 0.0)) - float(row.get("strike", 100_000.0)),
+                "seconds_to_close": 60.0,
+                "btc_velocity_30s": row.get("slope_30s", row.get("btc_velocity_30s", 0.0)),
+                "slope_30s": row.get("btc_velocity_30s", row.get("slope_30s", 0.0)),
+                "yes_bid": 0.52,
+                "yes_ask": 0.54,
+                "no_bid": 0.44,
+                "no_ask": 0.46,
+                "raw_json": "{}",
+                **row,
+            }
+            conn.execute(
+                """
+                INSERT INTO realtime_snapshots_1s (
+                    ts, market_ticker, market_open_time, market_close_time,
+                    btc_price, strike, target_price, distance_from_strike,
+                    seconds_to_close, btc_velocity_30s, slope_30s,
+                    yes_bid, yes_ask, no_bid, no_ask, raw_json
+                ) VALUES (
+                    :ts, :market_ticker, :market_open_time, :market_close_time,
+                    :btc_price, :strike, :target_price, :distance_from_strike,
+                    :seconds_to_close, :btc_velocity_30s, :slope_30s,
+                    :yes_bid, :yes_ask, :no_bid, :no_ask, :raw_json
+                )
+                """,
+                values,
+            )
 
 
 def test_paired_cost_edge_and_equal_settlement_guarantee() -> None:
@@ -153,6 +215,50 @@ def test_paper_trader_initializes_only_volatility_hedge_tables(tmp_path: Path) -
     assert "volatility_hedge_positions" in tables
     assert "volatility_hedge_events" in tables
     assert "orders" not in tables
+
+
+def test_paper_trader_skips_invalid_event_key_without_position_or_fill(tmp_path: Path) -> None:
+    snapshot_db = tmp_path / "snapshots.sqlite3"
+    results_db = tmp_path / "results.sqlite3"
+    _snapshot_db(
+        snapshot_db,
+        rows=[
+            {
+                "ts": _ts().isoformat(),
+                "market_ticker": "KXBTC15M-26MAY161130-30",
+                "market_close_time": _ts(900).isoformat(),
+                "btc_price": 100_020.0,
+                "strike": 15.0,
+                "target_price": 15.0,
+                "seconds_to_close": 900.0,
+                "btc_velocity_30s": 1.5,
+            }
+        ],
+    )
+
+    trader = VolatilityHedgePaperTrader(snapshot_db=snapshot_db, results_db=results_db)
+    summary = trader.run_once(limit=10)
+
+    assert summary["snapshots_processed"] == 1
+    assert summary["batch_fills"] == 0
+    assert summary["volatility_hedge_positions"] == 0
+    with sqlite3.connect(results_db) as conn:
+        conn.row_factory = sqlite3.Row
+        events = conn.execute("SELECT * FROM volatility_hedge_events").fetchall()
+        positions = conn.execute("SELECT COUNT(*) FROM volatility_hedge_positions").fetchone()[0]
+        fills = conn.execute(
+            "SELECT COUNT(*) FROM volatility_hedge_events WHERE event_type = 'fill'"
+        ).fetchone()[0]
+        paper_trades = conn.execute("SELECT COUNT(*) FROM paper_trades").fetchone()[0]
+
+    assert positions == 0
+    assert fills == 0
+    assert paper_trades == 0
+    assert len(events) == 1
+    assert events[0]["reason"] in {"invalid_event_key", "skipped_invalid_event_key"}
+    assert events[0]["side"] == "NONE"
+    assert events[0]["qty"] == 0
+    assert events[0]["allowed"] == 0
 
 
 def test_paper_trader_reloads_existing_positions_and_reports_cumulative_metrics(tmp_path: Path) -> None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +16,7 @@ from .inventory_vol_rebalance_paper import InventoryVolRebalancePaperTrader
 from .inventory_vol_regime_paper import InventoryVolRegimePaperTrader
 from .runtime_paths import resolve_feed_db, resolve_runs_dir
 from .strategy.registry import create_strategy
-from .volatility_hedge_paper import VolatilityHedgePaperTrader
+from .volatility_hedge_paper import VolatilityHedgeConfig, VolatilityHedgePaperTrader
 
 
 @dataclass(frozen=True)
@@ -160,7 +160,8 @@ def run_live_strategy_paper_once(
             summaries.append(payload)
             continue
         if name == "volatility_hedge":
-            trader = VolatilityHedgePaperTrader(snapshot_db=snapshot_path, results_db=results_db)
+            hedge_config = VolatilityHedgeConfig()
+            trader = VolatilityHedgePaperTrader(snapshot_db=snapshot_path, results_db=results_db, config=hedge_config)
             hedge_payload = trader.run_once(limit=limit)
             payload = {
                 "mode": "live_paper",
@@ -179,7 +180,7 @@ def run_live_strategy_paper_once(
                 "fills": hedge_payload.get("fills", 0),
                 **hedge_payload,
             }
-            _write_live_config(run_dir / "config.toml", strategy=name, snapshot_db=snapshot_path, results_db=results_db)
+            _write_live_config(run_dir / "config.toml", strategy=name, snapshot_db=snapshot_path, results_db=results_db, volatility_hedge_config=hedge_config)
             (run_dir / "metrics.json").write_text(
                 json.dumps(payload, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
@@ -316,17 +317,28 @@ def _trade_status_count(conn: sqlite3.Connection, *, open_only: bool) -> int:
     return int(conn.execute("SELECT COUNT(*) FROM paper_trades WHERE UPPER(COALESCE(status, '')) <> 'OPEN'").fetchone()[0])
 
 
-def _write_live_config(path: Path, *, strategy: str, snapshot_db: Path, results_db: Path) -> None:
-    path.write_text(
-        "\n".join(
-            [
-                'mode = "live_paper"',
-                f'strategy = "{strategy}"',
-                'run_id = "live"',
-                f'snapshot_db = "{snapshot_db}"',
-                f'results_db = "{results_db}"',
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
+def _write_live_config(path: Path, *, strategy: str, snapshot_db: Path, results_db: Path, volatility_hedge_config: VolatilityHedgeConfig | None = None) -> None:
+    lines = [
+        'mode = "live_paper"',
+        f'strategy = "{strategy}"',
+        'run_id = "live"',
+        f'snapshot_db = "{snapshot_db}"',
+        f'results_db = "{results_db}"',
+        "",
+    ]
+    if volatility_hedge_config is not None:
+        lines.append("[volatility_hedge]")
+        for field in fields(VolatilityHedgeConfig):
+            value = getattr(volatility_hedge_config, field.name)
+            if isinstance(value, bool):
+                rendered = "true" if value else "false"
+            elif isinstance(value, str):
+                rendered = json.dumps(value)
+            elif value is None:
+                lines.append(f"# {field.name} = unset")
+                continue
+            else:
+                rendered = str(value)
+            lines.append(f"{field.name} = {rendered}")
+        lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
