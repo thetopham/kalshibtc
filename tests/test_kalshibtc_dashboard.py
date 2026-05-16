@@ -215,6 +215,14 @@ def test_stream_dashboard_uses_clean_1s_state_and_demotes_legacy_fields(tmp_path
     assert "data-refresh-ms=\"1000\"" in html
     assert "<canvas id=\"price-chart\"" in html
     assert "refreshCountdown" in html
+    assert "fetch('/api/stream'" in html
+    assert "location.reload" not in html
+    assert "updateStreamDashboard" in html
+    assert "id=\"decision-action\"" in html
+    assert "id=\"btc-price\"" in html
+    assert "id=\"market-ticker\"" in html
+    assert "id=\"yes-bid\"" in html
+    assert "id=\"raw-payload\"" in html
     assert "Distance from strike" in html
     assert "Copy API JSON" in html
     assert "Recent graph points" in html

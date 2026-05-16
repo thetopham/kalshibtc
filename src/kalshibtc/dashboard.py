@@ -124,37 +124,37 @@ def render_stream_dashboard_html(data: Mapping[str, Any]) -> str:
           <div>
             <p class="eyebrow">SimpleDirectionalStrategy · simulated/paper only</p>
             <h2>Execution Decision</h2>
-            <div class="decision-action">{_h(decision.get('action'))}</div>
-            <p>{_h(decision.get('reason'))}</p>
+            <div id="decision-action" class="decision-action">{_h(decision.get('action'))}</div>
+            <p id="decision-reason">{_h(decision.get('reason'))}</p>
           </div>
           <div class="decision-grid">
-            {_mini_metric('Size', _money(decision.get('size_dollars')), 'paper dollars')}
-            {_mini_metric('Confidence', _pct(decision.get('confidence')), 'strategy score')}
-            {_mini_metric('Blocked by', ', '.join(decision.get('blocked_by') or []) or 'none', 'risk gates')}
+            {_mini_metric('Size', _money(decision.get('size_dollars')), 'paper dollars', value_id='decision-size')}
+            {_mini_metric('Confidence', _pct(decision.get('confidence')), 'strategy score', value_id='decision-confidence')}
+            {_mini_metric('Blocked by', ', '.join(decision.get('blocked_by') or []) or 'none', 'risk gates', value_id='decision-blocked-by')}
           </div>
         </section>
         <section class="cards">
-          {_card('Recorder freshness', _h(stream.get('freshness', {}).get('status')), _h(stream.get('freshness', {}).get('age_seconds')) + 's')}
-          {_card('Latest BTC price', _money(latest.get('btc_price')), _h(latest.get('above_below_strike')))}
-          {_card('Distance from strike', _money(distance), f"strike {_money(latest.get('strike'))}")}
-          {_card('Seconds to close', _fmt(latest.get('seconds_to_close')), _h(latest.get('market_ticker')))}
+          {_card('Recorder freshness', _h(stream.get('freshness', {}).get('status')), _h(stream.get('freshness', {}).get('age_seconds')) + 's', value_id='recorder-freshness', note_id='recorder-age')}
+          {_card('Latest BTC price', _money(latest.get('btc_price')), _h(latest.get('above_below_strike')), value_id='btc-price', note_id='above-below-strike')}
+          {_card('Distance from strike', _money(distance), f"strike {_money(latest.get('strike'))}", value_id='distance-from-strike', note_id='strike-price')}
+          {_card('Seconds to close', _fmt(latest.get('seconds_to_close')), _h(latest.get('market_ticker')), value_id='seconds-to-close', note_id='market-ticker')}
         </section>
         <section class="split"><div><h2>YES / NO orderbook</h2>
           <table><tbody>
-            {_kv('YES bid', orderbook.get('yes_bid'))}{_kv('YES ask', orderbook.get('yes_ask'))}
-            {_kv('NO bid', orderbook.get('no_bid'))}{_kv('NO ask', orderbook.get('no_ask'))}
-            {_kv('spread', orderbook.get('spread'))}{_kv('status', orderbook.get('status'))}
+            {_kv('YES bid', orderbook.get('yes_bid'), value_id='yes-bid')}{_kv('YES ask', orderbook.get('yes_ask'), value_id='yes-ask')}
+            {_kv('NO bid', orderbook.get('no_bid'), value_id='no-bid')}{_kv('NO ask', orderbook.get('no_ask'), value_id='no-ask')}
+            {_kv('spread', orderbook.get('spread'), value_id='orderbook-spread')}{_kv('status', orderbook.get('status'), value_id='orderbook-status')}
           </tbody></table></div>
           <div><h2>Slopes</h2><table><tbody>
-            {_kv('slope_10s', slopes.get('slope_10s'))}{_kv('slope_30s', slopes.get('slope_30s'))}{_kv('slope_60s', slopes.get('slope_60s'))}
+            {_kv('slope_10s', slopes.get('slope_10s'), value_id='slope-10s')}{_kv('slope_30s', slopes.get('slope_30s'), value_id='slope-30s')}{_kv('slope_60s', slopes.get('slope_60s'), value_id='slope-60s')}
           </tbody></table></div>
         </section>
         <section><h2>Recent graph points</h2>
           <canvas id="price-chart" width="960" height="260" aria-label="BTC price versus strike chart"></canvas>
           <div id="stream-chart">Read-only chart source: /api/stream history</div>
-          <table><thead><tr><th>ts</th><th>BTC</th><th>target</th><th>sec close</th></tr></thead><tbody>{graph_rows}</tbody></table>
+          <table><thead><tr><th>ts</th><th>BTC</th><th>target</th><th>sec close</th></tr></thead><tbody id="graph-points-body">{graph_rows}</tbody></table>
         </section>
-        <section><h2>Raw payload</h2><button type="button" onclick="copyApiJson('/api/stream')">Copy API JSON</button><pre>{_h(json.dumps(_safe_raw_payload(latest.get('raw_payload')), indent=2, sort_keys=True))}</pre></section>
+        <section><h2>Raw payload</h2><button type="button" onclick="copyApiJson('/api/stream')">Copy API JSON</button><pre id="raw-payload">{_h(json.dumps(_safe_raw_payload(latest.get('raw_payload')), indent=2, sort_keys=True))}</pre></section>
         <script type="application/json" id="stream-history-data">{chart_points_json}</script>
         """
     return _page(
@@ -163,6 +163,7 @@ def render_stream_dashboard_html(data: Mapping[str, Any]) -> str:
         subheading=f"{_h(data.get('mode'))} | API {_h(data.get('api_path'))} | {_h(data.get('boundary'))}",
         body=body,
         refresh_ms=1000,
+        stream_api_path="/api/stream",
     )
 
 
@@ -656,35 +657,108 @@ def main_status(argv: list[str] | None = None) -> int:
     return main(list(args))
 
 
-def _page(*, title: str, heading: str, subheading: str, body: str, refresh_ms: int) -> str:
+def _page(*, title: str, heading: str, subheading: str, body: str, refresh_ms: int, stream_api_path: str | None = None) -> str:
+    refresh_js = _stream_refresh_js(stream_api_path) if stream_api_path else _reload_refresh_js()
     return f"""<!doctype html>
 <html data-refresh-ms="{int(refresh_ms)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{_h(title)}</title><style>
 :root{{color-scheme:dark;--bg:#07111f;--panel:#0f172a;--panel2:#111827;--line:#26364d;--text:#e6edf3;--muted:#94a3b8;--good:#22c55e;--bad:#ef4444;--warn:#fbbf24;--blue:#38bdf8}}*{{box-sizing:border-box}}body{{font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:radial-gradient(circle at top left,#123052,#07111f 42%);color:var(--text);margin:0;padding:24px}}header{{position:sticky;top:0;z-index:5;background:rgba(7,17,31,.92);backdrop-filter:blur(10px);border:1px solid var(--line);border-radius:16px;padding:16px 18px;margin-bottom:18px}}h1{{margin:0 0 6px;font-size:28px}}h2{{margin-top:0}}.muted,small{{color:var(--muted)}}section{{background:rgba(17,24,39,.92);border:1px solid var(--line);border-radius:16px;margin:16px 0;padding:16px;box-shadow:0 12px 28px rgba(0,0,0,.18)}}table{{border-collapse:collapse;width:100%;font-size:14px}}td,th{{border-bottom:1px solid var(--line);padding:8px;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;max-height:360px;overflow:auto;background:#020617;border:1px solid var(--line);border-radius:12px;padding:12px}}button{{background:#164e63;color:#ecfeff;border:1px solid #0891b2;border-radius:10px;padding:8px 10px;cursor:pointer}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}}.card{{background:linear-gradient(180deg,#0f172a,#0b1220);border:1px solid #334155;border-radius:14px;padding:14px}}.card strong{{color:#cbd5e1}}.card span{{display:block;font-size:24px;font-weight:800;margin:4px 0}}.boundary{{color:var(--warn);font-weight:700}}.split{{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}}.decision-hero{{display:grid;grid-template-columns:minmax(260px,1fr) minmax(260px,1fr);gap:18px;align-items:center;border-width:2px}}.decision-hero.buy-yes,.decision-hero.buy-no{{border-color:rgba(34,197,94,.65)}}.decision-hero.no-trade{{border-color:rgba(251,191,36,.65)}}.decision-action{{font-size:48px;font-weight:900;letter-spacing:-.04em}}.eyebrow{{text-transform:uppercase;letter-spacing:.12em;color:var(--muted);font-size:12px}}.decision-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}}.mini{{background:#020617;border:1px solid var(--line);border-radius:12px;padding:12px}}.mini b{{display:block;font-size:20px}}canvas{{width:100%;max-height:280px;background:#020617;border:1px solid var(--line);border-radius:12px}}.topline{{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}}
 </style></head><body><header><div class="topline"><div><h1>{_h(heading)}</h1><p class="muted">{subheading}</p></div><div class="muted">Auto-refresh in <span id="refreshCountdown">1.0</span>s</div></div></header>{body}<script>
 const refreshMs = Number(document.documentElement.dataset.refreshMs || 1000);
-let remaining = refreshMs;
-setInterval(() => {{ remaining -= 100; if (remaining <= 0) location.reload(); const el=document.getElementById('refreshCountdown'); if (el) el.textContent=(remaining/1000).toFixed(1); }}, 100);
 function copyApiJson(path){{ fetch(path).then(r=>r.text()).then(t=>navigator.clipboard && navigator.clipboard.writeText(t)); }}
 function drawLineChart(canvasId, dataId, xKey, yKeys){{ const c=document.getElementById(canvasId), d=document.getElementById(dataId); if(!c||!d) return; let rows=[]; try{{rows=JSON.parse(d.textContent)}}catch(e){{return}}; if(!rows.length) return; const ctx=c.getContext('2d'), w=c.width, h=c.height, pad=28; ctx.clearRect(0,0,w,h); const vals=[]; rows.forEach(r=>yKeys.forEach(k=>{{const v=Number(r[k]); if(Number.isFinite(v)) vals.push(v)}})); if(!vals.length) return; const min=Math.min(...vals), max=Math.max(...vals), span=(max-min)||1; const x=i=>pad+(w-pad*2)*(i/Math.max(1,rows.length-1)); const y=v=>h-pad-(h-pad*2)*((v-min)/span); ctx.strokeStyle='#334155'; ctx.beginPath(); ctx.moveTo(pad,pad); ctx.lineTo(pad,h-pad); ctx.lineTo(w-pad,h-pad); ctx.stroke(); yKeys.forEach((k,idx)=>{{ctx.strokeStyle=idx?'#fbbf24':'#38bdf8'; ctx.lineWidth=2; ctx.beginPath(); rows.forEach((r,i)=>{{const v=Number(r[k]); if(!Number.isFinite(v)) return; const xx=x(i), yy=y(v); if(i===0) ctx.moveTo(xx,yy); else ctx.lineTo(xx,yy);}}); ctx.stroke(); }}); }}
 drawLineChart('price-chart','stream-history-data','ts',['btc_price','target_price']);
 drawLineChart('equity-chart','equity-data','ts',['equity']);
+{refresh_js}
 </script></body></html>"""
 
 
-def _card(title: str, value: Any, note: Any = "") -> str:
-    return f"<div class=\"card\"><strong>{_h(title)}</strong><br><span>{_h(value)}</span><br><small>{_h(note)}</small></div>"
+def _card(title: str, value: Any, note: Any = "", *, value_id: str | None = None, note_id: str | None = None) -> str:
+    value_attr = f' id="{_h(value_id)}"' if value_id else ""
+    note_attr = f' id="{_h(note_id)}"' if note_id else ""
+    return f"<div class=\"card\"><strong>{_h(title)}</strong><br><span{value_attr}>{_h(value)}</span><br><small{note_attr}>{_h(note)}</small></div>"
 
 
-def _kv(key: str, value: Any) -> str:
-    return f"<tr><th>{_h(key)}</th><td>{_h(_fmt(value) if isinstance(value, float) else value)}</td></tr>"
+def _kv(key: str, value: Any, *, value_id: str | None = None) -> str:
+    value_attr = f' id="{_h(value_id)}"' if value_id else ""
+    return f"<tr><th>{_h(key)}</th><td{value_attr}>{_h(_fmt(value) if isinstance(value, float) else value)}</td></tr>"
 
 
 def _group_rows(rows: list[Mapping[str, Any]], *, label_key: str) -> str:
     return "".join(f"<tr><td>{_h(row.get(label_key))}</td><td>{row.get('count')}</td><td>{_fmt(row.get('realized_pnl'))}</td></tr>" for row in rows)
 
 
-def _mini_metric(label: str, value: Any, note: Any = "") -> str:
-    return f'<div class="mini"><span class="muted">{_h(label)}</span><b>{_h(value)}</b><small>{_h(note)}</small></div>'
+def _mini_metric(label: str, value: Any, note: Any = "", *, value_id: str | None = None) -> str:
+    value_attr = f' id="{_h(value_id)}"' if value_id else ""
+    return f'<div class="mini"><span class="muted">{_h(label)}</span><b{value_attr}>{_h(value)}</b><small>{_h(note)}</small></div>'
+
+
+def _reload_refresh_js() -> str:
+    return """
+let remaining = refreshMs;
+setInterval(() => { remaining -= 100; if (remaining <= 0) location.reload(); const el=document.getElementById('refreshCountdown'); if (el) el.textContent=(remaining/1000).toFixed(1); }, 100);
+"""
+
+
+def _stream_refresh_js(api_path: str | None) -> str:
+    api_value = (api_path or "/api/stream").replace("\\", "\\\\").replace("'", "\\'")
+    api = f"'{api_value}'"
+    return f"""
+let remaining = refreshMs;
+function setText(id, value) {{ const el = document.getElementById(id); if (el) el.textContent = value == null ? '-' : String(value); }}
+function fmtNum(value, digits=4) {{ const n = Number(value); return Number.isFinite(n) ? n.toFixed(digits) : '-'; }}
+function fmtMoney(value) {{ const n = Number(value); return Number.isFinite(n) ? '$' + n.toLocaleString(undefined, {{minimumFractionDigits:2, maximumFractionDigits:2}}) : '-'; }}
+function fmtPct(value) {{ const n = Number(value); return Number.isFinite(n) ? (n * 100).toFixed(1) + '%' : '-'; }}
+function escapeHtml(value) {{ return String(value == null ? '' : value).replace(/[&<>\"]/g, ch => ({{'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}}[ch])); }}
+function renderGraphRows(history) {{
+  const body = document.getElementById('graph-points-body');
+  if (!body) return;
+  body.innerHTML = (history || []).slice(-20).map(p => '<tr><td>' + escapeHtml(p.ts) + '</td><td>' + escapeHtml(fmtNum(p.btc_price)) + '</td><td>' + escapeHtml(fmtNum(p.target_price)) + '</td><td>' + escapeHtml(fmtNum(p.seconds_to_close)) + '</td></tr>').join('');
+}}
+function updateStreamDashboard(data) {{
+  const stream = data.stream || {{}};
+  const latest = stream.latest || {{}};
+  const decision = latest.execution_decision || {{}};
+  const orderbook = latest.orderbook || {{}};
+  const slopes = latest.slopes || {{}};
+  const freshness = stream.freshness || {{}};
+  const price = Number(latest.btc_price), strike = Number(latest.strike);
+  setText('decision-action', decision.action || 'NO_TRADE');
+  setText('decision-reason', decision.reason || 'waiting for state');
+  setText('decision-size', fmtMoney(decision.size_dollars));
+  setText('decision-confidence', fmtPct(decision.confidence));
+  setText('decision-blocked-by', (decision.blocked_by || []).length ? decision.blocked_by.join(', ') : 'none');
+  setText('recorder-freshness', freshness.status || '-');
+  setText('recorder-age', (freshness.age_seconds == null ? '-' : freshness.age_seconds + 's'));
+  setText('btc-price', fmtMoney(latest.btc_price));
+  setText('above-below-strike', latest.above_below_strike || '-');
+  setText('distance-from-strike', Number.isFinite(price) && Number.isFinite(strike) ? fmtMoney(price - strike) : '-');
+  setText('strike-price', 'strike ' + fmtMoney(latest.strike));
+  setText('seconds-to-close', fmtNum(latest.seconds_to_close));
+  setText('market-ticker', latest.market_ticker || '-');
+  setText('yes-bid', fmtNum(orderbook.yes_bid));
+  setText('yes-ask', fmtNum(orderbook.yes_ask));
+  setText('no-bid', fmtNum(orderbook.no_bid));
+  setText('no-ask', fmtNum(orderbook.no_ask));
+  setText('orderbook-spread', fmtNum(orderbook.spread));
+  setText('orderbook-status', orderbook.status || '-');
+  setText('slope-10s', fmtNum(slopes.slope_10s));
+  setText('slope-30s', fmtNum(slopes.slope_30s));
+  setText('slope-60s', fmtNum(slopes.slope_60s));
+  const historyEl = document.getElementById('stream-history-data');
+  if (historyEl) historyEl.textContent = JSON.stringify((stream.history || []).slice(-90));
+  setText('raw-payload', JSON.stringify(latest.raw_payload || {{}}, null, 2));
+  renderGraphRows(stream.history || []);
+  drawLineChart('price-chart','stream-history-data','ts',['btc_price','target_price']);
+}}
+async function pollStreamDashboard() {{
+  try {{ const r = await fetch({api}, {{cache:'no-store'}}); if (!r.ok) throw new Error('HTTP ' + r.status); updateStreamDashboard(await r.json()); }}
+  catch (err) {{ setText('recorder-freshness', 'fetch error'); setText('recorder-age', err.message || String(err)); }}
+  finally {{ remaining = refreshMs; }}
+}}
+setInterval(() => {{ remaining -= 100; const el=document.getElementById('refreshCountdown'); if (el) el.textContent=(Math.max(0, remaining)/1000).toFixed(1); }}, 100);
+setInterval(pollStreamDashboard, refreshMs);
+pollStreamDashboard();
+"""
 
 
 def _decision_class(action: Any) -> str:
