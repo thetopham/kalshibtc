@@ -138,6 +138,7 @@ def run_replay(
     orderbook_snapshots_logged = 0
     volatility_tracker = RecentVolatility(window=volatility_window)
 
+    diagnostics_tracker = ReplayDiagnostics(window=30)
     with HedgePaperExecutor(results_db=results_db, strategy_name=strategy.name) as executor:
         _initialize_orderbook_snapshot_schema(executor.conn)
         for row in _load_snapshot_rows(
@@ -152,6 +153,7 @@ def run_replay(
             strikes[state.orderbook.market_ticker] = state.strike
             snapshots_processed += 1
             recent_volatility = volatility_tracker.add(state.orderbook.market_ticker, state.price)
+            diagnostics = diagnostics_tracker.add(state)
             buy_both_cost = _buy_both_cost(state)
             if buy_both_cost is not None:
                 buy_both_costs.append(buy_both_cost)
@@ -160,10 +162,13 @@ def run_replay(
                 INSERT INTO hedge_orderbook_snapshots (
                     ts, market_ticker, btc_price, strike, seconds_to_close, slope_30s,
                     recent_volatility, yes_bid, yes_ask, no_bid, no_ask,
-                    buy_both_cost, sell_both_credit, distance_from_strike, raw_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    buy_both_cost, sell_both_credit, distance_from_strike,
+                    time_to_expiry, abs_slope_30s, abs_distance_from_strike,
+                    distance_velocity_30s, abs_distance_velocity_30s,
+                    atr_30s, atr_expansion_30s, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                _orderbook_snapshot_params(state, recent_volatility=recent_volatility),
+                _orderbook_snapshot_params(state, recent_volatility=recent_volatility, diagnostics=diagnostics),
             )
             orderbook_snapshots_logged += 1
             position = positions.setdefault(
@@ -192,12 +197,24 @@ def run_replay(
                     recent_volatility=recent_volatility,
                 )
                 reject_counts[reason] += 1
-                executor.record_no_trade(state=state, reason=reason, position=position)
+                _record_no_trade_with_diagnostics(
+                    executor=executor,
+                    state=state,
+                    reason=reason,
+                    position=position,
+                    diagnostics=diagnostics,
+                )
                 continue
 
             for reason in _rejected_add_reasons(state, position=position, before_fill_count=before_fill_count):
                 reject_counts[reason] += 1
-                executor.record_no_trade(state=state, reason=reason, position=position)
+                _record_no_trade_with_diagnostics(
+                    executor=executor,
+                    state=state,
+                    reason=reason,
+                    position=position,
+                    diagnostics=diagnostics,
+                )
 
     summary = _summary_payload(
         feed_db=feed_path,
@@ -217,6 +234,7 @@ def run_replay(
         add_fills=add_fills,
         paired_costs=paired_costs,
         unpaired_counts_seen=unpaired_counts_seen,
+        diagnostic_summary=diagnostics_tracker.summary(),
         buy_both_costs=buy_both_costs,
     )
     if settlement_price is not None:
@@ -328,6 +346,72 @@ class RecentVolatility:
         if len(prices) < 2:
             return None
         return max(prices) - min(prices)
+
+
+class ReplayDiagnostics:
+    def __init__(self, *, window: int = 30) -> None:
+        self.window = max(2, int(window))
+        self.prices_by_market: dict[str, deque[float]] = {}
+        self.abs_distances_by_market: dict[str, deque[float]] = {}
+        self.atrs_by_market: dict[str, deque[float]] = {}
+        self.abs_distances: list[float] = []
+        self.abs_distance_velocities: list[float] = []
+        self.atrs: list[float] = []
+        self.atr_expansions: list[float] = []
+
+    def add(self, state: MarketState) -> dict[str, float | None]:
+        market = state.orderbook.market_ticker
+        price = float(state.price)
+        abs_distance = abs(float(state.distance_from_strike))
+        prices = self.prices_by_market.setdefault(market, deque(maxlen=self.window + 1))
+        distances = self.abs_distances_by_market.setdefault(market, deque(maxlen=self.window + 1))
+        atrs = self.atrs_by_market.setdefault(market, deque(maxlen=self.window + 1))
+
+        previous_distance = distances[0] if len(distances) >= self.window else None
+        prices.append(price)
+        distances.append(abs_distance)
+
+        atr_30s = _average_abs_change(prices)
+        previous_atr = atrs[0] if len(atrs) >= self.window and atrs[0] not in {None, 0.0} else None
+        atrs.append(atr_30s)
+        distance_velocity = abs_distance - previous_distance if previous_distance is not None else None
+        atr_expansion = atr_30s / previous_atr if previous_atr else None
+
+        self.abs_distances.append(abs_distance)
+        if distance_velocity is not None:
+            self.abs_distance_velocities.append(abs(distance_velocity))
+        if atr_30s is not None:
+            self.atrs.append(atr_30s)
+        if atr_expansion is not None:
+            self.atr_expansions.append(atr_expansion)
+
+        return {
+            "time_to_expiry": state.seconds_to_close,
+            "abs_slope_30s": abs(state.slope_30s or 0.0),
+            "abs_distance_from_strike": abs_distance,
+            "distance_velocity_30s": distance_velocity,
+            "abs_distance_velocity_30s": abs(distance_velocity) if distance_velocity is not None else None,
+            "atr_30s": atr_30s,
+            "atr_expansion_30s": atr_expansion,
+        }
+
+    def summary(self) -> dict[str, float | None]:
+        return {
+            "max_abs_distance_from_strike": _round(max(self.abs_distances) if self.abs_distances else None),
+            "max_abs_distance_velocity_30s": _round(
+                max(self.abs_distance_velocities) if self.abs_distance_velocities else None
+            ),
+            "max_atr_30s": _round(max(self.atrs) if self.atrs else None),
+            "max_atr_expansion_30s": _round(max(self.atr_expansions) if self.atr_expansions else None),
+            "avg_atr_30s": _round(sum(self.atrs) / len(self.atrs) if self.atrs else None),
+        }
+
+
+def _average_abs_change(prices: deque[float]) -> float | None:
+    if len(prices) < 2:
+        return None
+    changes = [abs(prices[index] - prices[index - 1]) for index in range(1, len(prices))]
+    return sum(changes) / len(changes)
 
 
 def _load_snapshot_rows(
@@ -474,6 +558,38 @@ def _rejected_add_reasons(
     return reasons
 
 
+def _record_no_trade_with_diagnostics(
+    *,
+    executor: HedgePaperExecutor,
+    state: MarketState,
+    reason: str,
+    position: HedgePosition,
+    diagnostics: dict[str, float | None],
+) -> None:
+    executor.record_no_trade(state=state, reason=reason, position=position)
+    raw_json = json.dumps(
+        {
+            "btc_price": state.price,
+            "strike": state.strike,
+            "distance_from_strike": state.distance_from_strike,
+            "seconds_to_close": state.seconds_to_close,
+            "slope_30s": state.slope_30s,
+            "yes_ask": state.orderbook.yes_ask,
+            "no_ask": state.orderbook.no_ask,
+            **diagnostics,
+        },
+        sort_keys=True,
+    )
+    executor.conn.execute(
+        """
+        UPDATE hedge_decisions
+        SET raw_json = ?
+        WHERE id = last_insert_rowid()
+        """,
+        (raw_json,),
+    )
+
+
 def _initialize_orderbook_snapshot_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -493,6 +609,13 @@ def _initialize_orderbook_snapshot_schema(conn: sqlite3.Connection) -> None:
             buy_both_cost REAL,
             sell_both_credit REAL,
             distance_from_strike REAL NOT NULL,
+            time_to_expiry REAL NOT NULL,
+            abs_slope_30s REAL NOT NULL,
+            abs_distance_from_strike REAL NOT NULL,
+            distance_velocity_30s REAL,
+            abs_distance_velocity_30s REAL,
+            atr_30s REAL,
+            atr_expansion_30s REAL,
             raw_json TEXT NOT NULL
         )
         """
@@ -505,7 +628,14 @@ def _initialize_orderbook_snapshot_schema(conn: sqlite3.Connection) -> None:
     )
 
 
-def _orderbook_snapshot_params(state: MarketState, *, recent_volatility: float | None) -> tuple[Any, ...]:
+def _orderbook_snapshot_params(
+    state: MarketState,
+    *,
+    recent_volatility: float | None,
+    diagnostics: dict[str, float | None],
+) -> tuple[Any, ...]:
+    raw = dict(state.orderbook.raw or state.tick.raw or {})
+    raw.update(diagnostics)
     return (
         state.tick.ts.isoformat(),
         state.orderbook.market_ticker,
@@ -521,7 +651,14 @@ def _orderbook_snapshot_params(state: MarketState, *, recent_volatility: float |
         _buy_both_cost(state),
         _sell_both_credit(state),
         state.distance_from_strike,
-        json.dumps(state.orderbook.raw or state.tick.raw or {}, sort_keys=True),
+        diagnostics["time_to_expiry"],
+        diagnostics["abs_slope_30s"],
+        diagnostics["abs_distance_from_strike"],
+        diagnostics["distance_velocity_30s"],
+        diagnostics["abs_distance_velocity_30s"],
+        diagnostics["atr_30s"],
+        diagnostics["atr_expansion_30s"],
+        json.dumps(raw, sort_keys=True),
     )
 
 
@@ -556,6 +693,7 @@ def _summary_payload(
     add_fills: int,
     paired_costs: list[float],
     unpaired_counts_seen: list[float],
+    diagnostic_summary: dict[str, float | None],
     buy_both_costs: list[float],
 ) -> dict[str, Any]:
     final_position = _latest_position(positions.values())
@@ -590,6 +728,7 @@ def _summary_payload(
         "buy_both_cost_min": _round(min(buy_both_costs) if buy_both_costs else None),
         "buy_both_cost_max": _round(max(buy_both_costs) if buy_both_costs else None),
         "buy_both_cost_mean": _round(sum(buy_both_costs) / len(buy_both_costs) if buy_both_costs else None),
+        **diagnostic_summary,
         "markets_processed": len(positions),
         "snapshots_processed": snapshots_processed,
         "fills": fills,

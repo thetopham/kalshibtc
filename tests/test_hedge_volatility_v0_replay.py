@@ -366,3 +366,80 @@ def test_per_contract_replay_processes_one_market_and_logs_expected_snapshot_cou
     assert summary["orderbook_snapshots_logged"] == 2
     assert summary["seed_fills"] == 2
     assert summary["add_fills"] == 1
+
+
+def test_replay_logs_regime_volatility_diagnostics(tmp_path):
+    feed_db = tmp_path / "feed.sqlite3"
+    runs_dir = tmp_path / "runs"
+    create_feed_db(feed_db)
+    base = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
+    ticker = "KXBTCD-26MAY151215-T50000"
+    con = sqlite3.connect(feed_db)
+    for i in range(3, 36):
+        ts = base + timedelta(minutes=1, seconds=i)
+        price = 50_000 + i
+        con.execute(
+            """
+            INSERT INTO realtime_snapshots_1s (
+                ts, market_ticker, market_open_time, market_close_time, btc_price, strike,
+                target_price, distance_from_strike, seconds_to_close, btc_velocity_30s,
+                slope_30s, yes_bid, yes_ask, no_bid, no_ask, orderbook_sequence,
+                execution_blocked_by_json, raw_state_json, raw_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ts.isoformat(),
+                ticker,
+                base.isoformat(),
+                (base + timedelta(minutes=15)).isoformat(),
+                price,
+                50_000,
+                50_000,
+                price - 50_000,
+                ((base + timedelta(minutes=15)) - ts).total_seconds(),
+                1.0,
+                1.0,
+                0.48,
+                0.50,
+                0.48,
+                0.50,
+                i,
+                "[]",
+                "{}",
+                json.dumps({"i": i}),
+                ts.isoformat(),
+            ),
+        )
+    con.commit()
+
+    summary = run_replay(
+        feed_db=feed_db,
+        runs_dir=runs_dir,
+        run_id="diagnostics",
+        from_ts=None,
+        to_ts=None,
+        market_ticker=ticker,
+    )
+
+    results_db = runs_dir / "replay" / "hedge_volatility_v0" / "diagnostics" / "results.sqlite3"
+    db = sqlite3.connect(results_db)
+    row = db.execute(
+        """
+        select time_to_expiry, abs_slope_30s, abs_distance_from_strike,
+               distance_velocity_30s, abs_distance_velocity_30s, atr_30s, atr_expansion_30s
+        from hedge_orderbook_snapshots
+        where atr_30s is not null and distance_velocity_30s is not null
+        order by ts desc limit 1
+        """
+    ).fetchone()
+    assert row is not None
+    assert row[0] > 0
+    assert row[1] >= 1.0
+    assert row[2] > 0
+    assert row[3] > 0
+    assert row[4] == abs(row[3])
+    assert row[5] > 0
+    assert summary["max_abs_distance_from_strike"] > 0
+    assert summary["max_abs_distance_velocity_30s"] > 0
+    assert summary["max_atr_30s"] > 0
+    assert summary["avg_atr_30s"] > 0
