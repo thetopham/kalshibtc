@@ -443,3 +443,76 @@ def test_replay_logs_regime_volatility_diagnostics(tmp_path):
     assert summary["max_abs_distance_velocity_30s"] > 0
     assert summary["max_atr_30s"] > 0
     assert summary["avg_atr_30s"] > 0
+
+
+def test_run_replay_writes_per_market_settlements_from_csv(tmp_path):
+    feed_db = tmp_path / "feed.sqlite3"
+    runs_dir = tmp_path / "runs"
+    settlements_csv = tmp_path / "settlements.csv"
+    create_feed_db(feed_db)
+    settlements_csv.write_text(
+        "market_ticker,settlement_price\n"
+        "KXBTCD-26MAY151215-T50000,50100\n"
+        "KXBTCD-26MAY151230-T50250,50100\n",
+        encoding="utf-8",
+    )
+
+    summary = run_replay(
+        feed_db=feed_db,
+        runs_dir=runs_dir,
+        run_id="settlements-csv",
+        from_ts=None,
+        to_ts=None,
+        settlements_csv=settlements_csv,
+    )
+
+    run_dir = runs_dir / "replay" / "hedge_volatility_v0" / "settlements-csv"
+    assert (run_dir / "settlement.json").exists()
+    assert (run_dir / "settlement_by_market.csv").exists()
+    settlement = json.loads((run_dir / "settlement.json").read_text())
+    assert settlement["settled_markets"] == 1
+    assert settlement["winning_markets"] == 1
+    assert settlement["losing_markets"] == 0
+    assert settlement["total_gross_payout"] == 3.0
+    assert settlement["total_cost"] == 2.94
+    assert settlement["total_realized_pnl"] == 0.06
+    assert settlement["total_paired_locked_edge"] == 0.06
+    assert settlement["total_unpaired_directional_pnl"] == 0.0
+    assert settlement["avg_pnl_per_market"] == 0.06
+    assert summary["settled_markets"] == 1
+
+    con = sqlite3.connect(run_dir / "results.sqlite3")
+    rows = con.execute(
+        """
+        select market_ticker, settlement_price, winning_side, gross_payout,
+               total_cost, realized_pnl, paired_locked_edge, unpaired_directional_pnl
+        from settlement_by_market
+        """
+    ).fetchall()
+    assert rows == [("KXBTCD-26MAY151215-T50000", 50100.0, "yes", 3.0, 2.94, 0.06, 0.06, 0.0)]
+
+
+def test_cli_rejects_manual_settlement_price_and_settlements_csv_together(tmp_path, capsys):
+    feed_db = tmp_path / "feed.sqlite3"
+    runs_dir = tmp_path / "runs"
+    settlements_csv = tmp_path / "settlements.csv"
+    create_feed_db(feed_db)
+    settlements_csv.write_text("market_ticker,settlement_price\nKXBTCD-26MAY151215-T50000,50100\n", encoding="utf-8")
+
+    code = main(
+        [
+            "--feed-db",
+            str(feed_db),
+            "--runs-dir",
+            str(runs_dir),
+            "--run-id",
+            "bad-settlement-args",
+            "--settlement-price",
+            "50100",
+            "--settlements-csv",
+            str(settlements_csv),
+        ]
+    )
+
+    assert code == 2
+    assert "cannot be used together" in capsys.readouterr().err

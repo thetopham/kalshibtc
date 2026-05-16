@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sqlite3
 import sys
@@ -43,6 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-seconds-to-expiry", type=float, default=14.5 * 60.0)
     parser.add_argument("--volatility-window", type=int, default=30)
     parser.add_argument("--settlement-price", type=float, default=None)
+    parser.add_argument("--settlements-csv", default=None, help="CSV with market_ticker,settlement_price columns.")
     parser.add_argument(
         "--settlement-source",
         choices=["manual", "kalshi", "coinbase_1m_avg", "chainlink_1m_avg"],
@@ -51,6 +53,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="Print JSON summary.")
     parser.add_argument("--overwrite", action="store_true", help="Allow replacing an existing run directory.")
     args = parser.parse_args(argv)
+    if args.settlement_price is not None and args.settlements_csv:
+        print("--settlement-price and --settlements-csv cannot be used together", file=sys.stderr)
+        return 2
 
     feed_db = resolve_feed_db(args.feed_db)
     runs_dir = resolve_runs_dir(args.runs_dir)
@@ -77,6 +82,7 @@ def main(argv: list[str] | None = None) -> int:
             config=config,
             volatility_window=args.volatility_window,
             settlement_price=args.settlement_price,
+            settlements_csv=args.settlements_csv,
             settlement_source=args.settlement_source,
             overwrite=args.overwrite,
         )
@@ -104,9 +110,12 @@ def run_replay(
     config: HedgeVolatilityConfig | None = None,
     volatility_window: int = 30,
     settlement_price: float | None = None,
+    settlements_csv: str | Path | None = None,
     settlement_source: SettlementSource = "manual",
     overwrite: bool = False,
 ) -> dict[str, Any]:
+    if settlement_price is not None and settlements_csv is not None:
+        raise ValueError("settlement_price and settlements_csv cannot be used together")
     feed_path = Path(feed_db)
     run_dir = Path(runs_dir) / "replay" / STRATEGY_NAME / run_id
     if run_dir.exists() and not overwrite:
@@ -249,6 +258,14 @@ def run_replay(
             encoding="utf-8",
         )
         summary.update(settlement)
+    if settlements_csv is not None:
+        settlement = evaluate_settlements_by_market(
+            positions=positions,
+            strikes=strikes,
+            settlement_prices=_load_settlements_csv(Path(settlements_csv)),
+        )
+        _write_settlement_by_market(run_dir=run_dir, results_db=results_db, settlement=settlement)
+        summary.update(settlement["aggregate"])
     (run_dir / "metrics.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     (run_dir / "config.json").write_text(
         json.dumps(
@@ -333,6 +350,129 @@ def evaluate_settlement(
         "paired_locked_edge": _round(paired_locked_edge),
         "unpaired_directional_pnl": _round(unpaired_directional_pnl),
     }
+
+
+def evaluate_settlements_by_market(
+    *,
+    positions: dict[str, HedgePosition],
+    strikes: dict[str, float],
+    settlement_prices: dict[str, float],
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for market_ticker, position in sorted(positions.items()):
+        if not position.fills or market_ticker not in settlement_prices:
+            continue
+        settlement_price = float(settlement_prices[market_ticker])
+        strike = float(strikes[market_ticker])
+        winning_side = "yes" if settlement_price > strike else "no"
+        yes_qty = position.yes_contracts
+        no_qty = position.no_contracts
+        avg_yes = position.avg_yes_entry or 0.0
+        avg_no = position.avg_no_entry or 0.0
+        total_cost = yes_qty * avg_yes + no_qty * avg_no
+        gross_payout = yes_qty if winning_side == "yes" else no_qty
+        realized_pnl = gross_payout - total_cost
+        paired_locked_edge = min(yes_qty, no_qty) * (1.0 - avg_yes - avg_no)
+        unpaired_directional_pnl = realized_pnl - paired_locked_edge
+        rows.append(
+            {
+                "market_ticker": market_ticker,
+                "settlement_price": _round(settlement_price),
+                "strike": _round(strike),
+                "winning_side": winning_side,
+                "yes_contracts": _round(yes_qty),
+                "no_contracts": _round(no_qty),
+                "avg_yes_entry": _round(position.avg_yes_entry),
+                "avg_no_entry": _round(position.avg_no_entry),
+                "gross_payout": _round(gross_payout),
+                "total_cost": _round(total_cost),
+                "realized_pnl": _round(realized_pnl),
+                "paired_locked_edge": _round(paired_locked_edge),
+                "unpaired_directional_pnl": _round(unpaired_directional_pnl),
+            }
+        )
+    total_gross_payout = sum(float(row["gross_payout"] or 0.0) for row in rows)
+    total_cost = sum(float(row["total_cost"] or 0.0) for row in rows)
+    total_realized_pnl = sum(float(row["realized_pnl"] or 0.0) for row in rows)
+    total_paired_locked_edge = sum(float(row["paired_locked_edge"] or 0.0) for row in rows)
+    total_unpaired_directional_pnl = sum(float(row["unpaired_directional_pnl"] or 0.0) for row in rows)
+    aggregate = {
+        "settled_markets": len(rows),
+        "total_gross_payout": _round(total_gross_payout),
+        "total_cost": _round(total_cost),
+        "total_realized_pnl": _round(total_realized_pnl),
+        "total_paired_locked_edge": _round(total_paired_locked_edge),
+        "total_unpaired_directional_pnl": _round(total_unpaired_directional_pnl),
+        "winning_markets": sum(1 for row in rows if float(row["realized_pnl"] or 0.0) > 0.0),
+        "losing_markets": sum(1 for row in rows if float(row["realized_pnl"] or 0.0) < 0.0),
+        "avg_pnl_per_market": _round(total_realized_pnl / len(rows) if rows else None),
+    }
+    return {"aggregate": aggregate, "markets": rows}
+
+
+def _load_settlements_csv(path: Path) -> dict[str, float]:
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        required = {"market_ticker", "settlement_price"}
+        if not required.issubset(reader.fieldnames or set()):
+            raise ValueError("settlements CSV must contain market_ticker,settlement_price columns")
+        return {str(row["market_ticker"]): float(row["settlement_price"]) for row in reader}
+
+
+def _write_settlement_by_market(*, run_dir: Path, results_db: Path, settlement: dict[str, Any]) -> None:
+    rows: list[dict[str, Any]] = settlement["markets"]
+    aggregate: dict[str, Any] = settlement["aggregate"]
+    (run_dir / "settlement.json").write_text(json.dumps(aggregate, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    fieldnames = [
+        "market_ticker",
+        "settlement_price",
+        "strike",
+        "winning_side",
+        "yes_contracts",
+        "no_contracts",
+        "avg_yes_entry",
+        "avg_no_entry",
+        "gross_payout",
+        "total_cost",
+        "realized_pnl",
+        "paired_locked_edge",
+        "unpaired_directional_pnl",
+    ]
+    with (run_dir / "settlement_by_market.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    with sqlite3.connect(results_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS settlement_by_market (
+                market_ticker TEXT PRIMARY KEY,
+                settlement_price REAL NOT NULL,
+                strike REAL NOT NULL,
+                winning_side TEXT NOT NULL,
+                yes_contracts REAL NOT NULL,
+                no_contracts REAL NOT NULL,
+                avg_yes_entry REAL,
+                avg_no_entry REAL,
+                gross_payout REAL NOT NULL,
+                total_cost REAL NOT NULL,
+                realized_pnl REAL NOT NULL,
+                paired_locked_edge REAL NOT NULL,
+                unpaired_directional_pnl REAL NOT NULL
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO settlement_by_market (
+                market_ticker, settlement_price, strike, winning_side,
+                yes_contracts, no_contracts, avg_yes_entry, avg_no_entry,
+                gross_payout, total_cost, realized_pnl, paired_locked_edge,
+                unpaired_directional_pnl
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [tuple(row[name] for name in fieldnames) for row in rows],
+        )
 
 
 class RecentVolatility:
