@@ -240,3 +240,51 @@ def test_allows_larger_side_add_when_unpaired_inventory_is_within_cap():
     decisions = strategy.decide(state, position)
 
     assert [(decision.side, decision.price) for decision in decisions] == [("yes", 0.40)]
+
+
+def test_seed_three_to_two_allowed_with_max_unpaired_contracts_two():
+    strategy = HedgeVolatilityV0(HedgeVolatilityConfig(max_unpaired_contracts=2))
+    position = HedgePosition(market_ticker="KXBTC")
+    state = make_state(yes_ask=0.62, no_ask=0.43, slope_30s=8.0)
+
+    decisions = strategy.decide(state, position)
+
+    assert [(decision.side, decision.contracts) for decision in decisions] == [("yes", 3), ("no", 2)]
+
+
+def test_add_to_larger_side_rejected_if_it_would_create_unpaired_three():
+    strategy = HedgeVolatilityV0(
+        HedgeVolatilityConfig(
+            target_pair_cost=0.98,
+            max_unpaired_contracts=2,
+            max_imbalance_ratio=10.0,
+        )
+    )
+    position = HedgePosition(market_ticker="KXBTC")
+    now = datetime.now(UTC)
+    position.add_fill(side="yes", price=0.50, contracts=4, ts=now, reason="seed")
+    position.add_fill(side="no", price=0.45, contracts=2, ts=now, reason="seed")
+    state = make_state(yes_ask=0.40, no_ask=0.46, slope_30s=8.0)
+
+    decisions = strategy.decide(state, position)
+
+    assert decisions == []
+
+
+def test_add_to_smaller_side_allowed_if_it_improves_cost():
+    strategy = HedgeVolatilityV0(
+        HedgeVolatilityConfig(
+            target_pair_cost=0.98,
+            max_unpaired_contracts=2,
+            max_imbalance_ratio=10.0,
+        )
+    )
+    position = HedgePosition(market_ticker="KXBTC")
+    now = datetime.now(UTC)
+    position.add_fill(side="yes", price=0.50, contracts=4, ts=now, reason="seed")
+    position.add_fill(side="no", price=0.45, contracts=2, ts=now, reason="seed")
+    state = make_state(yes_ask=0.51, no_ask=0.35, slope_30s=8.0)
+
+    decisions = strategy.decide(state, position)
+
+    assert [(decision.side, decision.price) for decision in decisions] == [("no", 0.35)]

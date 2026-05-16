@@ -190,6 +190,22 @@ class HedgeVolatilityV0:
                     price=price,
                 )
                 continue
+            projected_unpaired = abs(projected_yes - projected_no)
+            if projected_unpaired > self.config.max_unpaired_contracts:
+                self._log(
+                    "REJECT",
+                    state,
+                    reason="max_unpaired_contracts_exceeded",
+                    trend_side=trend_side,
+                    position=position,
+                    side=side,
+                    price=price,
+                    projected_yes_contracts=projected_yes,
+                    projected_no_contracts=projected_no,
+                    projected_unpaired_contracts=projected_unpaired,
+                    max_unpaired_contracts=self.config.max_unpaired_contracts,
+                )
+                continue
             if _imbalance_ratio(projected_yes, projected_no) > self.config.max_imbalance_ratio:
                 self._log(
                     "REJECT",

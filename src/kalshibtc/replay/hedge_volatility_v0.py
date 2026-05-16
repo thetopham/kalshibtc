@@ -580,7 +580,8 @@ def _summary_payload(
         "final_unpaired_no_contracts": _round(final_unpaired_no),
         "max_unpaired_contracts_seen": _round(max(unpaired_counts_seen) if unpaired_counts_seen else 0.0),
         "imbalance_rejects": reject_counts.get("would_increase_directional_imbalance", 0)
-        + reject_counts.get("max_imbalance_ratio_exceeded", 0),
+        + reject_counts.get("max_imbalance_ratio_exceeded", 0)
+        + reject_counts.get("max_unpaired_contracts_exceeded", 0),
         "best_paired_cost": _round(min(paired_costs) if paired_costs else None),
         "worst_paired_cost": _round(max(paired_costs) if paired_costs else None),
         "final_paired_cost": _round(final_position.combined_average_cost if final_position else None),
