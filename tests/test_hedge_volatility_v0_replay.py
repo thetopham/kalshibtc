@@ -38,12 +38,12 @@ def create_feed_db(path):
     )
     base = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
     rows = [
-        # Safe seed: yes/no cost = 0.94.
-        (base + timedelta(minutes=1), "KXBTCD-26MAY151215-T50000", 50120, 50000, 0.55, 0.39, 8.0),
+        # Seed is allowed even though yes+no ask cost is above target_pair_cost.
+        (base + timedelta(minutes=1), "KXBTCD-26MAY151215-T50000", 50120, 50000, 0.62, 0.43, 8.0),
         # YES does not improve, NO improves combined cost.
-        (base + timedelta(minutes=2), "KXBTCD-26MAY151215-T50000", 50140, 50000, 0.56, 0.38, 7.0),
-        # New market with unsafe seed -> reject.
-        (base + timedelta(minutes=16), "KXBTCD-26MAY151230-T50250", 50280, 50250, 0.58, 0.40, 6.0),
+        (base + timedelta(minutes=2), "KXBTCD-26MAY151215-T50000", 50140, 50000, 0.63, 0.22, 7.0),
+        # New market with seed pair cost above seed_max_pair_cost -> reject.
+        (base + timedelta(minutes=16), "KXBTCD-26MAY151230-T50250", 50280, 50250, 0.70, 0.45, 6.0),
     ]
     for ts, ticker, price, strike, yes_ask, no_ask, slope in rows:
         close = base + (timedelta(minutes=15) if "1215" in ticker else timedelta(minutes=30))
@@ -104,16 +104,24 @@ def test_run_replay_writes_results_db_and_summary(tmp_path):
     assert summary["fills"] == 3
     assert summary["final_yes_contracts"] == 3
     assert summary["final_no_contracts"] == 3
-    assert summary["avg_yes_entry"] == 0.55
-    assert summary["avg_no_entry"] == 0.386667
-    assert summary["combined_average_cost"] == 0.936667
-    assert summary["locked_edge_per_pair"] == 0.063333
+    assert summary["avg_yes_entry"] == 0.62
+    assert summary["avg_no_entry"] == 0.36
+    assert summary["combined_average_cost"] == 0.98
+    assert summary["locked_edge_per_pair"] == 0.02
+    assert summary["orderbook_snapshots_logged"] == 3
+    assert summary["seed_fills"] == 2
+    assert summary["add_fills"] == 1
+    assert summary["final_paired_cost"] == 0.98
+    assert summary["buy_both_cost_min"] == 0.85
+    assert summary["buy_both_cost_max"] == 1.15
+    assert summary["buy_both_cost_mean"] == 1.016667
     assert summary["reject_counts_by_reason"] == {
-        "projected_combined_cost_too_high": 1,
+        "seed_pair_cost_too_high": 1,
         "yes_price_not_improved": 1,
     }
 
     con = sqlite3.connect(results_db)
+    assert con.execute("select count(*) from hedge_orderbook_snapshots").fetchone()[0] == 3
     assert con.execute("select count(*) from hedge_fills").fetchone()[0] == 3
     assert con.execute("select count(*) from hedge_decisions where decision = 'REJECT'").fetchone()[0] == 2
     assert con.execute("select count(*) from hedge_positions").fetchone()[0] == 2
@@ -140,7 +148,7 @@ def test_cli_prints_summary_json(tmp_path, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["run_dir"].endswith("runs/replay/hedge_volatility_v0/cli")
     assert out["fills"] == 3
-    assert out["reject_counts_by_reason"]["projected_combined_cost_too_high"] == 1
+    assert out["reject_counts_by_reason"]["seed_pair_cost_too_high"] == 1
 
 
 def test_settlement_yes_wins_and_paired_hedge_below_one_is_profitable():
@@ -227,7 +235,7 @@ def test_run_replay_writes_settlement_json_when_manual_price_is_provided(tmp_pat
     assert summary["settlement_source"] == "kalshi"
     assert summary["winning_side"] == "yes"
     assert settlement["realized_pnl"] == summary["realized_pnl"]
-    assert settlement["paired_locked_edge"] == 0.19
+    assert settlement["paired_locked_edge"] == 0.06
 
 
 def test_cli_accepts_settlement_args(tmp_path, capsys):
@@ -333,3 +341,24 @@ def test_real_strike_rows_still_replay_with_bounds(tmp_path):
     assert summary["snapshots_processed"] == 3
     assert summary["fills"] == 3
     assert summary["skipped_bad_strike_rows"] == 0
+
+
+def test_per_contract_replay_processes_one_market_and_logs_expected_snapshot_count(tmp_path):
+    feed_db = tmp_path / "feed.sqlite3"
+    runs_dir = tmp_path / "runs"
+    create_feed_db(feed_db)
+
+    summary = run_replay(
+        feed_db=feed_db,
+        runs_dir=runs_dir,
+        run_id="contract-count",
+        from_ts=None,
+        to_ts=None,
+        market_ticker="KXBTCD-26MAY151215-T50000",
+    )
+
+    assert summary["markets_processed"] == 1
+    assert summary["snapshots_processed"] == 2
+    assert summary["orderbook_snapshots_logged"] == 2
+    assert summary["seed_fills"] == 2
+    assert summary["add_fills"] == 1

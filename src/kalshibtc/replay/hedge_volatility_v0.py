@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--market-ticker", default=None, help="Optional market_ticker filter.")
     parser.add_argument("--min-strike", type=float, default=1000.0)
     parser.add_argument("--max-strike", type=float, default=1_000_000.0)
-    parser.add_argument("--max-projected-pair-cost", type=float, default=0.95)
+    parser.add_argument("--max-projected-pair-cost", type=float, default=0.98)
     parser.add_argument("--min-abs-slope", type=float, default=0.0)
     parser.add_argument("--min-recent-volatility", type=float, default=0.0)
     parser.add_argument("--min-distance-from-strike", type=float, default=0.0)
@@ -62,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
         min_distance_from_strike=args.min_distance_from_strike,
         min_seconds_to_expiry=args.min_seconds_to_expiry,
         max_seconds_to_expiry=args.max_seconds_to_expiry,
+        target_pair_cost=args.max_projected_pair_cost,
     )
     try:
         summary = run_replay(
@@ -129,9 +130,15 @@ def run_replay(
         max_strike=max_strike,
     )
     fills = 0
+    seed_fills = 0
+    add_fills = 0
+    paired_costs: list[float] = []
+    buy_both_costs: list[float] = []
+    orderbook_snapshots_logged = 0
     volatility_tracker = RecentVolatility(window=volatility_window)
 
     with HedgePaperExecutor(results_db=results_db, strategy_name=strategy.name) as executor:
+        _initialize_orderbook_snapshot_schema(executor.conn)
         for row in _load_snapshot_rows(
             feed_path,
             from_ts=from_ts,
@@ -144,6 +151,20 @@ def run_replay(
             strikes[state.orderbook.market_ticker] = state.strike
             snapshots_processed += 1
             recent_volatility = volatility_tracker.add(state.orderbook.market_ticker, state.price)
+            buy_both_cost = _buy_both_cost(state)
+            if buy_both_cost is not None:
+                buy_both_costs.append(buy_both_cost)
+            executor.conn.execute(
+                """
+                INSERT INTO hedge_orderbook_snapshots (
+                    ts, market_ticker, btc_price, strike, seconds_to_close, slope_30s,
+                    recent_volatility, yes_bid, yes_ask, no_bid, no_ask,
+                    buy_both_cost, sell_both_credit, distance_from_strike, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                _orderbook_snapshot_params(state, recent_volatility=recent_volatility),
+            )
+            orderbook_snapshots_logged += 1
             position = positions.setdefault(
                 state.orderbook.market_ticker,
                 HedgePosition(market_ticker=state.orderbook.market_ticker),
@@ -154,6 +175,12 @@ def run_replay(
                 for decision in decisions:
                     executor.apply(state=state, position=position, decision=decision)
                     fills += 1
+                    if decision.reason.startswith("seed_"):
+                        seed_fills += 1
+                    else:
+                        add_fills += 1
+                    if position.combined_average_cost is not None:
+                        paired_costs.append(position.combined_average_cost)
             else:
                 reason = _infer_reject_reason(
                     state,
@@ -182,6 +209,11 @@ def run_replay(
         min_strike=min_strike,
         max_strike=max_strike,
         skipped_bad_strike_rows=skipped_bad_strike_rows,
+        orderbook_snapshots_logged=orderbook_snapshots_logged,
+        seed_fills=seed_fills,
+        add_fills=add_fills,
+        paired_costs=paired_costs,
+        buy_both_costs=buy_both_costs,
     )
     if settlement_price is not None:
         settlement = evaluate_settlement(
@@ -417,8 +449,8 @@ def _infer_reject_reason(
     if state.orderbook.yes_ask > config.max_leg_ask or state.orderbook.no_ask > config.max_leg_ask:
         return "leg_ask_too_high"
     if position.yes_contracts == 0.0 and position.no_contracts == 0.0:
-        if state.orderbook.yes_ask + state.orderbook.no_ask > config.max_projected_pair_cost:
-            return "projected_combined_cost_too_high"
+        if state.orderbook.yes_ask + state.orderbook.no_ask > config.seed_max_pair_cost:
+            return "seed_pair_cost_too_high"
     return "no_decision"
 
 
@@ -438,6 +470,69 @@ def _rejected_add_reasons(
     return reasons
 
 
+def _initialize_orderbook_snapshot_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS hedge_orderbook_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            market_ticker TEXT NOT NULL,
+            btc_price REAL NOT NULL,
+            strike REAL NOT NULL,
+            seconds_to_close REAL NOT NULL,
+            slope_30s REAL,
+            recent_volatility REAL,
+            yes_bid REAL,
+            yes_ask REAL,
+            no_bid REAL,
+            no_ask REAL,
+            buy_both_cost REAL,
+            sell_both_credit REAL,
+            distance_from_strike REAL NOT NULL,
+            raw_json TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_hedge_orderbook_snapshots_market_ts
+            ON hedge_orderbook_snapshots(market_ticker, ts)
+        """
+    )
+
+
+def _orderbook_snapshot_params(state: MarketState, *, recent_volatility: float | None) -> tuple[Any, ...]:
+    return (
+        state.tick.ts.isoformat(),
+        state.orderbook.market_ticker,
+        state.price,
+        state.strike,
+        state.seconds_to_close,
+        state.slope_30s,
+        recent_volatility,
+        state.orderbook.yes_bid,
+        state.orderbook.yes_ask,
+        state.orderbook.no_bid,
+        state.orderbook.no_ask,
+        _buy_both_cost(state),
+        _sell_both_credit(state),
+        state.distance_from_strike,
+        json.dumps(state.orderbook.raw or state.tick.raw or {}, sort_keys=True),
+    )
+
+
+def _buy_both_cost(state: MarketState) -> float | None:
+    if state.orderbook.yes_ask is None or state.orderbook.no_ask is None:
+        return None
+    return state.orderbook.yes_ask + state.orderbook.no_ask
+
+
+def _sell_both_credit(state: MarketState) -> float | None:
+    if state.orderbook.yes_bid is None or state.orderbook.no_bid is None:
+        return None
+    return state.orderbook.yes_bid + state.orderbook.no_bid
+
+
 def _summary_payload(
     *,
     feed_db: Path,
@@ -452,6 +547,11 @@ def _summary_payload(
     min_strike: float,
     max_strike: float,
     skipped_bad_strike_rows: int,
+    orderbook_snapshots_logged: int,
+    seed_fills: int,
+    add_fills: int,
+    paired_costs: list[float],
+    buy_both_costs: list[float],
 ) -> dict[str, Any]:
     final_position = _latest_position(positions.values())
     return {
@@ -464,6 +564,17 @@ def _summary_payload(
         "min_strike": _round(min_strike),
         "max_strike": _round(max_strike),
         "skipped_bad_strike_rows": skipped_bad_strike_rows,
+        "orderbook_snapshots_logged": orderbook_snapshots_logged,
+        "seed_fills": seed_fills,
+        "add_fills": add_fills,
+        "best_paired_cost": _round(min(paired_costs) if paired_costs else None),
+        "worst_paired_cost": _round(max(paired_costs) if paired_costs else None),
+        "final_paired_cost": _round(final_position.combined_average_cost if final_position else None),
+        "best_edge": _round(1.0 - min(paired_costs) if paired_costs else None),
+        "final_edge": _round(final_position.locked_edge_per_pair if final_position else None),
+        "buy_both_cost_min": _round(min(buy_both_costs) if buy_both_costs else None),
+        "buy_both_cost_max": _round(max(buy_both_costs) if buy_both_costs else None),
+        "buy_both_cost_mean": _round(sum(buy_both_costs) / len(buy_both_costs) if buy_both_costs else None),
         "markets_processed": len(positions),
         "snapshots_processed": snapshots_processed,
         "fills": fills,

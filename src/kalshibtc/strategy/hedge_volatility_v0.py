@@ -11,7 +11,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class HedgeVolatilityConfig:
-    max_projected_pair_cost: float = 0.95
+    # Backwards-compatible alias: if target_pair_cost is not provided,
+    # max_projected_pair_cost is used as the add-phase target.
+    max_projected_pair_cost: float = 0.98
+    target_pair_cost: float | None = None
+    seed_max_pair_cost: float = 1.10
     min_abs_slope: float = 0.0
     min_recent_volatility: float = 0.0
     min_distance_from_strike: float = 0.0
@@ -21,6 +25,12 @@ class HedgeVolatilityConfig:
     trend_contracts: float = 3.0
     countertrend_contracts: float = 2.0
     add_contracts: float = 1.0
+    max_contracts_per_market: float = 25.0
+    max_imbalance_ratio: float = 1.5
+
+    @property
+    def add_target_pair_cost(self) -> float:
+        return self.target_pair_cost if self.target_pair_cost is not None else self.max_projected_pair_cost
 
 
 @dataclass(frozen=True)
@@ -77,14 +87,15 @@ class HedgeVolatilityV0:
         assert state.orderbook.yes_ask is not None
         assert state.orderbook.no_ask is not None
         projected_cost = state.orderbook.yes_ask + state.orderbook.no_ask
-        if projected_cost > self.config.max_projected_pair_cost:
+        if projected_cost > self.config.seed_max_pair_cost:
             self._log(
                 "REJECT",
                 state,
-                reason="projected_combined_cost_too_high",
+                reason="seed_pair_cost_too_high",
                 trend_side=trend_side,
                 position=position,
-                projected_combined_average_cost=projected_cost,
+                seed_pair_cost=projected_cost,
+                seed_max_pair_cost=self.config.seed_max_pair_cost,
             )
             return []
         yes_contracts, no_contracts = self._seed_contracts(trend_side)
@@ -104,6 +115,7 @@ class HedgeVolatilityV0:
                 contracts=decision.contracts,
                 price=decision.price,
                 projected_combined_average_cost=projected_cost,
+                seed_pair_cost=projected_cost,
             )
         return decisions
 
@@ -137,7 +149,7 @@ class HedgeVolatilityV0:
             )
             if projected_cost is None:
                 continue
-            if projected_cost > self.config.max_projected_pair_cost:
+            if projected_cost > self.config.add_target_pair_cost:
                 self._log(
                     "REJECT",
                     state,
@@ -147,6 +159,7 @@ class HedgeVolatilityV0:
                     side=side,
                     price=price,
                     projected_combined_average_cost=projected_cost,
+                    target_pair_cost=self.config.add_target_pair_cost,
                 )
                 continue
             if current_cost is not None and projected_cost >= current_cost:
@@ -159,6 +172,33 @@ class HedgeVolatilityV0:
                     side=side,
                     price=price,
                     projected_combined_average_cost=projected_cost,
+                )
+                continue
+            projected_yes = position.yes_contracts + (self.config.add_contracts if side == "yes" else 0.0)
+            projected_no = position.no_contracts + (self.config.add_contracts if side == "no" else 0.0)
+            if projected_yes + projected_no > self.config.max_contracts_per_market:
+                self._log(
+                    "REJECT",
+                    state,
+                    reason="max_contracts_per_market_reached",
+                    trend_side=trend_side,
+                    position=position,
+                    side=side,
+                    price=price,
+                )
+                continue
+            if _imbalance_ratio(projected_yes, projected_no) > self.config.max_imbalance_ratio:
+                self._log(
+                    "REJECT",
+                    state,
+                    reason="max_imbalance_ratio_exceeded",
+                    trend_side=trend_side,
+                    position=position,
+                    side=side,
+                    price=price,
+                    projected_yes_contracts=projected_yes,
+                    projected_no_contracts=projected_no,
+                    max_imbalance_ratio=self.config.max_imbalance_ratio,
                 )
                 continue
             reason = f"add_improves_combined_cost_trend_{trend_side}"
@@ -235,3 +275,13 @@ class HedgeVolatilityV0:
             position.combined_average_cost,
             extra,
         )
+
+
+def _imbalance_ratio(yes_contracts: float, no_contracts: float) -> float:
+    smaller = min(yes_contracts, no_contracts)
+    larger = max(yes_contracts, no_contracts)
+    if larger <= 0.0:
+        return 0.0
+    if smaller <= 0.0:
+        return float("inf")
+    return larger / smaller

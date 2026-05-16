@@ -77,17 +77,32 @@ def test_strategy_seeds_three_to_two_with_trend_when_pair_cost_is_safe(caplog):
     assert "seed_3_to_2_trend_yes" in caplog.text
 
 
-def test_strategy_rejects_seed_when_combined_cost_is_above_threshold(caplog):
-    strategy = HedgeVolatilityV0(HedgeVolatilityConfig(max_projected_pair_cost=0.95))
+def test_strategy_seeds_when_pair_cost_is_above_target_but_below_seed_guard(caplog):
+    strategy = HedgeVolatilityV0(
+        HedgeVolatilityConfig(seed_max_pair_cost=1.10, target_pair_cost=0.95)
+    )
     position = HedgePosition(market_ticker="KXBTC")
-    state = make_state(yes_ask=0.58, no_ask=0.40, slope_30s=9.0)
+    state = make_state(yes_ask=0.62, no_ask=0.43, slope_30s=9.0)
+
+    with caplog.at_level(logging.INFO):
+        decisions = strategy.decide(state, position)
+
+    assert [(d.side, d.contracts, d.price) for d in decisions] == [("yes", 3, 0.62), ("no", 2, 0.43)]
+    assert all(d.projected_combined_average_cost == pytest.approx(1.05) for d in decisions)
+    assert "seed_pair_cost=1.05" in caplog.text
+
+
+def test_strategy_rejects_seed_when_pair_cost_exceeds_seed_guard(caplog):
+    strategy = HedgeVolatilityV0(HedgeVolatilityConfig(seed_max_pair_cost=1.10))
+    position = HedgePosition(market_ticker="KXBTC")
+    state = make_state(yes_ask=0.70, no_ask=0.45, slope_30s=9.0)
 
     with caplog.at_level(logging.INFO):
         decisions = strategy.decide(state, position)
 
     assert decisions == []
     assert "decision=REJECT" in caplog.text
-    assert "projected_combined_cost_too_high" in caplog.text
+    assert "seed_pair_cost_too_high" in caplog.text
 
 
 def test_strategy_adds_only_when_projected_combined_average_cost_improves():
@@ -171,3 +186,18 @@ def test_paper_executor_records_decisions_and_positions_to_results_db(tmp_path):
         ("REJECT", "projected_combined_cost_too_high"),
     ]
     assert position_row == pytest.approx((3, 2, 0.55, 0.39, 0.94))
+
+
+def test_imbalance_cap_rejects_over_adding_one_side():
+    strategy = HedgeVolatilityV0(
+        HedgeVolatilityConfig(target_pair_cost=0.98, max_imbalance_ratio=1.5)
+    )
+    position = HedgePosition(market_ticker="KXBTC")
+    now = datetime.now(UTC)
+    position.add_fill(side="yes", price=0.60, contracts=3, ts=now, reason="seed")
+    position.add_fill(side="no", price=0.45, contracts=2, ts=now, reason="seed")
+    state = make_state(yes_ask=0.50, no_ask=0.46, slope_30s=8.0)
+
+    decisions = strategy.decide(state, position)
+
+    assert [decision.side for decision in decisions] == []
