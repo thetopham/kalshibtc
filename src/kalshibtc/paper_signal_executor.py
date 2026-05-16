@@ -13,12 +13,6 @@ from .execution.paper import PaperExecutor, PaperFill
 from .execution.risk import RiskManager
 from .market.kalshi_public import KalshiPublicClient
 from .market.state import MarketState
-from .runtime_paths import (
-    PREFERRED_RESULTS_DB,
-    PREFERRED_SNAPSHOT_DB,
-    resolve_results_db,
-    resolve_snapshot_db,
-)
 from .storage.paper_signal_store import (
     PaperSignalStore,
     SettlementDecision,
@@ -173,19 +167,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--snapshot-db",
-        default=None,
-        help=(
-            "Recorder-owned 1s stream database to SELECT from; this command does not write to it. "
-            f"Defaults to {PREFERRED_SNAPSHOT_DB}, falling back to the old data/ path if already present."
-        ),
+        default="data/realtime-snapshots-1s.sqlite3",
+        help="Recorder-owned 1s stream database to SELECT from; this command does not write to it.",
     )
     parser.add_argument(
         "--results-db",
-        default=None,
-        help=(
-            "Separate writable results database for signals, fake fills, exits, and PnL. "
-            f"Defaults to {PREFERRED_RESULTS_DB}, falling back to the old data-live-prod path if already present."
-        ),
+        default="data-live-prod/paper-results-1s.sqlite3",
+        help="Separate writable results database for signals, fake fills, exits, and PnL.",
     )
     parser.add_argument(
         "--limit", type=int, default=250, help="Max new snapshots to process per pass."
@@ -219,8 +207,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Disable Kalshi official result lookups and settle from Coinbase/raw 1s estimates only.",
     )
     args = parser.parse_args(argv)
-    snapshot_db = resolve_snapshot_db(args.snapshot_db)
-    results_db = resolve_results_db(args.results_db)
 
     official_settlement_client = None
     if not args.no_official_settlement:
@@ -230,8 +216,8 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     trader = OneSecondPaperTrader(
-        snapshot_db=snapshot_db,
-        ledger_db=results_db,
+        snapshot_db=Path(args.snapshot_db),
+        ledger_db=Path(args.results_db),
         official_settlement_client=official_settlement_client,
     )
 
