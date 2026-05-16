@@ -12,6 +12,10 @@ class Signal:
     reason: str
     confidence: float
     strategy: str = "manual"
+    target_notional: float | None = None
+    estimated_shares: float | None = None
+    features: dict[str, float | bool | str | None] | None = None
+    allow_price_strike_mismatch: bool = False
 
 
 class Strategy(Protocol):

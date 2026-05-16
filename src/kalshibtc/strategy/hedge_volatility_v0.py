@@ -30,6 +30,11 @@ class HedgeVolatilityConfig:
     rebalance_after_target: bool = True
     max_unpaired_contracts: float = 2.0
     prefer_smaller_side_when_paired_cost_below_target: bool = True
+    rebalance_seconds_to_expiry: float = 180.0
+    force_balance_near_expiry: bool = True
+    allow_balance_add_above_target: bool = True
+    max_balance_add_pair_cost: float = 1.02
+    target_final_unpaired_contracts: float = 0.0
 
     @property
     def add_target_pair_cost(self) -> float:
@@ -78,6 +83,8 @@ class HedgeVolatilityV0:
 
         if position.yes_contracts == 0.0 and position.no_contracts == 0.0:
             return self._seed_decisions(state, position=position, trend_side=trend_side)
+        if self._is_expiry_rebalance_window(state):
+            return self._expiry_rebalance_decisions(state, position=position, trend_side=trend_side)
         return self._add_decisions(state, position=position, trend_side=trend_side)
 
     def _seed_decisions(
@@ -259,6 +266,113 @@ class HedgeVolatilityV0:
                 projected_combined_average_cost=projected_cost,
             )
         return decisions
+
+    def _expiry_rebalance_decisions(
+        self,
+        state: MarketState,
+        *,
+        position: HedgePosition,
+        trend_side: str,
+    ) -> list[HedgeDecision]:
+        assert state.orderbook.yes_ask is not None
+        assert state.orderbook.no_ask is not None
+        if not self.config.force_balance_near_expiry:
+            return self._add_decisions(state, position=position, trend_side=trend_side)
+        unpaired = abs(position.yes_contracts - position.no_contracts)
+        if unpaired <= self.config.target_final_unpaired_contracts:
+            self._log(
+                "REJECT",
+                state,
+                reason="no_expiry_balance_needed",
+                trend_side=trend_side,
+                position=position,
+            )
+            return []
+        if position.yes_contracts == position.no_contracts:
+            return []
+
+        smaller_side = "yes" if position.yes_contracts < position.no_contracts else "no"
+        larger_side = "no" if smaller_side == "yes" else "yes"
+        price = state.orderbook.yes_ask if smaller_side == "yes" else state.orderbook.no_ask
+        larger_price = state.orderbook.no_ask if larger_side == "no" else state.orderbook.yes_ask
+
+        self._log(
+            "REJECT",
+            state,
+            reason="expiry_balance_reject_larger_side",
+            trend_side=trend_side,
+            position=position,
+            side=larger_side,
+            price=larger_price,
+        )
+        projected_cost = position.projected_combined_average_cost(
+            side=smaller_side,
+            price=price,
+            contracts=self.config.add_contracts,
+        )
+        if projected_cost is None:
+            return []
+        max_pair_cost = (
+            self.config.max_balance_add_pair_cost
+            if self.config.allow_balance_add_above_target
+            else self.config.add_target_pair_cost
+        )
+        if projected_cost > max_pair_cost:
+            self._log(
+                "REJECT",
+                state,
+                reason="expiry_balance_pair_cost_too_high",
+                trend_side=trend_side,
+                position=position,
+                side=smaller_side,
+                price=price,
+                projected_combined_average_cost=projected_cost,
+                target_pair_cost=self.config.add_target_pair_cost,
+                max_balance_add_pair_cost=max_pair_cost,
+            )
+            return []
+
+        projected_yes = position.yes_contracts + (self.config.add_contracts if smaller_side == "yes" else 0.0)
+        projected_no = position.no_contracts + (self.config.add_contracts if smaller_side == "no" else 0.0)
+        if projected_yes + projected_no > self.config.max_contracts_per_market:
+            self._log(
+                "REJECT",
+                state,
+                reason="max_contracts_per_market_reached",
+                trend_side=trend_side,
+                position=position,
+                side=smaller_side,
+                price=price,
+            )
+            return []
+
+        decision = HedgeDecision(
+            side=smaller_side,
+            contracts=self.config.add_contracts,
+            price=price,
+            reason="expiry_balance_add_smaller_side",
+            projected_combined_average_cost=projected_cost,
+        )
+        self._log(
+            "ALLOW",
+            state,
+            reason=decision.reason,
+            trend_side=trend_side,
+            position=position,
+            side=decision.side,
+            contracts=decision.contracts,
+            price=decision.price,
+            projected_combined_average_cost=projected_cost,
+            projected_yes_contracts=projected_yes,
+            projected_no_contracts=projected_no,
+        )
+        return [decision]
+
+    def _is_expiry_rebalance_window(self, state: MarketState) -> bool:
+        return (
+            self.config.force_balance_near_expiry
+            and state.seconds_to_close <= self.config.rebalance_seconds_to_expiry
+        )
 
     def _would_increase_directional_imbalance(
         self,

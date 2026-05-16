@@ -288,3 +288,86 @@ def test_add_to_smaller_side_allowed_if_it_improves_cost():
     decisions = strategy.decide(state, position)
 
     assert [(decision.side, decision.price) for decision in decisions] == [("no", 0.35)]
+
+
+
+def _imbalanced_position(*, yes_contracts: float, no_contracts: float) -> HedgePosition:
+    position = HedgePosition(market_ticker="KXBTC")
+    now = datetime.now(UTC)
+    position.add_fill(side="yes", price=0.60, contracts=yes_contracts, ts=now, reason="seed")
+    position.add_fill(side="no", price=0.40, contracts=no_contracts, ts=now, reason="seed")
+    return position
+
+
+def test_near_expiry_smaller_side_add_is_allowed_to_reduce_imbalance():
+    strategy = HedgeVolatilityV0(
+        HedgeVolatilityConfig(
+            target_pair_cost=0.95,
+            max_balance_add_pair_cost=1.02,
+            max_contracts_per_market=20,
+        )
+    )
+    position = _imbalanced_position(yes_contracts=5, no_contracts=3)
+    state = make_state(
+        ts=datetime(2026, 5, 15, 12, 12, 30, tzinfo=UTC),
+        close_time=datetime(2026, 5, 15, 12, 15, tzinfo=UTC),
+        yes_ask=0.45,
+        no_ask=0.41,
+    )
+
+    decisions = strategy.decide(state, position)
+
+    assert [(decision.side, decision.reason) for decision in decisions] == [
+        ("no", "expiry_balance_add_smaller_side")
+    ]
+
+
+def test_near_expiry_larger_side_add_is_rejected():
+    strategy = HedgeVolatilityV0(
+        HedgeVolatilityConfig(
+            target_pair_cost=0.95,
+            max_balance_add_pair_cost=1.02,
+            max_contracts_per_market=20,
+        )
+    )
+    position = _imbalanced_position(yes_contracts=5, no_contracts=3)
+    state = make_state(
+        ts=datetime(2026, 5, 15, 12, 12, 30, tzinfo=UTC),
+        close_time=datetime(2026, 5, 15, 12, 15, tzinfo=UTC),
+        yes_ask=0.45,
+        no_ask=0.70,
+    )
+
+    decisions = strategy.decide(state, position)
+
+    assert decisions == []
+
+
+def test_balance_add_can_exceed_target_pair_cost_but_not_max_balance_add_pair_cost(caplog):
+    strategy = HedgeVolatilityV0(
+        HedgeVolatilityConfig(
+            target_pair_cost=0.95,
+            max_balance_add_pair_cost=1.02,
+            max_contracts_per_market=20,
+        )
+    )
+    position = _imbalanced_position(yes_contracts=5, no_contracts=3)
+    state_allowed = make_state(
+        ts=datetime(2026, 5, 15, 12, 12, 30, tzinfo=UTC),
+        close_time=datetime(2026, 5, 15, 12, 15, tzinfo=UTC),
+        yes_ask=0.45,
+        no_ask=0.41,
+    )
+    state_rejected = make_state(
+        ts=datetime(2026, 5, 15, 12, 12, 31, tzinfo=UTC),
+        close_time=datetime(2026, 5, 15, 12, 15, tzinfo=UTC),
+        yes_ask=0.45,
+        no_ask=0.70,
+    )
+
+    assert strategy.decide(state_allowed, position)[0].projected_combined_average_cost > 0.95
+    with caplog.at_level(logging.INFO):
+        rejected = strategy.decide(state_rejected, position)
+
+    assert rejected == []
+    assert "expiry_balance_pair_cost_too_high" in caplog.text
