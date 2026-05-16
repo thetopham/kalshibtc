@@ -42,6 +42,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-distance-from-strike", type=float, default=0.0)
     parser.add_argument("--min-seconds-to-expiry", type=float, default=45.0)
     parser.add_argument("--max-seconds-to-expiry", type=float, default=14.5 * 60.0)
+    parser.add_argument("--rebalance-seconds-to-expiry", type=float, default=180.0)
+    parser.add_argument("--max-balance-add-pair-cost", type=float, default=1.02)
+    parser.add_argument("--target-final-unpaired-contracts", type=float, default=0.0)
+    parser.add_argument(
+        "--no-force-balance-near-expiry",
+        action="store_true",
+        help="Disable expiry-window smaller-side force balancing.",
+    )
+    parser.add_argument(
+        "--no-allow-balance-add-above-target",
+        action="store_true",
+        help="Require expiry balance adds to stay below target pair cost.",
+    )
     parser.add_argument("--volatility-window", type=int, default=30)
     parser.add_argument("--settlement-price", type=float, default=None)
     parser.add_argument("--settlements-csv", default=None, help="CSV with market_ticker,settlement_price columns.")
@@ -82,6 +95,11 @@ def main(argv: list[str] | None = None) -> int:
         min_seconds_to_expiry=args.min_seconds_to_expiry,
         max_seconds_to_expiry=args.max_seconds_to_expiry,
         target_pair_cost=args.max_projected_pair_cost,
+        rebalance_seconds_to_expiry=args.rebalance_seconds_to_expiry,
+        force_balance_near_expiry=not args.no_force_balance_near_expiry,
+        allow_balance_add_above_target=not args.no_allow_balance_add_above_target,
+        max_balance_add_pair_cost=args.max_balance_add_pair_cost,
+        target_final_unpaired_contracts=args.target_final_unpaired_contracts,
     )
     try:
         summary = run_replay(
@@ -158,6 +176,7 @@ def run_replay(
     fills = 0
     seed_fills = 0
     add_fills = 0
+    expiry_balance_fills = 0
     paired_costs: list[float] = []
     unpaired_counts_seen: list[float] = []
     buy_both_costs: list[float] = []
@@ -209,6 +228,9 @@ def run_replay(
                     fills += 1
                     if decision.reason.startswith("seed_"):
                         seed_fills += 1
+                    elif decision.reason == "expiry_balance_add_smaller_side":
+                        expiry_balance_fills += 1
+                        add_fills += 1
                     else:
                         add_fills += 1
                     if position.combined_average_cost is not None:
@@ -258,6 +280,7 @@ def run_replay(
         orderbook_snapshots_logged=orderbook_snapshots_logged,
         seed_fills=seed_fills,
         add_fills=add_fills,
+        expiry_balance_fills=expiry_balance_fills,
         paired_costs=paired_costs,
         unpaired_counts_seen=unpaired_counts_seen,
         diagnostic_summary=diagnostics_tracker.summary(),
@@ -436,6 +459,10 @@ def evaluate_settlements_by_market(
         "losing_markets": sum(1 for row in rows if float(row["realized_pnl"] or 0.0) < 0.0),
         "avg_pnl_per_market": _round(total_realized_pnl / len(rows) if rows else None),
     }
+    total_final_yes = sum(position.yes_contracts for position in positions.values())
+    total_final_no = sum(position.no_contracts for position in positions.values())
+    aggregate["final_unpaired_yes_contracts"] = _round(max(0.0, total_final_yes - total_final_no))
+    aggregate["final_unpaired_no_contracts"] = _round(max(0.0, total_final_no - total_final_yes))
     return {"aggregate": aggregate, "markets": rows}
 
 
@@ -872,6 +899,7 @@ def _summary_payload(
     orderbook_snapshots_logged: int,
     seed_fills: int,
     add_fills: int,
+    expiry_balance_fills: int,
     paired_costs: list[float],
     unpaired_counts_seen: list[float],
     diagnostic_summary: dict[str, float | None],
@@ -895,6 +923,7 @@ def _summary_payload(
         "orderbook_snapshots_logged": orderbook_snapshots_logged,
         "seed_fills": seed_fills,
         "add_fills": add_fills,
+        "expiry_balance_fills": expiry_balance_fills,
         "final_unpaired_yes_contracts": _round(final_unpaired_yes),
         "final_unpaired_no_contracts": _round(final_unpaired_no),
         "max_unpaired_contracts_seen": _round(max(unpaired_counts_seen) if unpaired_counts_seen else 0.0),

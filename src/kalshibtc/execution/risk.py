@@ -41,10 +41,11 @@ class RiskManager:
             blocked_by.append("confidence_below_min")
         if not book_is_valid(state.orderbook):
             blocked_by.append("invalid_orderbook")
-        if signal.side == "long_above" and state.price <= state.strike:
-            blocked_by.append("price_not_above_strike")
-        if signal.side == "long_below" and state.price >= state.strike:
-            blocked_by.append("price_not_below_strike")
+        if not signal.allow_price_strike_mismatch:
+            if signal.side == "long_above" and state.price <= state.strike:
+                blocked_by.append("price_not_above_strike")
+            if signal.side == "long_below" and state.price >= state.strike:
+                blocked_by.append("price_not_below_strike")
 
         entry_price = entry_price_for_signal(signal.side, state.orderbook)
         spread = spread_for_signal(signal.side, state.orderbook)
@@ -54,7 +55,8 @@ class RiskManager:
             blocked_by.append("spread_too_wide")
 
         allowed = not blocked_by
-        size = self.limits.clamp_size(self.limits.base_size_dollars) if allowed else 0.0
+        requested_size = signal.target_notional if signal.target_notional is not None else self.limits.base_size_dollars
+        size = self.limits.clamp_size(requested_size) if allowed else 0.0
         return RiskDecision(
             allowed=allowed,
             side=signal.side,

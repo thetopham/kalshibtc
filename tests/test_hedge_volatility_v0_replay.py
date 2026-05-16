@@ -5,6 +5,7 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 
 from kalshibtc.replay.hedge_volatility_v0 import evaluate_settlement, main, run_replay
+from kalshibtc.strategy.hedge_volatility_v0 import HedgeVolatilityConfig
 
 
 def create_feed_db(path):
@@ -269,6 +270,118 @@ def test_cli_accepts_settlement_args(tmp_path, capsys):
     assert out["settlement_source"] == "manual"
     assert out["winning_side"] == "yes"
 
+
+
+def create_expiry_rebalance_feed_db(path):
+    con = sqlite3.connect(path)
+    con.execute(
+        """
+        CREATE TABLE realtime_snapshots_1s (
+            ts TEXT NOT NULL,
+            market_ticker TEXT NOT NULL,
+            market_open_time TEXT,
+            market_close_time TEXT NOT NULL,
+            btc_price REAL NOT NULL,
+            strike REAL NOT NULL,
+            target_price REAL,
+            distance_from_strike REAL,
+            seconds_to_close REAL,
+            btc_velocity_30s REAL,
+            slope_30s REAL,
+            yes_bid REAL,
+            yes_ask REAL,
+            no_bid REAL,
+            no_ask REAL,
+            orderbook_sequence INTEGER,
+            execution_blocked_by_json TEXT NOT NULL,
+            raw_state_json TEXT NOT NULL,
+            raw_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (market_ticker, ts)
+        )
+        """
+    )
+    base = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
+    close = base + timedelta(minutes=15)
+    rows = [
+        (base + timedelta(minutes=1), 50150, 0.60, 0.40, 10.0),
+        (base + timedelta(minutes=2), 50170, 0.39, 0.41, 10.0),
+        (base + timedelta(minutes=12, seconds=30), 50190, 0.46, 0.50, 10.0),
+    ]
+    for seq, (ts, price, yes_ask, no_ask, slope) in enumerate(rows, start=1):
+        con.execute(
+            """
+            INSERT INTO realtime_snapshots_1s (
+                ts, market_ticker, market_open_time, market_close_time, btc_price, strike,
+                target_price, distance_from_strike, seconds_to_close, btc_velocity_30s,
+                slope_30s, yes_bid, yes_ask, no_bid, no_ask, orderbook_sequence,
+                execution_blocked_by_json, raw_state_json, raw_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ts.isoformat(),
+                "KXBTCD-26MAY151215-T50000",
+                base.isoformat(),
+                close.isoformat(),
+                price,
+                50_000,
+                50_000,
+                price - 50_000,
+                (close - ts).total_seconds(),
+                slope,
+                slope,
+                yes_ask - 0.02,
+                yes_ask,
+                no_ask - 0.02,
+                no_ask,
+                seq,
+                "[]",
+                "{}",
+                json.dumps({"expiry_rebalance_fixture": True}),
+                ts.isoformat(),
+            ),
+        )
+    con.commit()
+
+
+def test_settled_pnl_improves_when_expiry_rebalance_pairs_losing_unpaired_side(tmp_path):
+    plain_feed_db = tmp_path / "plain.sqlite3"
+    balanced_feed_db = tmp_path / "balanced.sqlite3"
+    runs_dir = tmp_path / "runs"
+    create_expiry_rebalance_feed_db(plain_feed_db)
+    create_expiry_rebalance_feed_db(balanced_feed_db)
+
+    without_balance = run_replay(
+        feed_db=plain_feed_db,
+        runs_dir=runs_dir,
+        run_id="without-balance",
+        from_ts=None,
+        to_ts=None,
+        settlement_price=49_900.0,
+        config=HedgeVolatilityConfig(
+            force_balance_near_expiry=False,
+            max_unpaired_contracts=10,
+            max_imbalance_ratio=10,
+        ),
+    )
+    with_balance = run_replay(
+        feed_db=balanced_feed_db,
+        runs_dir=runs_dir,
+        run_id="with-balance",
+        from_ts=None,
+        to_ts=None,
+        settlement_price=49_900.0,
+        config=HedgeVolatilityConfig(
+            max_balance_add_pair_cost=1.02,
+            max_unpaired_contracts=10,
+            max_imbalance_ratio=10,
+        ),
+    )
+
+    assert with_balance["expiry_balance_fills"] == 1
+    assert with_balance["final_unpaired_yes_contracts"] < without_balance["final_unpaired_yes_contracts"]
+    assert with_balance["unpaired_directional_pnl"] > without_balance["unpaired_directional_pnl"]
+    assert with_balance["realized_pnl"] > without_balance["realized_pnl"]
 
 def _position(*, yes_price: float, yes_contracts: float, no_price: float, no_contracts: float):
     from kalshibtc.portfolio.hedge_position import HedgePosition

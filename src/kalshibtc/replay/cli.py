@@ -9,8 +9,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ..config import BotConfig, RiskLimits
 from ..backtest.metrics import compute_metrics
+from ..config import BotConfig, RiskLimits
 from ..datafeed.models import OrderBookSnapshot, Tick
 from ..execution.paper import PaperFill
 from ..execution.risk import RiskDecision, RiskManager
@@ -75,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     ).run(ticks=ticks, books=books)
 
     results_db = run_dir / "results.sqlite3"
-    _write_results(results_db, report.results)
+    _write_results(results_db, report.results, strategies=[strategy])
     config_text = _config_text(args=args, feed_db=feed_db, run_id=run_id)
     (run_dir / "config.toml").write_text(config_text, encoding="utf-8")
     metrics = _metrics_payload(
@@ -85,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         strategy=args.strategy,
         max_open_positions=args.max_open_positions,
         settlement_rows=rows,
+        strategies=[strategy],
     )
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -157,7 +158,7 @@ def _rows_to_replay_inputs(rows: list[sqlite3.Row]) -> tuple[list[Tick], list[Or
     return ticks, books, contract
 
 
-def _write_results(path: Path, results: list[Any]) -> None:
+def _write_results(path: Path, results: list[Any], *, strategies: Sequence[Any] | None = None) -> None:
     with sqlite3.connect(path) as conn:
         conn.executescript(
             """
@@ -181,6 +182,56 @@ def _write_results(path: Path, results: list[Any]) -> None:
                 contracts REAL NOT NULL,
                 notional REAL NOT NULL,
                 raw_json TEXT NOT NULL
+            );
+            CREATE TABLE volatility_features (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                market_ticker TEXT NOT NULL,
+                atr_1m REAL NOT NULL,
+                atr_expansion_rate REAL NOT NULL,
+                distance_from_strike REAL NOT NULL,
+                distance_from_strike_abs REAL NOT NULL,
+                velocity_away_from_strike REAL NOT NULL,
+                velocity_slowdown REAL NOT NULL,
+                macd_histogram REAL NOT NULL,
+                macd_slope REAL NOT NULL,
+                time_to_expiry_seconds REAL NOT NULL,
+                volatility_regime_score REAL NOT NULL,
+                expansion_regime INTEGER NOT NULL,
+                stabilization_regime INTEGER NOT NULL,
+                compression_regime INTEGER NOT NULL
+            );
+            CREATE TABLE inventory_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                market_ticker TEXT NOT NULL,
+                side TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                target_notional REAL NOT NULL,
+                estimated_shares REAL NOT NULL,
+                entry_price REAL,
+                raw_json TEXT NOT NULL
+            );
+            CREATE TABLE inventory_positions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                market_ticker TEXT NOT NULL,
+                above_qty REAL NOT NULL,
+                above_avg_price REAL NOT NULL,
+                below_qty REAL NOT NULL,
+                below_avg_price REAL NOT NULL,
+                blended_basis REAL,
+                imbalance_ratio REAL NOT NULL
+            );
+            CREATE TABLE inventory_equity_curve (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                market_ticker TEXT NOT NULL,
+                mtm_value REAL NOT NULL,
+                cost_basis REAL NOT NULL,
+                unrealized_pnl REAL NOT NULL,
+                above_mark REAL,
+                below_mark REAL
             );
             """
         )
@@ -232,6 +283,94 @@ def _write_results(path: Path, results: list[Any]) -> None:
                         json.dumps(fill.__dict__, default=str, sort_keys=True),
                     ),
                 )
+        _write_inventory_research_tables(conn, strategies or [])
+
+
+def _write_inventory_research_tables(conn: sqlite3.Connection, strategies: Sequence[Any]) -> None:
+    for strategy in strategies:
+        for decision in getattr(strategy, "decisions", []):
+            features = decision.features.as_dict()
+            conn.execute(
+                """
+                INSERT INTO volatility_features (
+                    ts, market_ticker, atr_1m, atr_expansion_rate, distance_from_strike,
+                    distance_from_strike_abs, velocity_away_from_strike, velocity_slowdown,
+                    macd_histogram, macd_slope, time_to_expiry_seconds,
+                    volatility_regime_score, expansion_regime, stabilization_regime, compression_regime
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    decision.ts,
+                    decision.market_ticker,
+                    features["atr_1m"],
+                    features["atr_expansion_rate"],
+                    features["distance_from_strike"],
+                    features["distance_from_strike_abs"],
+                    features["velocity_away_from_strike"],
+                    features["velocity_slowdown"],
+                    features["macd_histogram"],
+                    features["macd_slope"],
+                    features["time_to_expiry_seconds"],
+                    features["volatility_regime_score"],
+                    1 if features["expansion_regime"] else 0,
+                    1 if features["stabilization_regime"] else 0,
+                    1 if features["compression_regime"] else 0,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO inventory_decisions (
+                    ts, market_ticker, side, reason, target_notional, estimated_shares,
+                    entry_price, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    decision.ts,
+                    decision.market_ticker,
+                    decision.side,
+                    decision.reason,
+                    decision.target_notional,
+                    decision.estimated_shares,
+                    decision.entry_price,
+                    json.dumps({"features": features}, sort_keys=True),
+                ),
+            )
+        for position in getattr(strategy, "position_history", []):
+            conn.execute(
+                """
+                INSERT INTO inventory_positions (
+                    ts, market_ticker, above_qty, above_avg_price, below_qty,
+                    below_avg_price, blended_basis, imbalance_ratio
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    position.ts,
+                    position.market_ticker,
+                    position.above_qty,
+                    position.above_avg_price,
+                    position.below_qty,
+                    position.below_avg_price,
+                    position.blended_basis,
+                    position.imbalance_ratio,
+                ),
+            )
+        for equity in getattr(strategy, "equity_curve", []):
+            conn.execute(
+                """
+                INSERT INTO inventory_equity_curve (
+                    ts, market_ticker, mtm_value, cost_basis, unrealized_pnl, above_mark, below_mark
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    equity.ts,
+                    equity.market_ticker,
+                    equity.mtm_value,
+                    equity.cost_basis,
+                    equity.unrealized_pnl,
+                    equity.above_mark,
+                    equity.below_mark,
+                ),
+            )
 
 
 def _metrics_payload(
@@ -242,6 +381,7 @@ def _metrics_payload(
     strategy: str,
     max_open_positions: int,
     settlement_rows: Sequence[Mapping[str, Any] | Any] | None = None,
+    strategies: Sequence[Any] | None = None,
 ) -> dict[str, Any]:
     settled_fills = estimate_replay_fill_pnls(report.fills, settlement_rows or [])
     institutional_metrics: dict[str, Any] = dict(compute_metrics(settled_fills))
@@ -260,7 +400,8 @@ def _metrics_payload(
     institutional_metrics["settled_trades"] = sum(
         1 for fill in settled_fills if fill.get("settlement_source") == "replay_final_snapshot"
     )
-    return {
+    research_metrics = _inventory_research_metrics(strategies or [])
+    payload = {
         "feed_db": str(feed_db),
         "run_dir": str(run_dir),
         "run_id": run_dir.name,
@@ -272,6 +413,49 @@ def _metrics_payload(
         "notional": round(sum(fill.notional for fill in report.fills), 6),
         "max_open_positions": max_open_positions,
         "institutional_metrics": institutional_metrics,
+    }
+    if research_metrics:
+        payload["research_metrics"] = research_metrics
+    return payload
+
+
+def _inventory_research_metrics(strategies: Sequence[Any]) -> dict[str, Any]:
+    feature_rows = 0
+    decisions = 0
+    position_rows = 0
+    equity_rows = 0
+    max_imbalance = 0.0
+    latest_blended_basis = None
+    for strategy in strategies:
+        feature_rows += len(getattr(strategy, "feature_history", []))
+        decisions_list = getattr(strategy, "decisions", [])
+        decisions += sum(1 for decision in decisions_list if getattr(decision, "target_notional", 0.0) > 0)
+        positions = getattr(strategy, "position_history", [])
+        position_rows += len(positions)
+        equity_rows += len(getattr(strategy, "equity_curve", []))
+        if positions:
+            max_imbalance = max(max_imbalance, max(position.imbalance_ratio for position in positions))
+            latest_blended_basis = positions[-1].blended_basis
+    if feature_rows == decisions == position_rows == equity_rows == 0:
+        return {}
+    return {
+        "volatility_feature_rows": feature_rows,
+        "inventory_decisions": decisions,
+        "inventory_position_rows": position_rows,
+        "inventory_equity_rows": equity_rows,
+        "max_inventory_imbalance_ratio": round(max_imbalance, 6),
+        "latest_blended_basis": latest_blended_basis,
+        "tracked_metrics": [
+            "inventory additions vs ATR spikes",
+            "inventory additions vs velocity-away-from-strike",
+            "inventory additions vs MACD histogram extremes",
+            "mark-to-market equity curve",
+            "realized/unrealized PnL",
+            "blended basis over time",
+            "inventory imbalance ratio",
+            "recovery after volatility shocks",
+            "compression after directional expansion",
+        ],
     }
 
 

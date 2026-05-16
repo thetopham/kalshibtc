@@ -9,6 +9,7 @@ from .no_trade_baseline import NoTradeBaselineStrategy
 from .signals import Strategy
 from .simple_directional import SimpleDirectionalStrategy
 from .spread_aware_momentum import SpreadAwareMomentumStrategy
+from .volatility_inventory import VolatilityInventoryStrategy
 
 _FACTORIES: dict[str, Callable[[], Strategy]] = {
     "simple_directional": SimpleDirectionalStrategy,
@@ -17,6 +18,7 @@ _FACTORIES: dict[str, Callable[[], Strategy]] = {
     "late_window_only": LateWindowOnlyStrategy,
     "spread_aware_momentum": SpreadAwareMomentumStrategy,
     "no_trade_baseline": NoTradeBaselineStrategy,
+    "volatility_inventory": VolatilityInventoryStrategy,
 }
 
 

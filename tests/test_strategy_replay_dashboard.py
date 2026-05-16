@@ -18,6 +18,7 @@ EXPECTED_STRATEGIES = {
     "late_window_only",
     "spread_aware_momentum",
     "no_trade_baseline",
+    "volatility_inventory",
 }
 
 
