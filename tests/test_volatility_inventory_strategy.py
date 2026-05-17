@@ -138,6 +138,51 @@ def test_expansion_skips_expensive_momentum_and_waits_for_cheap_hedge() -> None:
     assert signal.target_notional == 0.0
 
 
+def test_overweight_inventory_blocks_more_larger_side_adds() -> None:
+    strategy = VolatilityInventoryStrategy(
+        VolatilityInventoryConfig(
+            min_atr_1m=5.0,
+            expansion_velocity_threshold=2.0,
+            base_notional=10.0,
+            max_inventory_imbalance_ratio=2.0,
+            hedge_entry_threshold=0.30,
+        )
+    )
+    prefix = [_state(100_000.0, 0), _state(100_030.0, 10), _state(100_100.0, 20)]
+    for state in prefix:
+        strategy.on_tick(state)
+    state = _state(100_240.0, 30, yes_ask=0.72, no_ask=0.44)
+    strategy.on_fill(
+        state,
+        PaperFill(
+            strategy=strategy.name,
+            market_ticker=state.contract.ticker,
+            side="long_above",
+            entry_price=0.25,
+            notional=100.0,
+            contracts=400.0,
+            ts=state.tick.ts,
+        ),
+    )
+    strategy.on_fill(
+        state,
+        PaperFill(
+            strategy=strategy.name,
+            market_ticker=state.contract.ticker,
+            side="long_below",
+            entry_price=0.40,
+            notional=20.0,
+            contracts=50.0,
+            ts=state.tick.ts,
+        ),
+    )
+
+    signal = strategy.on_tick(state)
+
+    assert signal.side == "none"
+    assert signal.reason == "inventory imbalance blocks larger-side add"
+
+
 def test_hedge_sizing_scales_up_as_contract_gets_cheaper() -> None:
     base_config = dict(
         min_atr_1m=5.0,
@@ -211,6 +256,56 @@ def test_inventory_updates_only_after_confirmed_paper_fill() -> None:
     assert rejected_position.above_qty == 0.0
     assert rejected_position.below_qty == 0.0
     assert accepted_position.above_qty > 0.0 or accepted_position.below_qty > 0.0
+
+
+def test_inventory_state_resets_when_contract_market_rolls() -> None:
+    strategy = VolatilityInventoryStrategy(
+        VolatilityInventoryConfig(min_atr_1m=5.0, expansion_velocity_threshold=2.0, base_notional=10.0)
+    )
+    first_states = [
+        _state(100_000.0, 0),
+        _state(99_970.0, 10),
+        _state(99_900.0, 20),
+        _state(99_760.0, 30, yes_ask=0.20, no_ask=0.82),
+    ]
+    pipeline = BotPipeline(
+        strategies=[strategy],
+        risk_manager=RiskManager(RiskLimits(base_size_dollars=1.0, max_position_dollars=500.0, max_open_positions=10)),
+        executor=AcceptingExecutor(),
+    )
+    for state in first_states:
+        pipeline.on_state(state)
+    assert strategy.position_history[-1].market_ticker == "KXBTC15M-VOL"
+    assert strategy.position_history[-1].above_qty > 0.0 or strategy.position_history[-1].below_qty > 0.0
+
+    next_contract = ContractWindow(
+        ticker="KXBTC15M-NEXT",
+        strike=100_000.0,
+        open_time=datetime(2026, 5, 15, 12, 15, tzinfo=UTC),
+        close_time=datetime(2026, 5, 15, 12, 30, tzinfo=UTC),
+    )
+    next_tick = Tick(ts=datetime(2026, 5, 15, 12, 15, tzinfo=UTC), price=100_000.0, source="test", symbol="BTC-USD")
+    next_book = OrderBookSnapshot(
+        ts=next_tick.ts,
+        market_ticker="KXBTC15M-NEXT",
+        yes_bid=0.48,
+        yes_ask=0.50,
+        no_bid=0.48,
+        no_ask=0.50,
+    )
+    next_state = MarketStateBuilder(contract=next_contract).from_tick_and_book(
+        tick=next_tick,
+        orderbook=next_book,
+        slope_30s=None,
+    )
+
+    pipeline.on_state(next_state)
+
+    rolled_position = strategy.position_history[-1]
+    assert rolled_position.market_ticker == "KXBTC15M-NEXT"
+    assert rolled_position.above_qty == 0.0
+    assert rolled_position.below_qty == 0.0
+    assert rolled_position.blended_basis is None
 
 
 def test_low_atr_flat_market_produces_no_or_tiny_add() -> None:

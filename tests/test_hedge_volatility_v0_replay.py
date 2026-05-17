@@ -83,6 +83,51 @@ def create_feed_db(path):
     con.commit()
 
 
+def test_cli_exposes_hedge_config_knobs(tmp_path):
+    feed_db = tmp_path / "feed.sqlite3"
+    runs_dir = tmp_path / "runs"
+    create_feed_db(feed_db)
+
+    code = main(
+        [
+            "--feed-db",
+            str(feed_db),
+            "--runs-dir",
+            str(runs_dir),
+            "--run-id",
+            "cli-knobs",
+            "--trend-contracts",
+            "1",
+            "--countertrend-contracts",
+            "1",
+            "--add-contracts",
+            "0.5",
+            "--max-contracts-per-market",
+            "6",
+            "--max-imbalance-ratio",
+            "1.0",
+            "--max-unpaired-contracts",
+            "0",
+            "--max-leg-ask",
+            "0.80",
+            "--seed-max-pair-cost",
+            "1.02",
+            "--json",
+        ]
+    )
+
+    assert code == 0
+    config = json.loads((runs_dir / "replay" / "hedge_volatility_v0" / "cli-knobs" / "config.json").read_text())["config"]
+    assert config["trend_contracts"] == 1.0
+    assert config["countertrend_contracts"] == 1.0
+    assert config["add_contracts"] == 0.5
+    assert config["max_contracts_per_market"] == 6.0
+    assert config["max_imbalance_ratio"] == 1.0
+    assert config["max_unpaired_contracts"] == 0.0
+    assert config["max_leg_ask"] == 0.80
+    assert config["seed_max_pair_cost"] == 1.02
+
+
 def test_run_replay_writes_results_db_and_summary(tmp_path):
     feed_db = tmp_path / "feed.sqlite3"
     runs_dir = tmp_path / "runs"
@@ -671,8 +716,8 @@ def test_replay_uses_market_settlements_from_feed_db(tmp_path):
             50_000,
             50_100,
             "yes",
-            "feed_last_price_proxy",
-            "settled_proxy",
+            "kalshi_api",
+            "settled_official",
             "2026-05-15T12:15:00+00:00",
             "2026-05-15T12:16:30+00:00",
             "{}",
@@ -698,6 +743,48 @@ def test_replay_uses_market_settlements_from_feed_db(tmp_path):
     assert json.loads((run_dir / "settlement.json").read_text())["unsettled_markets"] == 1
     rows = sqlite3.connect(run_dir / "results.sqlite3").execute("select market_ticker, realized_pnl from settlement_by_market").fetchall()
     assert rows == [("KXBTCD-26MAY151215-T50000", 0.06)]
+
+
+def test_replay_ignores_proxy_settlements_from_feed_db(tmp_path):
+    feed_db = tmp_path / "feed.sqlite3"
+    runs_dir = tmp_path / "runs"
+    create_feed_db(feed_db)
+    con = sqlite3.connect(feed_db)
+    ensure_market_settlements_schema(con)
+    con.execute(
+        """
+        INSERT INTO market_settlements (
+            market_ticker, market_open_time, market_close_time, strike, settlement_price,
+            winning_side, source, status, settled_at, fetched_at, raw_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "KXBTCD-26MAY151215-T50000",
+            "2026-05-15T12:00:00+00:00",
+            "2026-05-15T12:15:00+00:00",
+            50_000,
+            50_100,
+            "yes",
+            "feed_last_price_proxy",
+            "settled_proxy",
+            "2026-05-15T12:15:00+00:00",
+            "2026-05-15T12:16:30+00:00",
+            "{}",
+        ),
+    )
+    con.commit()
+
+    summary = run_replay(
+        feed_db=feed_db,
+        runs_dir=runs_dir,
+        run_id="proxy-settlements-ignored",
+        from_ts=None,
+        to_ts=None,
+        settlements_from_feed_db=True,
+    )
+
+    assert summary["settled_markets"] == 0
+    assert summary["unsettled_markets"] == 2
 
 
 def test_replay_settlement_args_are_mutually_exclusive_for_feed_db(tmp_path, capsys):
