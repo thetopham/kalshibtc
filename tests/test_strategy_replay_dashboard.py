@@ -19,6 +19,7 @@ EXPECTED_STRATEGIES = {
     "spread_aware_momentum",
     "no_trade_baseline",
     "volatility_inventory",
+    "simple_inventory_mm",
 }
 
 

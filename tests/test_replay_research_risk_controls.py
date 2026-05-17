@@ -6,11 +6,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from test_feed_replay_architecture import _write_feed_db
 
 from kalshibtc.backtest.metrics import compute_metrics
 from kalshibtc.replay.cli import main as replay_main
-from kalshibtc.replay.settlement import estimate_replay_fill_pnls
+from kalshibtc.replay.settlement import compute_portfolio_settlement, estimate_replay_fill_pnls
 
 
 def test_replay_cli_accepts_max_open_positions_for_research_runs(tmp_path: Path) -> None:
@@ -130,3 +132,63 @@ def test_estimate_replay_fill_pnls_uses_final_snapshot_outcome() -> None:
     assert settled[1]["pnl"] == -30.0
     assert settled[1]["settlement_result"] == "above"
     assert settled[1]["exit_price"] == 0.0
+
+
+def test_portfolio_settlement_scores_inventory_by_market_not_fill() -> None:
+    fills = [
+        _Fill("KXBTC15M-TEST", "long_above", 0.56, 56.0, 100.0, datetime(2026, 5, 15, 12, 1, tzinfo=UTC)),
+        _Fill("KXBTC15M-TEST", "long_below", 0.33, 33.0, 100.0, datetime(2026, 5, 15, 12, 2, tzinfo=UTC)),
+    ]
+    settlements = [
+        {
+            "market_ticker": "KXBTC15M-TEST",
+            "winning_side": "yes",
+            "source": "kalshi_api",
+            "status": "settled_official",
+        }
+    ]
+
+    settlement = compute_portfolio_settlement(fills, settlements)
+
+    market = settlement["markets"][0]
+    assert market["settlement_source"] == "kalshi_api"
+    assert market["gross_payout"] == 100.0
+    assert market["total_cost"] == 89.0
+    assert market["realized_pnl"] == 11.0
+    assert market["paired_cost"] == pytest.approx(0.89)
+    assert market["raw_net_contracts"] == 0.0
+    assert settlement["aggregate"]["realized_pnl"] == 11.0
+
+
+def test_replay_cli_writes_portfolio_settlement_outputs(tmp_path: Path) -> None:
+    feed_db = tmp_path / "feed.sqlite3"
+    runs_dir = tmp_path / "runs"
+    _write_feed_db(feed_db)
+
+    assert replay_main(
+        [
+            "--feed-db",
+            str(feed_db),
+            "--runs-dir",
+            str(runs_dir),
+            "--strategy",
+            "simple_inventory_mm",
+            "--run-id",
+            "portfolio-mm",
+            "--max-open-positions",
+            "10",
+            "--max-position-dollars",
+            "100",
+            "--max-spread",
+            "1.0",
+            "--json",
+        ]
+    ) == 0
+
+    run_dir = runs_dir / "simple_inventory_mm" / "portfolio-mm"
+    metrics = json.loads((run_dir / "metrics.json").read_text())
+    assert "portfolio_settlement" in metrics
+    assert (run_dir / "portfolio_settlement.json").is_file()
+    with sqlite3.connect(run_dir / "results.sqlite3") as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "portfolio_settlement_by_market" in tables
