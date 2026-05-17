@@ -30,6 +30,7 @@ class HedgeVolatilityConfig:
     rebalance_after_target: bool = True
     max_unpaired_contracts: float = 2.0
     prefer_smaller_side_when_paired_cost_below_target: bool = True
+    cheaper_side_only_adds: bool = False
     rebalance_seconds_to_expiry: float = 180.0
     force_balance_near_expiry: bool = True
     allow_balance_add_above_target: bool = True
@@ -141,6 +142,20 @@ class HedgeVolatilityV0:
         decisions: list[HedgeDecision] = []
         current_cost = position.combined_average_cost
         for side, price in (("yes", state.orderbook.yes_ask), ("no", state.orderbook.no_ask)):
+            if self.config.cheaper_side_only_adds:
+                other_price = state.orderbook.no_ask if side == "yes" else state.orderbook.yes_ask
+                if other_price is not None and price > other_price:
+                    self._log(
+                        "REJECT",
+                        state,
+                        reason="not_cheaper_side",
+                        trend_side=trend_side,
+                        position=position,
+                        side=side,
+                        price=price,
+                        other_price=other_price,
+                    )
+                    continue
             if not position.would_improve(side=side, price=price):
                 self._log(
                     "REJECT",

@@ -37,6 +37,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-strike", type=float, default=1000.0)
     parser.add_argument("--max-strike", type=float, default=1_000_000.0)
     parser.add_argument("--max-projected-pair-cost", type=float, default=0.98)
+    parser.add_argument("--seed-max-pair-cost", type=float, default=1.10)
+    parser.add_argument("--trend-contracts", type=float, default=3.0)
+    parser.add_argument("--countertrend-contracts", type=float, default=2.0)
+    parser.add_argument("--add-contracts", type=float, default=1.0)
+    parser.add_argument("--max-contracts-per-market", type=float, default=25.0)
+    parser.add_argument("--max-imbalance-ratio", type=float, default=1.5)
+    parser.add_argument("--max-unpaired-contracts", type=float, default=2.0)
+    parser.add_argument("--max-leg-ask", type=float, default=0.95)
+    parser.add_argument("--cheaper-side-only-adds", action="store_true")
     parser.add_argument("--min-abs-slope", type=float, default=0.0)
     parser.add_argument("--min-recent-volatility", type=float, default=0.0)
     parser.add_argument("--min-distance-from-strike", type=float, default=0.0)
@@ -89,12 +98,21 @@ def main(argv: list[str] | None = None) -> int:
     run_id = args.run_id or datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
     config = HedgeVolatilityConfig(
         max_projected_pair_cost=args.max_projected_pair_cost,
+        target_pair_cost=args.max_projected_pair_cost,
+        seed_max_pair_cost=args.seed_max_pair_cost,
+        trend_contracts=args.trend_contracts,
+        countertrend_contracts=args.countertrend_contracts,
+        add_contracts=args.add_contracts,
+        max_contracts_per_market=args.max_contracts_per_market,
+        max_imbalance_ratio=args.max_imbalance_ratio,
+        max_unpaired_contracts=args.max_unpaired_contracts,
+        max_leg_ask=args.max_leg_ask,
+        cheaper_side_only_adds=args.cheaper_side_only_adds,
         min_abs_slope=args.min_abs_slope,
         min_recent_volatility=args.min_recent_volatility,
         min_distance_from_strike=args.min_distance_from_strike,
         min_seconds_to_expiry=args.min_seconds_to_expiry,
         max_seconds_to_expiry=args.max_seconds_to_expiry,
-        target_pair_cost=args.max_projected_pair_cost,
         rebalance_seconds_to_expiry=args.rebalance_seconds_to_expiry,
         force_balance_near_expiry=not args.no_force_balance_near_expiry,
         allow_balance_add_above_target=not args.no_allow_balance_add_above_target,
@@ -473,18 +491,20 @@ def _load_settlements_csv(path: Path) -> dict[str, float]:
         if not required.issubset(reader.fieldnames or set()):
             raise ValueError("settlements CSV must contain market_ticker,settlement_price columns")
         return {str(row["market_ticker"]): float(row["settlement_price"]) for row in reader}
-
-
 def _load_settlements_from_feed_db(feed_db: Path) -> dict[str, float]:
     with sqlite3.connect(f"file:{feed_db}?mode=ro", uri=True) as conn:
-        rows = conn.execute(
-            """
-            SELECT market_ticker, settlement_price
-            FROM market_settlements
-            WHERE settlement_price IS NOT NULL
-            """
-        ).fetchall()
-    return {str(market_ticker): float(settlement_price) for market_ticker, settlement_price in rows}
+        return {
+            str(row[0]): float(row[1])
+            for row in conn.execute(
+                """
+                SELECT market_ticker, settlement_price
+                FROM market_settlements
+                WHERE settlement_price IS NOT NULL
+                  AND source = 'kalshi_api'
+                  AND status = 'settled_official'
+                """
+            )
+        }
 
 
 def _write_settlement_by_market(*, run_dir: Path, results_db: Path, settlement: dict[str, Any]) -> None:

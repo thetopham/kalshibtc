@@ -58,8 +58,13 @@ class FakeSession:
     def __init__(self, responses: list[dict[str, object]]) -> None:
         self.responses = responses
         self.headers: dict[str, str] = {}
+        self.posts: list[dict[str, object]] = []
 
     def get(self, *_args: object, **_kwargs: object) -> FakeResponse:
+        return FakeResponse(self.responses.pop(0))
+
+    def post(self, *_args: object, **kwargs: object) -> FakeResponse:
+        self.posts.append(kwargs)
         return FakeResponse(self.responses.pop(0))
 
 
@@ -227,6 +232,56 @@ def test_public_snapshot_source_treats_one_cent_orderbook_levels_as_cents() -> N
     assert payload["yes_ask"] == 0.98
     assert payload["no_ask"] == 0.99
     assert payload["orderbook_sequence"] == 123
+
+
+def _uint256_hex(value: int) -> str:
+    return "0x" + f"{value:064x}"
+
+
+def _latest_round_data_hex(*, answer: int, updated_at: int = 1_768_506_300) -> str:
+    words = [1, answer, updated_at - 5, updated_at, 1]
+    return "0x" + "".join(f"{word:064x}" for word in words)
+
+
+def test_public_snapshot_source_can_read_chainlink_btc_usd_price_feed() -> None:
+    session = FakeSession(
+        [
+            {"result": _uint256_hex(8)},
+            {"result": _latest_round_data_hex(answer=10_002_025_000_000)},
+            {
+                "market": {
+                    "ticker": "KXBTC15M-TEST",
+                    "open_time": "2026-05-15T12:00:00Z",
+                    "close_time": "2999-05-15T12:15:00Z",
+                    "floor_strike": "100000",
+                    "yes_bid": 51,
+                    "yes_ask": 53,
+                    "no_bid": 46,
+                    "no_ask": 48,
+                }
+            },
+            {"orderbook": {}},
+        ]
+    )
+    source = PublicRestSnapshotSource(
+        market_ticker="KXBTC15M-TEST",
+        price_source="chainlink",
+        chainlink_rpc_url="https://example-rpc.invalid",
+        session=session,
+    )
+
+    payload = source.snapshot()
+
+    assert payload["btc_price"] == 100_020.25
+    assert payload["btc_price_source"] == "chainlink"
+    assert payload["btc_price_raw"]["feed_address"] == "0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c"
+    assert len(session.posts) == 2
+    first_post = session.posts[0]["json"]
+    second_post = session.posts[1]["json"]
+    assert isinstance(first_post, dict)
+    assert isinstance(second_post, dict)
+    assert first_post["params"][0]["data"] == "0x313ce567"
+    assert second_post["params"][0]["data"] == "0xfeaf968c"
 
 
 def test_recorder_can_write_existing_legacy_shape_stream_table(tmp_path: Path) -> None:

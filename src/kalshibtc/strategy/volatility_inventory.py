@@ -22,6 +22,7 @@ class VolatilityInventoryConfig:
     floor_price: float = 0.05
     min_confidence: float = 0.65
     max_momentum_entry_price: float = 0.85
+    max_inventory_imbalance_ratio: float = 2.0
     hedge_entry_threshold: float = 0.30
     hedge_cheap_25_multiplier: float = 1.5
     hedge_cheap_20_multiplier: float = 2.0
@@ -102,26 +103,40 @@ class VolatilityInventoryStrategy:
     config: VolatilityInventoryConfig = field(default_factory=VolatilityInventoryConfig)
 
     def __post_init__(self) -> None:
-        self._features = VolatilityFeatureBuilder(
+        self._features = self._new_feature_builder()
+        self._positions = self._new_positions()
+        self._active_market_ticker: str | None = None
+        self.feature_history: list[VolatilityFeatures] = []
+        self.decisions: list[InventoryDecision] = []
+        self.position_history: list[InventorySnapshot] = []
+        self.equity_curve: list[EquitySnapshot] = []
+
+    def _new_feature_builder(self) -> VolatilityFeatureBuilder:
+        return VolatilityFeatureBuilder(
             min_atr_1m=self.config.min_atr_1m,
             expansion_velocity_threshold=self.config.expansion_velocity_threshold,
             slowdown_threshold=self.config.slowdown_threshold,
             compression_seconds_to_expiry=self.config.compression_seconds_to_expiry,
         )
-        self._positions: dict[str, InventoryLot] = {
+
+    def _new_positions(self) -> dict[str, InventoryLot]:
+        return {
             "long_above": InventoryLot("long_above", 0.0, 0.0),
             "long_below": InventoryLot("long_below", 0.0, 0.0),
         }
-        self.feature_history: list[VolatilityFeatures] = []
-        self.decisions: list[InventoryDecision] = []
-        self.position_history: list[InventorySnapshot] = []
-        self.equity_curve: list[EquitySnapshot] = []
+
+    def _reset_market_state(self, market_ticker: str) -> None:
+        self._active_market_ticker = market_ticker
+        self._features = self._new_feature_builder()
+        self._positions = self._new_positions()
 
     @property
     def name(self) -> str:
         return self.config.name
 
     def on_tick(self, state: MarketState) -> Signal:
+        if self._active_market_ticker != state.contract.ticker:
+            self._reset_market_state(state.contract.ticker)
         features = self._features.update(state)
         self.feature_history.append(features)
         side, reason = self._choose_side(state, features)
@@ -178,6 +193,8 @@ class VolatilityInventoryStrategy:
             hedge_price = entry_price_for_signal(hedge_side, state.orderbook)
             if hedge_price is not None and hedge_price <= self.config.hedge_entry_threshold:
                 return hedge_side, "expansion cheap hedge accumulation"
+            if self._would_add_to_overweight_side(momentum_side):
+                return "none", "inventory imbalance blocks larger-side add"
             if momentum_price is not None and momentum_price <= self.config.max_momentum_entry_price:
                 return momentum_side, "expansion momentum pyramid"
             blockers = []
@@ -216,6 +233,15 @@ class VolatilityInventoryStrategy:
 
     def _opposite_side(self, side: str) -> str:
         return "long_below" if side == "long_above" else "long_above"
+
+    def _would_add_to_overweight_side(self, side: str) -> bool:
+        side_qty = self._positions[side].qty
+        other_qty = self._positions[self._opposite_side(side)].qty
+        if side_qty <= 0 or other_qty <= 0:
+            return False
+        if side_qty <= other_qty:
+            return False
+        return (side_qty / other_qty) >= self.config.max_inventory_imbalance_ratio
 
     def _volatility_multiplier(self, features: VolatilityFeatures) -> float:
         ratio = features.atr_1m / max(self.config.min_atr_1m, 1e-9)

@@ -120,6 +120,82 @@ def test_settlement_logger_is_idempotent(tmp_path):
     assert con.execute("select count(*) from market_settlements").fetchone()[0] == 1
 
 
+class FakeKalshiClient:
+    def __init__(self, markets):
+        self.markets = markets
+        self.calls = []
+
+    def get_market(self, ticker):
+        self.calls.append(ticker)
+        return self.markets[ticker]
+
+
+def test_settlement_logger_pulls_kalshi_official_once_after_rollover(tmp_path):
+    feed_db = tmp_path / "feed.sqlite3"
+    con = create_feed_db(feed_db)
+    now = datetime(2026, 5, 16, 15, 0, tzinfo=UTC)
+    close = now - timedelta(minutes=5)
+    insert_snapshot(con, ticker="KXBTC-OFFICIAL", ts=close - timedelta(seconds=1), close=close, price=49_900, strike=50_000)
+    con.commit()
+    client = FakeKalshiClient(
+        {
+            "KXBTC-OFFICIAL": {
+                "ticker": "KXBTC-OFFICIAL",
+                "result": "yes",
+                "expiration_value": "50123.45",
+                "close_time": close.isoformat(),
+            }
+        }
+    )
+
+    first = log_expired_settlements(
+        feed_db=feed_db,
+        source="kalshi_api",
+        grace_seconds=90,
+        now=now,
+        kalshi_client=client,
+    )
+    second = log_expired_settlements(
+        feed_db=feed_db,
+        source="kalshi_api",
+        grace_seconds=90,
+        now=now + timedelta(minutes=1),
+        kalshi_client=client,
+    )
+
+    assert first["inserted"] == 1
+    assert second["inserted"] == 0
+    assert second["skipped_existing"] == 1
+    assert client.calls == ["KXBTC-OFFICIAL"]
+    row = con.execute(
+        "select market_ticker, settlement_price, winning_side, source, status, raw_json from market_settlements"
+    ).fetchone()
+    assert row[:5] == ("KXBTC-OFFICIAL", 50123.45, "yes", "kalshi_api", "settled_official")
+    assert json.loads(row[5])["result"] == "yes"
+
+
+def test_settlement_logger_keeps_existing_proxy_when_official_missing(tmp_path):
+    feed_db = tmp_path / "feed.sqlite3"
+    con = create_feed_db(feed_db)
+    now = datetime(2026, 5, 16, 15, 0, tzinfo=UTC)
+    close = now - timedelta(minutes=5)
+    insert_snapshot(con, ticker="KXBTC-PROXY", ts=close - timedelta(seconds=1), close=close, price=49_900, strike=50_000)
+    con.commit()
+    log_expired_settlements(feed_db=feed_db, source="feed_last_price_proxy", grace_seconds=90, now=now)
+
+    summary = log_expired_settlements(
+        feed_db=feed_db,
+        source="kalshi_api",
+        grace_seconds=90,
+        now=now,
+        kalshi_client=FakeKalshiClient({"KXBTC-PROXY": {"ticker": "KXBTC-PROXY", "result": ""}}),
+    )
+
+    assert summary["missing"] == 1
+    row = con.execute("select settlement_price, winning_side, source, status from market_settlements").fetchone()
+    assert row == (49_900.0, "no", "feed_last_price_proxy", "settled_proxy")
+
+
 def test_settlement_logger_cli_json(tmp_path, capsys):
     feed_db = tmp_path / "feed.sqlite3"
     con = create_feed_db(feed_db)

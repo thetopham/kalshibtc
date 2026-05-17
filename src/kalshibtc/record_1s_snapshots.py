@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sqlite3
 import time
@@ -17,6 +18,12 @@ from .strategy.slope import SlopeTracker
 
 KALSHI_PUBLIC_BASE_URL = "https://external-api.kalshi.com/trade-api/v2"
 COINBASE_SPOT_URL = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
+CHAINLINK_BTC_USD_PROXY = "0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c"
+CHAINLINK_ETH_CALL_SELECTOR_LATEST_ROUND_DATA = "0xfeaf968c"
+CHAINLINK_ETH_CALL_SELECTOR_DECIMALS = "0x313ce567"
+DEFAULT_CHAINLINK_RPC_URL = "https://ethereum.publicnode.com"
+PRICE_SOURCE_COINBASE = "coinbase"
+PRICE_SOURCE_CHAINLINK = "chainlink"
 STREAM_TABLE = "realtime_snapshots_1s"
 DEFAULT_SERIES_TICKER = "KXBTC15M"
 
@@ -65,9 +72,13 @@ _OPTIONAL_COLUMN_DEFS = {
 }
 
 __all__ = [
+    "CHAINLINK_BTC_USD_PROXY",
     "COINBASE_SPOT_URL",
+    "DEFAULT_CHAINLINK_RPC_URL",
     "DEFAULT_SERIES_TICKER",
     "KALSHI_PUBLIC_BASE_URL",
+    "PRICE_SOURCE_CHAINLINK",
+    "PRICE_SOURCE_COINBASE",
     "RealtimeSnapshotRecorder",
     "SNAPSHOT_COLUMNS",
     "STREAM_TABLE",
@@ -172,6 +183,9 @@ class PublicRestSnapshotSource:
         *,
         kalshi_base_url: str = KALSHI_PUBLIC_BASE_URL,
         coinbase_spot_url: str = COINBASE_SPOT_URL,
+        chainlink_rpc_url: str | None = None,
+        chainlink_feed_address: str = CHAINLINK_BTC_USD_PROXY,
+        price_source: str = PRICE_SOURCE_COINBASE,
         series_ticker: str = DEFAULT_SERIES_TICKER,
         market_ticker: str | None = None,
         timeout_seconds: int = 10,
@@ -179,6 +193,9 @@ class PublicRestSnapshotSource:
     ) -> None:
         self.kalshi_base_url = kalshi_base_url.rstrip("/")
         self.coinbase_spot_url = coinbase_spot_url
+        self.chainlink_rpc_url = chainlink_rpc_url or os.environ.get("CHAINLINK_RPC_URL") or DEFAULT_CHAINLINK_RPC_URL
+        self.chainlink_feed_address = chainlink_feed_address
+        self.price_source = price_source
         self.series_ticker = series_ticker
         self.market_ticker = market_ticker
         self.timeout_seconds = timeout_seconds
@@ -190,10 +207,10 @@ class PublicRestSnapshotSource:
 
     def snapshot(self) -> dict[str, Any]:
         now = _now_utc()
-        btc_price = self._btc_price()
+        btc_price, btc_raw = self._btc_price()
         market = self._current_market(now=now)
         quote = self._top_orderbook_quote(str(market["ticker"]))
-        tick = Tick(ts=now, price=btc_price, source="coinbase_rest", raw={"url": self.coinbase_spot_url})
+        tick = Tick(ts=now, price=btc_price, source=f"{self.price_source}_rest", raw=btc_raw)
         self.slope_tracker.add(tick)
         slope_30s = self.slope_tracker.velocity()
 
@@ -223,12 +240,18 @@ class PublicRestSnapshotSource:
             "no_ask": quote.get("no_ask") if quote.get("no_ask") is not None else _prob(market, "no_ask"),
             "orderbook_sequence": quote.get("orderbook_sequence"),
             "source": "public_rest",
+            "btc_price_source": self.price_source,
+            "btc_price_raw": btc_raw,
             "market_raw": market,
             "orderbook_raw": quote.get("raw"),
         }
         return payload
 
-    def _btc_price(self) -> float:
+    def _btc_price(self) -> tuple[float, dict[str, Any]]:
+        if self.price_source == PRICE_SOURCE_CHAINLINK:
+            return self._chainlink_btc_price()
+        if self.price_source != PRICE_SOURCE_COINBASE:
+            raise ValueError(f"Unsupported BTC price source: {self.price_source}")
         response = self.session.get(self.coinbase_spot_url, timeout=self.timeout_seconds)
         response.raise_for_status()
         payload = response.json()
@@ -237,11 +260,54 @@ class PublicRestSnapshotSource:
             if isinstance(data, Mapping):
                 price = _float_or_none(data.get("amount"))
                 if price is not None:
-                    return price
+                    return price, {"source": PRICE_SOURCE_COINBASE, "url": self.coinbase_spot_url, "payload": payload}
             price = _float_or_none(payload.get("price"))
             if price is not None:
-                return price
+                return price, {"source": PRICE_SOURCE_COINBASE, "url": self.coinbase_spot_url, "payload": payload}
         raise ValueError("Coinbase spot response did not include a BTC price")
+
+    def _chainlink_btc_price(self) -> tuple[float, dict[str, Any]]:
+        decimals_payload = self._eth_call(CHAINLINK_ETH_CALL_SELECTOR_DECIMALS)
+        latest_round_payload = self._eth_call(CHAINLINK_ETH_CALL_SELECTOR_LATEST_ROUND_DATA)
+        decimals = _decode_uint256(decimals_payload)
+        words = _decode_words(latest_round_payload, min_words=5)
+        answer = _decode_int256_word(words[1])
+        updated_at = int(words[3], 16)
+        answered_in_round = int(words[4], 16)
+        if answer <= 0:
+            raise ValueError("Chainlink BTC/USD latestRoundData answer was not positive")
+        price = answer / float(10**decimals)
+        return price, {
+            "source": PRICE_SOURCE_CHAINLINK,
+            "rpc_url": self.chainlink_rpc_url,
+            "feed_address": self.chainlink_feed_address,
+            "decimals": decimals,
+            "round_id": int(words[0], 16),
+            "updated_at": updated_at,
+            "answered_in_round": answered_in_round,
+        }
+
+    def _eth_call(self, data: str) -> str:
+        response = self.session.post(
+            self.chainlink_rpc_url,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "eth_call",
+                "params": [{"to": self.chainlink_feed_address, "data": data}, "latest"],
+            },
+            timeout=self.timeout_seconds,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, Mapping):
+            raise ValueError("Chainlink RPC response was not a JSON object")
+        if payload.get("error"):
+            raise ValueError(f"Chainlink RPC error: {payload['error']}")
+        result = payload.get("result")
+        if not isinstance(result, str) or not result.startswith("0x"):
+            raise ValueError("Chainlink RPC response missing hex result")
+        return result
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         response = self.session.get(
@@ -395,6 +461,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--kalshi-base-url", default=KALSHI_PUBLIC_BASE_URL)
     parser.add_argument("--coinbase-spot-url", default=COINBASE_SPOT_URL)
+    parser.add_argument(
+        "--btc-price-source",
+        choices=[PRICE_SOURCE_COINBASE, PRICE_SOURCE_CHAINLINK],
+        default=os.environ.get("KBTC_BTC_PRICE_SOURCE", PRICE_SOURCE_COINBASE),
+        help="BTC/USD source for recorded btc_price. Coinbase is default; Chainlink uses BTC/USD on Ethereum.",
+    )
+    parser.add_argument(
+        "--chainlink-rpc-url",
+        default=None,
+        help=f"Ethereum JSON-RPC URL for Chainlink reads. Default: CHAINLINK_RPC_URL or {DEFAULT_CHAINLINK_RPC_URL}.",
+    )
+    parser.add_argument(
+        "--chainlink-feed-address",
+        default=CHAINLINK_BTC_USD_PROXY,
+        help="Chainlink BTC/USD AggregatorV3 proxy address.",
+    )
     parser.add_argument("--timeout-seconds", type=int, default=10)
     parser.add_argument(
         "--max-consecutive-errors",
@@ -408,6 +490,9 @@ def main(argv: list[str] | None = None) -> int:
     source = PublicRestSnapshotSource(
         kalshi_base_url=args.kalshi_base_url,
         coinbase_spot_url=args.coinbase_spot_url,
+        chainlink_rpc_url=args.chainlink_rpc_url,
+        chainlink_feed_address=args.chainlink_feed_address,
+        price_source=args.btc_price_source,
         series_ticker=args.series_ticker,
         market_ticker=args.market_ticker,
         timeout_seconds=args.timeout_seconds,
@@ -516,6 +601,24 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _decode_words(hex_data: str, *, min_words: int) -> list[str]:
+    text = hex_data[2:] if hex_data.startswith("0x") else hex_data
+    if len(text) < min_words * 64:
+        raise ValueError("Chainlink RPC result was shorter than expected")
+    return [text[index : index + 64] for index in range(0, len(text), 64)]
+
+
+def _decode_uint256(hex_data: str) -> int:
+    return int(_decode_words(hex_data, min_words=1)[0], 16)
+
+
+def _decode_int256_word(word: str) -> int:
+    value = int(word, 16)
+    if value >= 2**255:
+        value -= 2**256
+    return value
 
 
 def _round_or_none(value: float | None, digits: int) -> float | None:
