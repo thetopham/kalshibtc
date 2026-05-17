@@ -252,6 +252,30 @@ def test_replay_engine_reuses_same_strategy_without_live_execution() -> None:
     assert report.fills[-1].side == "long_above"
 
 
+def test_replay_engine_next_tick_fill_uses_following_snapshot_price() -> None:
+    ticks = [_tick(99_950.0, 0), _tick(99_975.0, 10), _tick(100_030.0, 30), _tick(100_060.0, 31)]
+    books = [
+        _book(yes_ask=0.53, no_ask=0.48),
+        _book(yes_ask=0.53, no_ask=0.48),
+        _book(yes_ask=0.53, no_ask=0.48),
+        _book(yes_ask=0.71, no_ask=0.29),
+    ]
+    replay = ReplayEngine(
+        config=BotConfig(),
+        contract=_contract(),
+        strategies=[SimpleDirectionalStrategy()],
+        risk_manager=RiskManager(RiskLimits(base_size_dollars=5.0, max_spread=1.0)),
+        executor=PaperExecutor(),
+        fill_timing="next-tick",
+    )
+
+    report = replay.run(ticks=ticks, books=books)
+
+    assert len(report.fills) == 1
+    assert report.fills[0].ts == ticks[3].ts
+    assert report.fills[0].entry_price == pytest.approx(0.71)
+
+
 def test_replay_engine_settles_positions_at_market_rollover() -> None:
     ticks = [
         _tick(99_950.0, 0),

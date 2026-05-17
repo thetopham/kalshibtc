@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -36,6 +36,7 @@ class ReplayEngine:
         risk_manager: RiskManager | None = None,
         executor: PaperExecutor | None = None,
         settle_on_market_rollover: bool = False,
+        fill_timing: str = "same-tick",
     ) -> None:
         self.config = config
         self.contract = contract
@@ -43,6 +44,9 @@ class ReplayEngine:
         self.risk_manager = risk_manager or RiskManager(config.risk)
         self.executor = executor or PaperExecutor()
         self.settle_on_market_rollover = settle_on_market_rollover
+        if fill_timing not in {"same-tick", "next-tick"}:
+            raise ValueError("fill_timing must be 'same-tick' or 'next-tick'")
+        self.fill_timing = fill_timing
 
     def run(self, *, ticks: Sequence[Tick], books: Sequence[OrderBookSnapshot]) -> ReplayReport:
         if len(ticks) != len(books):
@@ -65,6 +69,8 @@ class ReplayEngine:
                 if self.settle_on_market_rollover and active_market_ticker is not None:
                     settled_positions += pipeline.open_positions
                     pipeline.open_positions = 0
+                if self.fill_timing == "next-tick":
+                    setattr(pipeline, "_replay_pending_decisions", [])
                 active_contract = self._contract_for_book(book)
             active_market_ticker = book.market_ticker
             tracker.add(tick)
@@ -73,7 +79,10 @@ class ReplayEngine:
                 orderbook=book,
                 slope_30s=tracker.velocity(),
             )
-            results = pipeline.on_state(state)
+            if self.fill_timing == "next-tick":
+                results = self._on_state_next_tick(pipeline, state)
+            else:
+                results = pipeline.on_state(state)
             all_results.extend(results)
             for result in results:
                 if result.signal.side != "none":
@@ -87,6 +96,73 @@ class ReplayEngine:
             results=all_results,
             settled_positions=settled_positions,
         )
+
+    def _on_state_next_tick(self, pipeline: BotPipeline, state: Any) -> list[PipelineResult]:
+        pending_decisions = getattr(pipeline, "_replay_pending_decisions", [])
+        results: list[PipelineResult] = []
+        open_positions = pipeline.open_positions
+        for decision in pending_decisions:
+            if open_positions >= max(0, int(pipeline.risk_manager.limits.max_open_positions)):
+                continue
+            repriced_decision = self._evaluate_pending_decision_for_state(
+                pipeline,
+                state,
+                decision,
+                open_positions=open_positions,
+            )
+            fill = pipeline.executor.execute(state, repriced_decision)
+            if fill is not None:
+                for strategy in pipeline.strategies:
+                    callback = getattr(strategy, "on_fill", None)
+                    if strategy.name == fill.strategy and callback is not None:
+                        callback(state, fill)
+                        break
+                if fill is None:
+                    continue
+                open_positions += 1
+            results.append(PipelineResult(signal=decision.signal, risk=repriced_decision, fill=fill))
+        pipeline.open_positions = open_positions
+
+        next_pending = []
+        for strategy in pipeline.strategies:
+            signal = strategy.on_tick(state)
+            risk = pipeline.risk_manager.evaluate(state, signal, open_positions=open_positions)
+            if risk.allowed:
+                next_pending.append(risk)
+            results.append(PipelineResult(signal=signal, risk=risk, fill=None))
+        setattr(pipeline, "_replay_pending_decisions", next_pending)
+        return results
+
+    def _evaluate_pending_decision_for_state(
+        self,
+        pipeline: BotPipeline,
+        state: Any,
+        decision: Any,
+        *,
+        open_positions: int,
+    ) -> Any:
+        signal = decision.signal
+        repriced_decision = pipeline.risk_manager.evaluate(
+            state,
+            signal,
+            open_positions=open_positions,
+        )
+        limit_price = (signal.features or {}).get("limit_price") if signal is not None else None
+        if isinstance(limit_price, int | float):
+            entry_price = repriced_decision.entry_price
+            if entry_price is None or entry_price > float(limit_price):
+                blocked_by = [*repriced_decision.blocked_by]
+                if "passive_limit_not_touched" not in blocked_by:
+                    blocked_by.append("passive_limit_not_touched")
+                return replace(
+                    repriced_decision,
+                    allowed=False,
+                    size_dollars=0.0,
+                    entry_price=None,
+                    reason="blocked by passive limit",
+                    blocked_by=blocked_by,
+                )
+        return repriced_decision
 
     def _contract_for_book(self, book: OrderBookSnapshot) -> ContractWindow:
         strike = _optional_float_from_mapping(book.raw, "strike") or self.contract.strike

@@ -19,7 +19,7 @@ from ..runtime_paths import DEFAULT_FEED_DB, DEFAULT_RUNS_DIR, resolve_feed_db, 
 from ..strategy.registry import create_strategy, strategy_names
 from ..strategy.signals import Signal
 from .replay import ReplayEngine
-from .settlement import estimate_replay_fill_pnls
+from .settlement import compute_portfolio_settlement, estimate_replay_fill_pnls
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -37,10 +37,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-position-dollars", type=float, default=25.0)
     parser.add_argument("--max-open-positions", type=int, default=1)
     parser.add_argument("--max-spread", type=float, default=0.05)
+    parser.add_argument("--strategy-param", action="append", default=[], help="Strategy-specific key=value override. Currently used for simple_inventory_mm knobs.")
     parser.add_argument(
         "--no-settle-on-market-rollover",
         action="store_true",
         help="Do not reset replay open-position count when the market ticker changes.",
+    )
+    parser.add_argument(
+        "--settlements-from-feed-db",
+        action="store_true",
+        help="Prefer official Kalshi settlements from feed DB market_settlements for PnL metrics.",
+    )
+    parser.add_argument(
+        "--fill-timing",
+        choices=["same-tick", "next-tick"],
+        default="same-tick",
+        help="Replay fill timing. next-tick executes allowed signals on the following snapshot to avoid same-tick hindsight.",
     )
     parser.add_argument("--json", action="store_true", help="Print JSON summary.")
     parser.add_argument("--overwrite", action="store_true", help="Allow replacing an existing run directory.")
@@ -57,7 +69,8 @@ def main(argv: list[str] | None = None) -> int:
 
     rows = _load_snapshot_rows(feed_db, from_ts=args.from_ts, to_ts=args.to_ts)
     ticks, books, contract = _rows_to_replay_inputs(rows)
-    strategy = create_strategy(args.strategy)
+    strategy_params = _parse_strategy_params(args.strategy_param)
+    strategy = create_strategy(args.strategy, params=strategy_params)
     risk = RiskManager(
         RiskLimits(
             base_size_dollars=args.base_size_dollars,
@@ -72,20 +85,29 @@ def main(argv: list[str] | None = None) -> int:
         strategies=[strategy],
         risk_manager=risk,
         settle_on_market_rollover=not args.no_settle_on_market_rollover,
+        fill_timing=args.fill_timing,
     ).run(ticks=ticks, books=books)
 
     results_db = run_dir / "results.sqlite3"
     _write_results(results_db, report.results, strategies=[strategy])
     config_text = _config_text(args=args, feed_db=feed_db, run_id=run_id)
     (run_dir / "config.toml").write_text(config_text, encoding="utf-8")
+    settlement_rows = _load_official_settlement_rows(feed_db) if args.settlements_from_feed_db else rows
+    portfolio_settlement = compute_portfolio_settlement(report.fills, settlement_rows)
+    _write_portfolio_settlement(results_db, portfolio_settlement)
+    (run_dir / "portfolio_settlement.json").write_text(
+        json.dumps(portfolio_settlement["aggregate"], indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     metrics = _metrics_payload(
         report=report,
         feed_db=feed_db,
         run_dir=run_dir,
         strategy=args.strategy,
         max_open_positions=args.max_open_positions,
-        settlement_rows=rows,
+        settlement_rows=settlement_rows,
         strategies=[strategy],
+        portfolio_settlement=portfolio_settlement,
     )
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -118,6 +140,29 @@ def _load_snapshot_rows(feed_db: Path, *, from_ts: str | None, to_ts: str | None
     with sqlite3.connect(f"file:{feed_db}?mode=ro", uri=True) as conn:
         conn.row_factory = sqlite3.Row
         return list(conn.execute(sql, params))
+
+
+def _load_official_settlement_rows(feed_db: Path) -> list[sqlite3.Row]:
+    if not feed_db.exists():
+        raise FileNotFoundError(f"feed DB not found: {feed_db}")
+    with sqlite3.connect(f"file:{feed_db}?mode=ro", uri=True) as conn:
+        conn.row_factory = sqlite3.Row
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='market_settlements'"
+        ).fetchone()
+        if exists is None:
+            return []
+        return list(
+            conn.execute(
+                """
+                SELECT *
+                FROM market_settlements
+                WHERE source = 'kalshi_api'
+                  AND status = 'settled_official'
+                  AND winning_side IN ('yes', 'no')
+                """
+            )
+        )
 
 
 def _rows_to_replay_inputs(rows: list[sqlite3.Row]) -> tuple[list[Tick], list[OrderBookSnapshot], ContractWindow]:
@@ -233,6 +278,26 @@ def _write_results(path: Path, results: list[Any], *, strategies: Sequence[Any] 
                 above_mark REAL,
                 below_mark REAL
             );
+            CREATE TABLE portfolio_settlement_by_market (
+                market_ticker TEXT PRIMARY KEY,
+                settlement_result TEXT,
+                settlement_source TEXT NOT NULL,
+                yes_contracts REAL NOT NULL,
+                no_contracts REAL NOT NULL,
+                avg_yes_entry REAL,
+                avg_no_entry REAL,
+                yes_cost REAL NOT NULL,
+                no_cost REAL NOT NULL,
+                total_cost REAL NOT NULL,
+                gross_payout REAL NOT NULL,
+                realized_pnl REAL NOT NULL,
+                paired_contracts REAL NOT NULL,
+                paired_cost REAL,
+                paired_locked_edge REAL NOT NULL,
+                raw_net_contracts REAL NOT NULL,
+                final_unpaired_yes_contracts REAL NOT NULL,
+                final_unpaired_no_contracts REAL NOT NULL
+            );
             """
         )
         for result in results:
@@ -286,6 +351,41 @@ def _write_results(path: Path, results: list[Any], *, strategies: Sequence[Any] 
         _write_inventory_research_tables(conn, strategies or [])
 
 
+def _write_portfolio_settlement(path: Path, settlement: Mapping[str, Any]) -> None:
+    fields = [
+        "market_ticker",
+        "settlement_result",
+        "settlement_source",
+        "yes_contracts",
+        "no_contracts",
+        "avg_yes_entry",
+        "avg_no_entry",
+        "yes_cost",
+        "no_cost",
+        "total_cost",
+        "gross_payout",
+        "realized_pnl",
+        "paired_contracts",
+        "paired_cost",
+        "paired_locked_edge",
+        "raw_net_contracts",
+        "final_unpaired_yes_contracts",
+        "final_unpaired_no_contracts",
+    ]
+    with sqlite3.connect(path) as conn:
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO portfolio_settlement_by_market (
+                market_ticker, settlement_result, settlement_source, yes_contracts, no_contracts,
+                avg_yes_entry, avg_no_entry, yes_cost, no_cost, total_cost, gross_payout,
+                realized_pnl, paired_contracts, paired_cost, paired_locked_edge, raw_net_contracts,
+                final_unpaired_yes_contracts, final_unpaired_no_contracts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [tuple(row.get(field) for field in fields) for row in settlement.get("markets", [])],
+        )
+
+
 def _write_inventory_research_tables(conn: sqlite3.Connection, strategies: Sequence[Any]) -> None:
     for strategy in strategies:
         for decision in getattr(strategy, "decisions", []):
@@ -336,6 +436,10 @@ def _write_inventory_research_tables(conn: sqlite3.Connection, strategies: Seque
                 ),
             )
         for position in getattr(strategy, "position_history", []):
+            above_qty = getattr(position, "above_qty", getattr(position, "yes_qty", 0.0))
+            above_avg_price = getattr(position, "above_avg_price", getattr(position, "yes_avg_price", 0.0))
+            below_qty = getattr(position, "below_qty", getattr(position, "no_qty", 0.0))
+            below_avg_price = getattr(position, "below_avg_price", getattr(position, "no_avg_price", 0.0))
             conn.execute(
                 """
                 INSERT INTO inventory_positions (
@@ -346,12 +450,12 @@ def _write_inventory_research_tables(conn: sqlite3.Connection, strategies: Seque
                 (
                     position.ts,
                     position.market_ticker,
-                    position.above_qty,
-                    position.above_avg_price,
-                    position.below_qty,
-                    position.below_avg_price,
-                    position.blended_basis,
-                    position.imbalance_ratio,
+                    above_qty,
+                    above_avg_price,
+                    below_qty,
+                    below_avg_price,
+                    _position_blended_basis(position),
+                    _position_imbalance(position),
                 ),
             )
         for equity in getattr(strategy, "equity_curve", []):
@@ -382,9 +486,12 @@ def _metrics_payload(
     max_open_positions: int,
     settlement_rows: Sequence[Mapping[str, Any] | Any] | None = None,
     strategies: Sequence[Any] | None = None,
+    portfolio_settlement: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     settled_fills = estimate_replay_fill_pnls(report.fills, settlement_rows or [])
-    institutional_metrics: dict[str, Any] = dict(compute_metrics(settled_fills))
+    kalshi_settled_fills = [fill for fill in settled_fills if fill.get("settlement_source") == "kalshi_api"]
+    metric_fills = kalshi_settled_fills or settled_fills
+    institutional_metrics: dict[str, Any] = dict(compute_metrics(metric_fills))
     settlement_sources = sorted(
         {
             str(fill.get("settlement_source"))
@@ -398,7 +505,9 @@ def _metrics_payload(
             settlement_sources[0] if len(settlement_sources) == 1 else "mixed"
         )
     institutional_metrics["settled_trades"] = sum(
-        1 for fill in settled_fills if fill.get("settlement_source") == "replay_final_snapshot"
+        1
+        for fill in settled_fills
+        if fill.get("settlement_source") in {"replay_final_snapshot", "kalshi_api"}
     )
     research_metrics = _inventory_research_metrics(strategies or [])
     payload = {
@@ -416,6 +525,8 @@ def _metrics_payload(
     }
     if research_metrics:
         payload["research_metrics"] = research_metrics
+    if portfolio_settlement:
+        payload["portfolio_settlement"] = portfolio_settlement.get("aggregate", {})
     return payload
 
 
@@ -428,14 +539,16 @@ def _inventory_research_metrics(strategies: Sequence[Any]) -> dict[str, Any]:
     latest_blended_basis = None
     for strategy in strategies:
         feature_rows += len(getattr(strategy, "feature_history", []))
-        decisions_list = getattr(strategy, "decisions", [])
-        decisions += sum(1 for decision in decisions_list if getattr(decision, "target_notional", 0.0) > 0)
+        decisions_list = getattr(strategy, "decisions", None)
+        if decisions_list is None:
+            decisions_list = getattr(strategy, "decision_history", [])
+        decisions += sum(1 for decision in decisions_list if _decision_target_notional(decision) > 0)
         positions = getattr(strategy, "position_history", [])
         position_rows += len(positions)
         equity_rows += len(getattr(strategy, "equity_curve", []))
         if positions:
-            max_imbalance = max(max_imbalance, max(position.imbalance_ratio for position in positions))
-            latest_blended_basis = positions[-1].blended_basis
+            max_imbalance = max(max_imbalance, max(_position_imbalance(position) for position in positions))
+            latest_blended_basis = _position_blended_basis(positions[-1])
     if feature_rows == decisions == position_rows == equity_rows == 0:
         return {}
     return {
@@ -459,6 +572,35 @@ def _inventory_research_metrics(strategies: Sequence[Any]) -> dict[str, Any]:
     }
 
 
+def _decision_target_notional(decision: Any) -> float:
+    if isinstance(decision, Mapping):
+        value = decision.get("target_notional")
+    else:
+        value = getattr(decision, "target_notional", 0.0)
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _position_imbalance(position: Any) -> float:
+    value = getattr(position, "imbalance_ratio", None)
+    if value is not None:
+        return float(value)
+    yes_qty = float(getattr(position, "yes_qty", getattr(position, "above_qty", 0.0)) or 0.0)
+    no_qty = float(getattr(position, "no_qty", getattr(position, "below_qty", 0.0)) or 0.0)
+    smaller = min(yes_qty, no_qty)
+    larger = max(yes_qty, no_qty)
+    return larger / smaller if smaller > 0 else (larger if larger > 0 else 0.0)
+
+
+def _position_blended_basis(position: Any) -> float | None:
+    value = getattr(position, "blended_basis", None)
+    if value is not None:
+        return value
+    return getattr(position, "combined_basis", None)
+
+
 def _config_text(*, args: argparse.Namespace, feed_db: Path, run_id: str) -> str:
     return "\n".join(
         [
@@ -471,10 +613,33 @@ def _config_text(*, args: argparse.Namespace, feed_db: Path, run_id: str) -> str
             f"max_position_dollars = {args.max_position_dollars}",
             f"max_open_positions = {args.max_open_positions}",
             f"max_spread = {args.max_spread}",
+            f"strategy_params = {json.dumps(_parse_strategy_params(args.strategy_param), sort_keys=True)}",
             f"settle_on_market_rollover = {str(not args.no_settle_on_market_rollover).lower()}",
+            f"settlements_from_feed_db = {str(args.settlements_from_feed_db).lower()}",
+            f"fill_timing = \"{args.fill_timing}\"",
             "",
         ]
     )
+
+
+def _parse_strategy_params(items: Sequence[str]) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+    for item in items:
+        if "=" not in item:
+            raise ValueError(f"strategy param must be key=value: {item}")
+        key, raw_value = item.split("=", 1)
+        key = key.strip().replace("-", "_")
+        raw_value = raw_value.strip()
+        if not key:
+            raise ValueError(f"strategy param key is empty: {item}")
+        try:
+            params[key] = json.loads(raw_value)
+        except json.JSONDecodeError:
+            try:
+                params[key] = float(raw_value)
+            except ValueError:
+                params[key] = raw_value
+    return params
 
 
 def _parse_dt(value: Any) -> datetime:

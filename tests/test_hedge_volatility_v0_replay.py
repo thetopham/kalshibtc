@@ -4,6 +4,7 @@ import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
+from kalshibtc.replay import cli as replay_cli
 from kalshibtc.replay.hedge_volatility_v0 import evaluate_settlement, main, run_replay
 from kalshibtc.strategy.hedge_volatility_v0 import HedgeVolatilityConfig
 
@@ -785,6 +786,57 @@ def test_replay_ignores_proxy_settlements_from_feed_db(tmp_path):
 
     assert summary["settled_markets"] == 0
     assert summary["unsettled_markets"] == 2
+
+
+def test_replay_uses_official_kalshi_settlements_for_generic_strategies(tmp_path):
+    feed_db = tmp_path / "feed.sqlite3"
+    runs_dir = tmp_path / "runs"
+    create_feed_db(feed_db)
+    con = sqlite3.connect(feed_db)
+    ensure_market_settlements_schema(con)
+    con.execute(
+        """
+        INSERT INTO market_settlements (
+            market_ticker, market_open_time, market_close_time, strike, settlement_price,
+            winning_side, source, status, settled_at, fetched_at, raw_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "KXBTCD-26MAY151215-T50000",
+            "2026-05-15T12:00:00+00:00",
+            "2026-05-15T12:15:00+00:00",
+            50_000,
+            49_900,
+            "no",
+            "kalshi_api",
+            "settled_official",
+            "2026-05-15T12:15:00+00:00",
+            "2026-05-15T12:16:30+00:00",
+            "{}",
+        ),
+    )
+    con.commit()
+
+    code = replay_cli.main(
+        [
+            "--feed-db",
+            str(feed_db),
+            "--runs-dir",
+            str(runs_dir),
+            "--strategy",
+            "simple_directional",
+            "--run-id",
+            "official-generic",
+            "--settlements-from-feed-db",
+            "--json",
+        ]
+    )
+
+    assert code == 0
+    metrics = json.loads((runs_dir / "simple_directional" / "official-generic" / "metrics.json").read_text())
+    assert metrics["institutional_metrics"]["settlement_source"] == "kalshi_api"
+    assert metrics["institutional_metrics"]["settled_trades"] == 1
+    assert metrics["institutional_metrics"]["total_pnl"] == -25.0
 
 
 def test_replay_settlement_args_are_mutually_exclusive_for_feed_db(tmp_path, capsys):
