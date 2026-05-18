@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 
 from ..execution.paper import PaperFill
 from ..market.pricing import entry_price_for_signal
@@ -56,6 +57,17 @@ class _Lot:
         self.avg_price = total_cost / self.qty if self.qty > 0 else 0.0
 
 
+@dataclass
+class _RestingOrder:
+    side: str
+    reason: str
+    limit_price: float
+    contracts: float
+    level_key: str
+    placed_ts: datetime
+    filled: bool = False
+
+
 @dataclass(frozen=True)
 class SimpleInventorySnapshot:
     ts: str
@@ -94,6 +106,8 @@ class SimpleInventoryMMStrategy:
         self.position_history: list[SimpleInventorySnapshot] = []
         self.decision_history: list[dict[str, float | str | None]] = []
         self._last_order_ts = None
+        self._resting_orders: dict[str, _RestingOrder] = {}
+        self._filled_order_keys: set[str] = set()
 
     @property
     def name(self) -> str:
@@ -108,6 +122,17 @@ class SimpleInventoryMMStrategy:
         if side == "none" or limit_price is None or contracts <= 0:
             signal = Signal("none", reason, 0.0, strategy=self.name, allow_price_strike_mismatch=True)
             self._record_decision(state, signal, limit_price=limit_price, contracts=contracts)
+            return signal
+
+        level_key = self._level_key(side, reason, limit_price)
+        order = self._resting_orders.get(level_key)
+        if order is not None:
+            signal = Signal("none", "resting passive order already active", 0.0, strategy=self.name, allow_price_strike_mismatch=True)
+            self._record_decision(state, signal, limit_price=limit_price, contracts=0.0)
+            return signal
+        if level_key in self._filled_order_keys:
+            signal = Signal("none", "resting passive order already filled", 0.0, strategy=self.name, allow_price_strike_mismatch=True)
+            self._record_decision(state, signal, limit_price=limit_price, contracts=0.0)
             return signal
 
         ask = entry_price_for_signal(side, state.orderbook)
@@ -131,7 +156,17 @@ class SimpleInventoryMMStrategy:
             signal = Signal("none", "projected inventory cap exhausted", 0.0, strategy=self.name, allow_price_strike_mismatch=True)
             self._record_decision(state, signal, limit_price=limit_price, contracts=0.0)
             return signal
+        self._resting_orders[level_key] = _RestingOrder(
+            side=side,
+            reason=reason,
+            limit_price=limit_price,
+            contracts=contracts,
+            level_key=level_key,
+            placed_ts=state.tick.ts,
+        )
         target_notional = round(contracts * ask, 6)
+        features = self._features(state, limit_price=limit_price, contracts=contracts)
+        features["resting_order_key"] = level_key
         signal = Signal(
             side=side,
             reason=reason,
@@ -139,7 +174,7 @@ class SimpleInventoryMMStrategy:
             strategy=self.name,
             target_notional=target_notional,
             estimated_shares=contracts,
-            features=self._features(state, limit_price=limit_price, contracts=contracts),
+            features=features,
             allow_price_strike_mismatch=True,
         )
         self._record_decision(state, signal, limit_price=limit_price, contracts=contracts)
@@ -148,9 +183,11 @@ class SimpleInventoryMMStrategy:
     def on_fill(self, state: MarketState, fill: PaperFill) -> None:
         if fill.side not in {"long_above", "long_below"}:
             return
+        order_key = self._order_key_for_fill(fill)
         adjusted = self._cap_fill_to_inventory_limits(fill)
         if adjusted is None:
             self._last_order_ts = state.tick.ts
+            self._remove_resting_order(order_key)
             self._record_snapshot(state)
             return
         if adjusted.side == "long_above":
@@ -158,12 +195,30 @@ class SimpleInventoryMMStrategy:
         elif adjusted.side == "long_below":
             self._no.add(adjusted.contracts, adjusted.entry_price)
         self._last_order_ts = state.tick.ts
+        self._remove_resting_order(order_key)
         self._record_snapshot(state)
 
     def _reset(self, market_ticker: str) -> None:
         self._active_market_ticker = market_ticker
         self._yes = _Lot()
         self._no = _Lot()
+        self._resting_orders = {}
+        self._filled_order_keys = set()
+
+    def _level_key(self, side: str, reason: str, limit_price: float) -> str:
+        return f"{side}:{reason}:{limit_price:.4f}"
+
+    def _order_key_for_fill(self, fill: PaperFill) -> str | None:
+        # PaperFill does not carry the signal, so infer the active order by side.
+        side_orders = [key for key, order in self._resting_orders.items() if order.side == fill.side]
+        if len(side_orders) == 1:
+            return side_orders[0]
+        return None
+
+    def _remove_resting_order(self, order_key: str | None) -> None:
+        if order_key is not None:
+            self._resting_orders.pop(order_key, None)
+            self._filled_order_keys.add(order_key)
 
     def _choose_order(self, state: MarketState) -> tuple[str, str, float | None, float]:
         if state.seconds_to_close <= self.config.min_seconds_to_close:

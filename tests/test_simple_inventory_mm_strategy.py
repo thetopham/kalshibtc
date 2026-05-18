@@ -302,3 +302,40 @@ def test_simple_inventory_next_tick_discards_pending_decisions_on_market_rollove
     report = replay.run(ticks=ticks, books=books)
 
     assert report.fills == []
+
+
+def test_simple_inventory_resting_order_does_not_refill_every_touched_tick() -> None:
+    close = _contract().close_time
+    ticks = [Tick(ts=close - timedelta(seconds=600 - i), price=100_000 + i, source="test") for i in range(5)]
+    books = [
+        OrderBookSnapshot(
+            ts=tick.ts,
+            market_ticker="KXBTC15M-MM",
+            yes_bid=0.48,
+            yes_ask=0.56,
+            no_bid=0.47,
+            no_ask=0.55,
+        )
+        for tick in ticks
+    ]
+    strategy = SimpleInventoryMMStrategy(
+        SimpleInventoryMMConfig(
+            seed_contracts_per_side=50,
+            seed_add_contracts=5,
+            seed_limit_price=0.58,
+            min_seconds_between_orders=0,
+        )
+    )
+    replay = ReplayEngine(
+        config=BotConfig(),
+        contract=_contract(),
+        strategies=[strategy],
+        risk_manager=RiskManager(RiskLimits(base_size_dollars=100, max_position_dollars=100, max_spread=1.0, max_open_positions=999, min_confidence=0.0)),
+        executor=PaperExecutor(),
+        fill_timing="next-tick",
+    )
+
+    report = replay.run(ticks=ticks, books=books)
+
+    assert len(report.fills) == 1
+    assert report.fills[0].contracts == pytest.approx(5)

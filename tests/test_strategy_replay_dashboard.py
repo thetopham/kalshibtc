@@ -20,6 +20,9 @@ EXPECTED_STRATEGIES = {
     "no_trade_baseline",
     "volatility_inventory",
     "simple_inventory_mm",
+    "complement_ladder_v0",
+    "cheap_accumulate_repair_v0",
+    "seed_cheap_accumulate_repair_v1",
 }
 
 

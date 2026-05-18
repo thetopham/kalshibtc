@@ -158,6 +158,91 @@ def test_portfolio_settlement_scores_inventory_by_market_not_fill() -> None:
     assert market["paired_cost"] == pytest.approx(0.89)
     assert market["raw_net_contracts"] == 0.0
     assert settlement["aggregate"]["realized_pnl"] == 11.0
+    assert market["completed_pair_pnl"] == pytest.approx(11.0)
+    assert market["unpaired_leftover_pnl"] == pytest.approx(0.0)
+    assert settlement["aggregate"]["pnl_split"]["completed_pair_pnl"] == pytest.approx(11.0)
+
+
+def test_portfolio_settlement_splits_completed_pairs_from_unpaired_leftovers() -> None:
+    fills = [
+        _Fill("KXBTC15M-TEST", "long_above", 20.0, 20.0, 100.0, datetime(2026, 5, 15, 12, 1, tzinfo=UTC)),
+        _Fill("KXBTC15M-TEST", "long_below", 75.0, 75.0, 100.0, datetime(2026, 5, 15, 12, 2, tzinfo=UTC)),
+        _Fill("KXBTC15M-TEST", "long_above", 6.0, 3.0, 50.0, datetime(2026, 5, 15, 12, 13, tzinfo=UTC)),
+    ]
+    settlements = [
+        {"market_ticker": "KXBTC15M-TEST", "winning_side": "no", "source": "kalshi_api", "status": "settled_official"}
+    ]
+
+    settlement = compute_portfolio_settlement(fills, settlements)
+
+    market = settlement["markets"][0]
+    assert market["completed_pair_contracts"] == pytest.approx(100.0)
+    assert market["completed_pair_cost"] == pytest.approx(95.0)
+    assert market["completed_pair_pnl"] == pytest.approx(5.0)
+    assert market["unpaired_leftover_cost"] == pytest.approx(3.0)
+    assert market["unpaired_leftover_pnl"] == pytest.approx(-3.0)
+    split = settlement["aggregate"]["pnl_split"]
+    assert split["completed_pair_pnl"] == pytest.approx(5.0)
+    assert split["unpaired_leftover_pnl"] == pytest.approx(-3.0)
+    assert split["unpaired_yes_pnl"] == pytest.approx(-3.0)
+    assert split["unpaired_time_buckets"]["yes:00-02m"]["pnl"] == pytest.approx(-3.0)
+
+
+def test_replay_cli_enforces_capital_guardrails_and_reports_capital_metrics(tmp_path: Path) -> None:
+    feed_db = tmp_path / "feed.sqlite3"
+    runs_dir = tmp_path / "runs"
+    _write_feed_db(feed_db)
+
+    assert replay_main(
+        [
+            "--feed-db",
+            str(feed_db),
+            "--runs-dir",
+            str(runs_dir),
+            "--strategy",
+            "simple_directional",
+            "--run-id",
+            "bankroll-200",
+            "--starting-bankroll",
+            "200",
+            "--max-capital-at-risk",
+            "200",
+            "--fee-per-contract",
+            "0.01",
+            "--per-market-max-exposure",
+            "200",
+            "--daily-loss-cap",
+            "50",
+            "--base-size-dollars",
+            "150",
+            "--max-position-dollars",
+            "150",
+            "--max-open-positions",
+            "10",
+            "--json",
+        ]
+    ) == 0
+
+    run_dir = runs_dir / "simple_directional" / "bankroll-200"
+    metrics = json.loads((run_dir / "metrics.json").read_text())
+    config = (run_dir / "config.toml").read_text()
+    with sqlite3.connect(run_dir / "results.sqlite3") as conn:
+        fill_count = conn.execute("SELECT COUNT(*) FROM replay_fills").fetchone()[0]
+        blocked_by = [row[0] for row in conn.execute("SELECT blocked_by_json FROM replay_signals")]
+
+    assert 'starting_bankroll = 200.0' in config
+    assert 'max_capital_at_risk = 200.0' in config
+    assert 'fee_per_contract = 0.01' in config
+    assert 'per_market_max_exposure = 200.0' in config
+    assert 'daily_loss_cap = 50.0' in config
+    assert fill_count == 1
+    assert metrics["capital_metrics"]["cumulative_fees"] > 0
+    assert any("capital_at_risk" in row or "bankroll_exhausted" in row for row in blocked_by)
+    assert metrics["starting_bankroll"] == 200.0
+    assert metrics["capital_metrics"]["starting_bankroll"] == 200.0
+    assert metrics["capital_metrics"]["max_capital_used"] <= 200.0
+    assert metrics["capital_metrics"]["return_on_max_capital_used"] is not None
+    assert metrics["capital_metrics"]["ending_bankroll"] > 200.0
 
 
 def test_replay_cli_writes_portfolio_settlement_outputs(tmp_path: Path) -> None:
@@ -192,3 +277,132 @@ def test_replay_cli_writes_portfolio_settlement_outputs(tmp_path: Path) -> None:
     with sqlite3.connect(run_dir / "results.sqlite3") as conn:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "portfolio_settlement_by_market" in tables
+
+
+def test_replay_recycles_capital_after_market_rollover() -> None:
+    from datetime import timedelta
+
+    from kalshibtc.backtest.replay import ReplayEngine
+    from kalshibtc.config import BotConfig, RiskLimits
+    from kalshibtc.datafeed.models import OrderBookSnapshot, Tick
+    from kalshibtc.execution.risk import CapitalConstraints, CapitalState, RiskManager
+    from kalshibtc.market.contract import ContractWindow
+    from kalshibtc.strategy.signals import Signal
+
+    class AlwaysBuyYes:
+        name = "always_buy_yes"
+
+        def on_tick(self, state):
+            return Signal(
+                side="long_above",
+                reason="test buy every contract",
+                confidence=1.0,
+                strategy=self.name,
+                target_notional=90.0,
+                allow_price_strike_mismatch=True,
+            )
+
+    close1 = datetime(2026, 5, 15, 12, 15, tzinfo=UTC)
+    close2 = datetime(2026, 5, 15, 12, 30, tzinfo=UTC)
+    ticks = [
+        Tick(ts=close1 - timedelta(seconds=10), price=100_100, source="test"),
+        Tick(ts=close2 - timedelta(seconds=10), price=100_200, source="test"),
+    ]
+    books = [
+        OrderBookSnapshot(
+            ts=ticks[0].ts,
+            market_ticker="KXBTC15M-26MAY151215-15",
+            yes_bid=0.89,
+            yes_ask=0.90,
+            no_bid=0.09,
+            no_ask=0.10,
+            raw={"strike": 100_000.0, "market_close_time": close1.isoformat()},
+        ),
+        OrderBookSnapshot(
+            ts=ticks[1].ts,
+            market_ticker="KXBTC15M-26MAY151230-30",
+            yes_bid=0.89,
+            yes_ask=0.90,
+            no_bid=0.09,
+            no_ask=0.10,
+            raw={"strike": 100_000.0, "market_close_time": close2.isoformat()},
+        ),
+    ]
+    capital = CapitalState(CapitalConstraints(starting_bankroll=100.0, max_capital_at_risk=100.0))
+    report = ReplayEngine(
+        config=BotConfig(),
+        contract=ContractWindow(
+            ticker="KXBTC15M-26MAY151215-15",
+            strike=100_000.0,
+            close_time=close1,
+        ),
+        strategies=[AlwaysBuyYes()],
+        risk_manager=RiskManager(
+            RiskLimits(base_size_dollars=90, max_position_dollars=90, max_open_positions=10, max_spread=1.0, min_confidence=0.0)
+        ),
+        capital_state=capital,
+        settle_on_market_rollover=True,
+    ).run(ticks=ticks, books=books)
+
+    assert len(report.fills) == 2
+    assert capital.locked_capital == pytest.approx(90.0)
+    assert capital.realized_pnl == pytest.approx(10.0)
+    assert capital.market_exposure == {"KXBTC15M-26MAY151230-30": pytest.approx(90.0)}
+
+
+def test_replay_cli_reports_contract_and_daily_metrics(tmp_path: Path) -> None:
+    feed_db = tmp_path / "feed.sqlite3"
+    runs_dir = tmp_path / "runs"
+    _write_feed_db(feed_db)
+
+    assert replay_main(
+        [
+            "--feed-db",
+            str(feed_db),
+            "--runs-dir",
+            str(runs_dir),
+            "--strategy",
+            "simple_inventory_mm",
+            "--run-id",
+            "portfolio-mm-by-period",
+            "--max-open-positions",
+            "10",
+            "--max-position-dollars",
+            "100",
+            "--max-spread",
+            "1.0",
+            "--strategy-param",
+            "seed_limit_price=0.58",
+            "--strategy-param",
+            "seed_contracts_per_side=10",
+            "--strategy-param",
+            "seed_add_contracts=10",
+            "--strategy-param",
+            "min_seconds_to_close=0",
+            "--strategy-param",
+            "max_seed_seconds_to_close=1000",
+            "--fill-timing",
+            "next-tick",
+            "--json",
+        ]
+    ) == 0
+
+    run_dir = runs_dir / "simple_inventory_mm" / "portfolio-mm-by-period"
+    metrics = json.loads((run_dir / "metrics.json").read_text())
+    assert metrics["contract_metrics"]["contracts"] >= 1
+    assert metrics["contract_metrics"]["rows"][0]["market_ticker"] == "KXBTC15M-TEST"
+    assert metrics["contract_metrics"]["rows"][0]["realized_pnl"] == pytest.approx(
+        metrics["portfolio_settlement"]["realized_pnl"]
+    )
+    assert metrics["daily_metrics"]["days"] == 1
+    assert metrics["daily_metrics"]["rows"][0]["date"] == "2026-05-15"
+    assert metrics["daily_metrics"]["rows"][0]["contracts"] >= 1
+    assert metrics["daily_metrics"]["rows"][0]["realized_pnl"] == pytest.approx(
+        metrics["portfolio_settlement"]["realized_pnl"]
+    )
+    with sqlite3.connect(run_dir / "results.sqlite3") as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "contract_metrics" in tables
+        assert "daily_metrics" in tables
+        assert conn.execute("SELECT COUNT(*) FROM contract_metrics").fetchone()[0] >= 1
+        assert conn.execute("SELECT COUNT(*) FROM daily_metrics").fetchone()[0] == 1
