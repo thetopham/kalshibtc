@@ -1,0 +1,305 @@
++#!/usr/bin/env bash
++set -euo pipefail
++cd /home/matt/workspace/kalshi-btc-15m-bot
++printf 'variant|seed|repair|max_net|fills|notional|pnl|pair_pnl|unpaired_pnl|paired_edge|max_raw_net|profit_factor|run_dir\n'
++for seed in 70_23.333333 80_26.666667 90_30 100_33.333333; do
++  primary=${seed%%_*}; hedge=${seed#*_}
++  for repair in 330 360 390; do
++    for max_net in 0.35 0.40 0.45; do
++      label="${primary}_${hedge//./p}"
++      variant="tune_${label}_r${repair}_net${max_net}"
++      run_id="${variant}-$(date -u +%Y%m%dT%H%M%SZ)"
++      out="/tmp/${run_id}.json"
++      .venv/bin/python -m kalshibtc.replay.cli \
++        --feed-db feed/kalshi-btc-1s.sqlite3 --runs-dir runs \
++        --strategy seed_cheap_accumulate_repair_v1 \
++        --strategy-param seed_primary_spend="$primary" \
++        --strategy-param seed_hedge_spend="$hedge" \
++        --strategy-param cheap_price=0.15 --strategy-param very_cheap_price=0.08 \
++        --strategy-param normal_spend=1 --strategy-param very_cheap_spend=2 \
++        --strategy-param max_total_cost=200 --strategy-param max_net_ratio="$max_net" \
++        --strategy-param min_order_contracts=5 --strategy-param one_fill_per_price_level=true \
++        --strategy-param repair_start_seconds="$repair" --strategy-param min_seconds_between_orders=5 \
++        --run-id "$run_id" --fill-timing next-tick --settlements-from-feed-db \
++        --base-size-dollars 1000 --max-position-dollars 1000 --max-open-positions 999 --max-spread 1.0 --json > "$out"
++      .venv/bin/python - <<PY2 "$out" "$variant" "$primary/$hedge" "$repair" "$max_net"
++import json, sys
++m=json.load(open(sys.argv[1])); ps=m['portfolio_settlement']; sp=ps['pnl_split']; im=m['institutional_metrics']
++print('|'.join(map(str,[sys.argv[2],sys.argv[3],sys.argv[4],sys.argv[5],m['fills'],round(m['notional'],2),round(ps['realized_pnl'],2),round(sp['completed_pair_pnl'],2),round(sp['unpaired_leftover_pnl'],2),round(ps['paired_locked_edge'],2),round(ps['max_abs_raw_net_contracts'],2),round(im['profit_factor'],3),m['run_dir']])))
++PY2
++    done
++  done
++done
+  ┊ 💻 $         chmod +x /tmp/run_next_tune_round.sh && /tmp/run_next_tune_round.sh  600.6s [error]
+  ┊ ✍️  write     /tmp/run_next_tune_round_remaining.sh  1.1s
+  ┊ review diff
+a//tmp/run_next_tune_round_remaining.sh → b//tmp/run_next_tune_round_remaining.sh
+@@ -0,0 +1,31 @@
++#!/usr/bin/env bash
++set -euo pipefail
++cd /home/matt/workspace/kalshi-btc-15m-bot
++printf 'variant|seed|repair|max_net|fills|notional|pnl|pair_pnl|unpaired_pnl|paired_edge|max_raw_net|profit_factor|run_dir\n'
++for seed in 90_30 100_33.333333; do
++  primary=${seed%%_*}; hedge=${seed#*_}
++  for repair in 330 360 390; do
++    for max_net in 0.35 0.40 0.45; do
++      label="${primary}_${hedge//./p}"
++      variant="tune_${label}_r${repair}_net${max_net}"
++      run_id="${variant}-$(date -u +%Y%m%dT%H%M%SZ)"
++      out="/tmp/${run_id}.json"
++      .venv/bin/python -m kalshibtc.replay.cli \
++        --feed-db feed/kalshi-btc-1s.sqlite3 --runs-dir runs \
++        --strategy seed_cheap_accumulate_repair_v1 \
++        --strategy-param seed_primary_spend="$primary" --strategy-param seed_hedge_spend="$hedge" \
++        --strategy-param cheap_price=0.15 --strategy-param very_cheap_price=0.08 \
++        --strategy-param normal_spend=1 --strategy-param very_cheap_spend=2 \
++        --strategy-param max_total_cost=200 --strategy-param max_net_ratio="$max_net" \
++        --strategy-param min_order_contracts=5 --strategy-param one_fill_per_price_level=true \
++        --strategy-param repair_start_seconds="$repair" --strategy-param min_seconds_between_orders=5 \
++        --run-id "$run_id" --fill-timing next-tick --settlements-from-feed-db \
++        --base-size-dollars 1000 --max-position-dollars 1000 --max-open-positions 999 --max-spread 1.0 --json > "$out"
++      .venv/bin/python - <<PY2 "$out" "$variant" "$primary/$hedge" "$repair" "$max_net"
++import json, sys
++m=json.load(open(sys.argv[1])); ps=m['portfolio_settlement']; sp=ps['pnl_split']; im=m['institutional_metrics']
++print('|'.join(map(str,[sys.argv[2],sys.argv[3],sys.argv[4],sys.argv[5],m['fills'],round(m['notional'],2),round(ps['realized_pnl'],2),round(sp['completed_pair_pnl'],2),round(sp['unpaired_leftover_pnl'],2),round(ps['paired_locked_edge'],2),round(ps['max_abs_raw_net_contracts'],2),round(im['profit_factor'],3),m['run_dir']])))
++PY2
++    done
++  done
++done
+  ┊ 💻 $         chmod +x /tmp/run_next_tune_round_remaining.sh && /tmp/run_next_tune_round_remaining.sh  600.6s [error]
+  ┊ 💻 $         .venv/bin/python -m pytest -q  4.3s
+  ┊ 💻 $         .venv/bin/python - <<'PY'
+import json, glob
+rows=[]
+patterns=['runs/seed_cheap_accumulate_repair_v1/tune_*T06*/metrics.json']
+for pat in patterns:
+ for p in glob.glob(pat):
+    m=json.load(open(p)); ps=m['portfolio_settlement']; sp=ps['pnl_split']; im=m['institutional_metrics']
+    rows.append((ps['realized_pnl'], im['profit_factor'], ps['max_abs_raw_net_contracts'], m['notional'], m['fills'], sp['completed_pair_pnl'], sp['unpaired_leftover_pnl'], str(p).replace('/metrics.json','')))
+print('top by pnl')
+for r in sorted(rows, reverse=True)[:15]:
+    print('|'.join(map(lambda x: str(round(x,2)) if isinstance(x,float) else str(x), r)))
+print('\ntop by pf')
+for r in sorted(rows, key=lambda x:x[1], reverse=True)[:10]:
+    print('|'.join(map(lambda x: str(round(x,2)) if isinstance(x,float) else str(x), r)))
+PY  0.3s
+  ┊ 💻 $         .venv/bin/python - <<'PY'
+import json
+from pathlib import Path
+runs=[
+('winner','runs/seed_cheap_accumulate_repair_v1/tune_90_30_r360_net0.45-20260518T065339Z'),
+('safer','runs/seed_cheap_accumulate_repair_v1/tune_80_26p666667_r360_net0.40-20260518T064759Z'),
+('lower_net','runs/seed_cheap_accumulate_repair_v1/tune_90_30_r360_net0.35-20260518T065226Z')]
+for name,d in runs:
+ m=json.load(open(Path(d)/'metrics.json')); ps=m['portfolio_settlement']; sp=ps['pnl_split']
+ print('\n'+name, d)
+ print('pnl',round(ps['realized_pnl'],2),'fills',m['fills'],'notional',round(m['notional'],2),'cost',round(ps['total_cost'],2),'maxraw',round(ps['max_abs_raw_net_contracts'],2))
+ for k,v in sorted(sp['unpaired_time_buckets'].items()):
+  if abs(v['pnl'])>=150:
+   print(k, 'cost',round(v['cost'],2),'pnl',round(v['pnl'],2),'contracts',round(v['contracts'],1))
+PY  0.3s
+
+╭─ ⚕ Hermes ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+    Implemented the next tune round and added the execution-realism adjustment.
+
+    Safety boundary: still replay/paper only. No live orders touched.
+
+    What I changed:
+    - Added one-fill-per-price-level resting-limit behavior to seed_cheap_accumulate_repair_v1.
+    - Kept:
+      - max_total_cost = 200
+      - min_order_contracts = 5
+      - max_net_ratio
+      - next-tick limit fills
+    - New config:
+      - one_fill_per_price_level = true by default
+
+    Why:
+    Previously, even with next-tick limit logic, the strategy could re-emit the same logical order at the same price level after it filled. That can overstate fills in replay. Now it tracks:
+    - active resting order keys
+    - filled order keys
+
+    Order key shape:
+    - side
+    - reason
+    - limit price
+
+    So for the same market:
+    - if a limit order at the same side/reason/price is active, it won’t re-emit
+    - if that same price level already filled, it won’t refill that exact logical level again
+
+    This is not full queue/depth modeling, but it is a meaningful realism improvement before further tuning.
+
+    Files changed:
+    - /home/matt/workspace/kalshi-btc-15m-bot/src/kalshibtc/strategy/seed_cheap_accumulate_repair_v1.py
+    - /home/matt/workspace/kalshi-btc-15m-bot/tests/test_seed_cheap_accumulate_repair_v1_strategy.py
+
+    Added tests for:
+    - no re-emitting same active resting level
+    - no refilling same filled price level
+    - min_order_contracts = 5
+    - max_net_ratio dominant-side blocking
+
+    Verification:
+    - Narrow:
+      .venv/bin/python -m pytest tests/test_seed_cheap_accumulate_repair_v1_strategy.py -q
+      Result: 13 passed
+    - Full suite:
+      .venv/bin/python -m pytest -q
+      Result: 164 passed
+
+    Tune round run:
+    - seed_primary_spend: 70, 80, 90, 100
+    - seed_hedge_spend: seed / 3
+    - repair_start_seconds: 330, 360, 390
+    - max_net_ratio: 0.35, 0.40, 0.45
+    - max_total_cost: 200
+    - min_order_contracts: 5
+    - one_fill_per_price_level: true
+    - next-tick limit replay
+    - official settlements
+
+    The script timed out after most runs completed, but enough completed to compare the important candidates.
+
+    Top result:
+    Run:
+      runs/seed_cheap_accumulate_repair_v1/tune_90_30_r360_net0.45-20260518T065339Z
+
+    Params:
+    - seed_primary_spend = 90
+    - seed_hedge_spend = 30
+    - repair_start_seconds = 360
+    - max_net_ratio = 0.45
+    - max_total_cost = 200
+    - min_order_contracts = 5
+    - one_fill_per_price_level = true
+
+    Metrics:
+    - fills: 1,400
+    - notional: $32,838.04
+    - cost: $31,580.50
+    - realized PnL: +$595.72
+    - completed-pair PnL: +$2,127.09
+    - unpaired-leftover PnL: -$1,531.37
+    - paired edge: +$2,854.42
+    - max raw net: 352.16
+    - profit factor: 1.041
+
+    Safer near-best:
+    Run:
+      runs/seed_cheap_accumulate_repair_v1/tune_90_30_r360_net0.35-20260518T065226Z
+
+    Params:
+    - 90/30 seed
+    - repair 360
+    - max_net_ratio 0.35
+
+    Metrics:
+    - realized PnL: +$548.12
+    - completed-pair PnL: +$2,133.58
+    - unpaired-leftover PnL: -$1,585.46
+    - max raw net: 285.50
+    - profit factor: 1.038
+
+    Best smaller-seed compromise:
+    Run:
+      runs/seed_cheap_accumulate_repair_v1/tune_80_26p666667_r360_net0.40-20260518T064759Z
+
+    Params:
+    - 80 / 26.67 seed
+    - repair 360
+    - max_net_ratio 0.40
+
+    Metrics:
+    - realized PnL: +$514.29
+    - completed-pair PnL: +$1,855.98
+    - unpaired-leftover PnL: -$1,341.70
+    - max raw net: 303.66
+    - profit factor: 1.039
+
+    Important structural read:
+    - repair_start_seconds = 360 still dominates.
+    - 330 is consistently worse.
+    - 390 is also worse.
+    - So the 6-minute repair timing is now the clearest stable parameter.
+
+    Top PnL rows from this tune round:
+    1. 90/30, repair 360, net 0.45
+       +$595.72, max raw net 352.16, PF 1.041
+
+    2. 100/33.33, repair 360, net 0.45
+       +$574.65, max raw net 397.85, PF 1.036
+
+    3. 90/30, repair 360, net 0.40
+       +$561.66, max raw net 352.16, PF 1.038
+
+    4. 90/30, repair 360, net 0.35
+       +$548.12, max raw net 285.50, PF 1.038
+
+    5. 100/33.33, repair 360, net 0.40
+       +$530.23, max raw net 334.00, PF 1.033
+
+    6. 80/26.67, repair 360, net 0.45
+       +$516.66, max raw net 370.32, PF 1.039
+
+    Bucket diagnosis on the winner:
+    Run:
+      tune_90_30_r360_net0.45
+
+    Largest leftover drags:
+    - no:12-15m cost $1,151.68, PnL -$1,014.50
+    - yes:12-15m cost $413.25, PnL -$346.15
+
+    That confirms the seed is still the risk source, but the paired/repair engine is overcoming it.
+
+    Comparison to prior no-resting-level version:
+    - Previous best 90/30 r360 net0.45:
+      +$672.52, max raw net 389.13
+    - New one-fill-per-price-level version:
+      +$595.72, max raw net 352.16
+
+    So the realism adjustment reduced PnL, but did not kill the structure. That’s good. It means the result was partly helped by repeated same-level fills, but not entirely dependent on them.
+
+    Current recommendation:
+    Use 90/30, repair 360 as the center.
+
+    For risk posture:
+    - Aggressive:
+      seed 90/30, repair 360, max_net_ratio 0.45
+      +$595.72, max raw net 352.16
+    - Balanced:
+      seed 90/30, repair 360, max_net_ratio 0.35
+      +$548.12, max raw net 285.50
+    - Smaller/liquidity-safer:
+      seed 80/26.67, repair 360, max_net_ratio 0.40
+      +$514.29, max raw net 303.66
+
+    My pick for next stage:
+    - Candidate live-paper config should be:
+      - seed_primary_spend = 90
+      - seed_hedge_spend = 30
+      - repair_start_seconds = 360
+      - max_net_ratio = 0.35 first, not 0.45
+      - max_total_cost = 200
+      - min_order_contracts = 5
+      - one_fill_per_price_level = true
+
+    Reason:
+    The 0.45 version makes a bit more replay PnL, but 0.35 keeps raw net lower and only gives up about $48 on this replay. For live-paper validation, lower imbalance matters more than squeezing the backtest.
+
+    Next real bottleneck:
+    Execution depth and partial fills.
+
+    The strategy now survives:
+    - next-tick limit logic
+    - min 5 contracts
+    - max net ratio
+    - one-fill-per-price-level realism
+
+    But it still does not model:
+    - orderbook depth
+    - queue priority
+    - partial fills
+    - slippage through levels
+
+    So after this, I would stop adding strategy rules and build a paper/live fill validation layer: place/observe/cancel tiny 5-contract orders and compare actual fill probability against replay assumptions.
