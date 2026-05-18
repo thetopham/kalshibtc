@@ -99,6 +99,7 @@ def test_console_scripts_expose_feed_replay_dashboard_without_legacy_kbtc15() ->
         "kbtc-replay": "kalshibtc.replay.cli:main",
         "kbtc-dashboard": "kalshibtc.dashboard:main",
         "kbtc-paper": "kalshibtc.paper_signal_executor:main",
+        "kbtc-poly-fill-validate": "kalshibtc.polymarket_fill_validation:main",
     }
 
 

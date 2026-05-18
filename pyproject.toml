@@ -31,6 +31,7 @@ kbtc-feed = "kalshibtc.record_1s_snapshots:main"
 kbtc-replay = "kalshibtc.replay.cli:main"
 kbtc-dashboard = "kalshibtc.dashboard:main"
 kbtc-paper = "kalshibtc.paper_signal_executor:main"
+kbtc-poly-fill-validate = "kalshibtc.polymarket_fill_validation:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
