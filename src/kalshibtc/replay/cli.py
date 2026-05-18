@@ -13,7 +13,7 @@ from ..backtest.metrics import compute_metrics
 from ..config import BotConfig, RiskLimits
 from ..datafeed.models import OrderBookSnapshot, Tick
 from ..execution.paper import PaperFill
-from ..execution.risk import RiskDecision, RiskManager
+from ..execution.risk import CapitalConstraints, CapitalState, RiskDecision, RiskManager
 from ..market.contract import ContractWindow
 from ..runtime_paths import DEFAULT_FEED_DB, DEFAULT_RUNS_DIR, resolve_feed_db, resolve_runs_dir
 from ..strategy.registry import create_strategy, strategy_names
@@ -37,6 +37,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-position-dollars", type=float, default=25.0)
     parser.add_argument("--max-open-positions", type=int, default=1)
     parser.add_argument("--max-spread", type=float, default=0.05)
+    parser.add_argument("--starting-bankroll", type=float, default=None, help="Starting bankroll for capital-aware replay, e.g. 200.")
+    parser.add_argument("--max-capital-at-risk", type=float, default=None, help="Maximum locked capital allowed at once.")
+    parser.add_argument("--fee-per-contract", type=float, default=0.0, help="Flat fee per contract filled.")
+    parser.add_argument("--fee-rate", type=float, default=0.0, help="Fee as decimal fraction of notional filled.")
+    parser.add_argument("--per-market-max-exposure", type=float, default=None, help="Maximum locked capital per market ticker.")
+    parser.add_argument("--daily-loss-cap", type=float, default=None, help="Stop new trades after this daily realized loss cap is reached.")
     parser.add_argument("--strategy-param", action="append", default=[], help="Strategy-specific key=value override. Currently used for simple_inventory_mm knobs.")
     parser.add_argument(
         "--no-settle-on-market-rollover",
@@ -79,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
             max_spread=args.max_spread,
         )
     )
+    capital_state = _capital_state_from_args(args)
     report = ReplayEngine(
         config=BotConfig(),
         contract=contract,
@@ -86,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
         risk_manager=risk,
         settle_on_market_rollover=not args.no_settle_on_market_rollover,
         fill_timing=args.fill_timing,
+        capital_state=capital_state,
     ).run(ticks=ticks, books=books)
 
     results_db = run_dir / "results.sqlite3"
@@ -94,6 +102,8 @@ def main(argv: list[str] | None = None) -> int:
     (run_dir / "config.toml").write_text(config_text, encoding="utf-8")
     settlement_rows = _load_official_settlement_rows(feed_db) if args.settlements_from_feed_db else rows
     portfolio_settlement = compute_portfolio_settlement(report.fills, settlement_rows)
+    if capital_state is not None:
+        capital_state.realized_pnl = float(portfolio_settlement.get("aggregate", {}).get("realized_pnl", 0.0) or 0.0)
     _write_portfolio_settlement(results_db, portfolio_settlement)
     (run_dir / "portfolio_settlement.json").write_text(
         json.dumps(portfolio_settlement["aggregate"], indent=2, sort_keys=True) + "\n",
@@ -108,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
         settlement_rows=settlement_rows,
         strategies=[strategy],
         portfolio_settlement=portfolio_settlement,
+        capital_state=capital_state,
     )
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -373,6 +384,37 @@ def _write_portfolio_settlement(path: Path, settlement: Mapping[str, Any]) -> No
         "final_unpaired_no_contracts",
     ]
     with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE contract_metrics (
+                market_ticker TEXT PRIMARY KEY,
+                date TEXT NOT NULL,
+                settlement_result TEXT,
+                settlement_source TEXT NOT NULL,
+                fills INTEGER NOT NULL,
+                total_cost REAL NOT NULL,
+                gross_payout REAL NOT NULL,
+                realized_pnl REAL NOT NULL,
+                paired_locked_edge REAL NOT NULL,
+                final_unpaired_yes_contracts REAL NOT NULL,
+                final_unpaired_no_contracts REAL NOT NULL,
+                max_abs_raw_net_contracts REAL NOT NULL
+            );
+            CREATE TABLE daily_metrics (
+                date TEXT PRIMARY KEY,
+                contracts INTEGER NOT NULL,
+                settled_contracts INTEGER NOT NULL,
+                total_cost REAL NOT NULL,
+                gross_payout REAL NOT NULL,
+                realized_pnl REAL NOT NULL,
+                paired_locked_edge REAL NOT NULL,
+                final_unpaired_yes_contracts REAL NOT NULL,
+                final_unpaired_no_contracts REAL NOT NULL,
+                max_abs_raw_net_contracts REAL NOT NULL,
+                settlement_sources_json TEXT NOT NULL
+            );
+            """
+        )
         conn.executemany(
             """
             INSERT OR REPLACE INTO portfolio_settlement_by_market (
@@ -383,6 +425,57 @@ def _write_portfolio_settlement(path: Path, settlement: Mapping[str, Any]) -> No
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [tuple(row.get(field) for field in fields) for row in settlement.get("markets", [])],
+        )
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO contract_metrics (
+                market_ticker, date, settlement_result, settlement_source, fills, total_cost,
+                gross_payout, realized_pnl, paired_locked_edge, final_unpaired_yes_contracts,
+                final_unpaired_no_contracts, max_abs_raw_net_contracts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    row.get("market_ticker"),
+                    row.get("date") or "unknown",
+                    row.get("settlement_result"),
+                    row.get("settlement_source"),
+                    int(float(row.get("yes_contracts") or 0.0) > 0) + int(float(row.get("no_contracts") or 0.0) > 0),
+                    row.get("total_cost"),
+                    row.get("gross_payout"),
+                    row.get("realized_pnl"),
+                    row.get("paired_locked_edge"),
+                    row.get("final_unpaired_yes_contracts"),
+                    row.get("final_unpaired_no_contracts"),
+                    abs(float(row.get("raw_net_contracts") or 0.0)),
+                )
+                for row in settlement.get("markets", [])
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO daily_metrics (
+                date, contracts, settled_contracts, total_cost, gross_payout, realized_pnl,
+                paired_locked_edge, final_unpaired_yes_contracts, final_unpaired_no_contracts,
+                max_abs_raw_net_contracts, settlement_sources_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    row.get("date"),
+                    row.get("contracts"),
+                    row.get("settled_contracts"),
+                    row.get("total_cost"),
+                    row.get("gross_payout"),
+                    row.get("realized_pnl"),
+                    row.get("paired_locked_edge"),
+                    row.get("final_unpaired_yes_contracts"),
+                    row.get("final_unpaired_no_contracts"),
+                    row.get("max_abs_raw_net_contracts"),
+                    json.dumps(row.get("settlement_sources", []), sort_keys=True),
+                )
+                for row in settlement.get("daily", [])
+            ],
         )
 
 
@@ -437,9 +530,9 @@ def _write_inventory_research_tables(conn: sqlite3.Connection, strategies: Seque
             )
         for position in getattr(strategy, "position_history", []):
             above_qty = getattr(position, "above_qty", getattr(position, "yes_qty", 0.0))
-            above_avg_price = getattr(position, "above_avg_price", getattr(position, "yes_avg_price", 0.0))
+            above_avg_price = getattr(position, "above_avg_price", getattr(position, "yes_avg_price", 0.0)) or 0.0
             below_qty = getattr(position, "below_qty", getattr(position, "no_qty", 0.0))
-            below_avg_price = getattr(position, "below_avg_price", getattr(position, "no_avg_price", 0.0))
+            below_avg_price = getattr(position, "below_avg_price", getattr(position, "no_avg_price", 0.0)) or 0.0
             conn.execute(
                 """
                 INSERT INTO inventory_positions (
@@ -487,6 +580,7 @@ def _metrics_payload(
     settlement_rows: Sequence[Mapping[str, Any] | Any] | None = None,
     strategies: Sequence[Any] | None = None,
     portfolio_settlement: Mapping[str, Any] | None = None,
+    capital_state: CapitalState | None = None,
 ) -> dict[str, Any]:
     settled_fills = estimate_replay_fill_pnls(report.fills, settlement_rows or [])
     kalshi_settled_fills = [fill for fill in settled_fills if fill.get("settlement_source") == "kalshi_api"]
@@ -527,7 +621,26 @@ def _metrics_payload(
         payload["research_metrics"] = research_metrics
     if portfolio_settlement:
         payload["portfolio_settlement"] = portfolio_settlement.get("aggregate", {})
+        contract_rows = list(portfolio_settlement.get("markets", []))
+        daily_rows = list(portfolio_settlement.get("daily", []))
+        payload["contract_metrics"] = {"contracts": len(contract_rows), "rows": contract_rows}
+        payload["daily_metrics"] = {"days": len(daily_rows), "rows": daily_rows}
+    if capital_state is not None:
+        payload["starting_bankroll"] = capital_state.constraints.starting_bankroll
+        payload["capital_metrics"] = capital_state.metrics()
     return payload
+
+
+def _capital_state_from_args(args: argparse.Namespace) -> CapitalState | None:
+    constraints = CapitalConstraints(
+        starting_bankroll=args.starting_bankroll,
+        max_capital_at_risk=args.max_capital_at_risk,
+        fee_per_contract=max(0.0, float(args.fee_per_contract or 0.0)),
+        fee_rate=max(0.0, float(args.fee_rate or 0.0)),
+        per_market_max_exposure=args.per_market_max_exposure,
+        daily_loss_cap=args.daily_loss_cap,
+    )
+    return CapitalState(constraints) if constraints.enabled else None
 
 
 def _inventory_research_metrics(strategies: Sequence[Any]) -> dict[str, Any]:
@@ -613,6 +726,12 @@ def _config_text(*, args: argparse.Namespace, feed_db: Path, run_id: str) -> str
             f"max_position_dollars = {args.max_position_dollars}",
             f"max_open_positions = {args.max_open_positions}",
             f"max_spread = {args.max_spread}",
+            f"starting_bankroll = {_toml_float_or_empty(args.starting_bankroll)}",
+            f"max_capital_at_risk = {_toml_float_or_empty(args.max_capital_at_risk)}",
+            f"fee_per_contract = {float(args.fee_per_contract or 0.0)}",
+            f"fee_rate = {float(args.fee_rate or 0.0)}",
+            f"per_market_max_exposure = {_toml_float_or_empty(args.per_market_max_exposure)}",
+            f"daily_loss_cap = {_toml_float_or_empty(args.daily_loss_cap)}",
             f"strategy_params = {json.dumps(_parse_strategy_params(args.strategy_param), sort_keys=True)}",
             f"settle_on_market_rollover = {str(not args.no_settle_on_market_rollover).lower()}",
             f"settlements_from_feed_db = {str(args.settlements_from_feed_db).lower()}",
@@ -620,6 +739,10 @@ def _config_text(*, args: argparse.Namespace, feed_db: Path, run_id: str) -> str
             "",
         ]
     )
+
+
+def _toml_float_or_empty(value: float | None) -> str:
+    return '""' if value is None else str(float(value))
 
 
 def _parse_strategy_params(items: Sequence[str]) -> dict[str, Any]:
