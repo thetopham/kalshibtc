@@ -19,6 +19,7 @@ def test_console_scripts_are_feed_replay_paper_dashboard_and_validation_only() -
         "kbtc-feed": "kalshibtc.record_1s_snapshots:main",
         "kbtc-replay": "kalshibtc.replay.cli:main",
         "kbtc-dashboard": "kalshibtc.dashboard:main",
+        "kbtc-probability-dataset": "kalshibtc.probability.dataset_cli:main",
         "kbtc-paper": "kalshibtc.paper_signal_executor:main",
         "kbtc-poly-fill-validate": "kalshibtc.polymarket_fill_validation:main",
         "polymarket-btc-15m-recorder": "kalshibtc.polymarket_btc_15m_recorder:main",

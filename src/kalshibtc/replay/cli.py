@@ -196,7 +196,7 @@ def _rows_to_replay_inputs(rows: list[sqlite3.Row]) -> tuple[list[Tick], list[Or
                 price=float(row["btc_price"]),
                 source="feed_replay",
                 symbol="BTC-USD",
-                raw=_json_or_empty(row["raw_json"] if _has_column(row, "raw_json") else None),
+                raw=_row_market_metadata(row, base_raw=_json_or_empty(row["raw_json"] if _has_column(row, "raw_json") else None)),
             )
         )
         books.append(
@@ -208,7 +208,7 @@ def _rows_to_replay_inputs(rows: list[sqlite3.Row]) -> tuple[list[Tick], list[Or
                 no_bid=_optional_float(row, "no_bid"),
                 no_ask=_optional_float(row, "no_ask"),
                 sequence=_optional_int(row, "orderbook_sequence"),
-                raw=_json_or_empty(row["raw_json"] if _has_column(row, "raw_json") else None),
+                raw=_row_market_metadata(row, base_raw=_json_or_empty(row["raw_json"] if _has_column(row, "raw_json") else None)),
             )
         )
     return ticks, books, contract
@@ -773,6 +773,24 @@ def _parse_dt(value: Any) -> datetime:
 
 def _has_column(row: sqlite3.Row, name: str) -> bool:
     return name in row.keys()
+
+
+def _row_market_metadata(row: sqlite3.Row, *, base_raw: dict[str, Any]) -> dict[str, Any]:
+    raw = dict(base_raw)
+    for key in (
+        "market_ticker",
+        "market_open_time",
+        "market_close_time",
+        "strike",
+        "target_price",
+        "distance_from_strike",
+        "seconds_to_close",
+        "slope_30s",
+        "btc_velocity_30s",
+    ):
+        if _has_column(row, key) and row[key] is not None:
+            raw[key] = row[key]
+    return raw
 
 
 def _optional_float(row: sqlite3.Row, name: str) -> float | None:

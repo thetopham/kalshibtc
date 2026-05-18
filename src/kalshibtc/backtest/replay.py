@@ -173,8 +173,6 @@ class ReplayEngine:
                     if strategy.name == fill.strategy and callback is not None:
                         callback(state, fill)
                         break
-                if fill is None:
-                    continue
                 open_positions += 1
             results.append(PipelineResult(signal=decision.signal, risk=repriced_decision, fill=fill))
         pipeline.open_positions = open_positions

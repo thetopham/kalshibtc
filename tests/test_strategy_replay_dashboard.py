@@ -23,6 +23,8 @@ EXPECTED_STRATEGIES = {
     "complement_ladder_v0",
     "cheap_accumulate_repair_v0",
     "seed_cheap_accumulate_repair_v1",
+    "seed_cheap_accumulate_repair_v2",
+    "strategy_probability_mm_v0",
 }
 
 

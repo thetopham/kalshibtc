@@ -4,7 +4,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from kalshibtc.config import RiskLimits
+from kalshibtc.backtest.replay import ReplayEngine
+from kalshibtc.config import BotConfig, RiskLimits
 from kalshibtc.datafeed.models import OrderBookSnapshot, Tick
 from kalshibtc.execution.paper import PaperExecutor
 from kalshibtc.execution.risk import RiskManager
@@ -233,6 +234,85 @@ def test_seed_v1_does_not_refill_same_price_level_after_fill() -> None:
     assert first.side == "long_above"
     assert second.side == "none"
     assert second.reason == "resting limit price level already filled"
+
+
+def test_seed_v1_next_tick_replay_resets_and_seeds_after_market_rollover() -> None:
+    first = ContractWindow(
+        ticker="KXBTC15M-SEED-A",
+        strike=100_000.0,
+        open_time=datetime(2026, 5, 15, 12, 0, tzinfo=UTC),
+        close_time=datetime(2026, 5, 15, 12, 15, tzinfo=UTC),
+    )
+    second = ContractWindow(
+        ticker="KXBTC15M-SEED-B",
+        strike=100_000.0,
+        open_time=datetime(2026, 5, 15, 12, 15, tzinfo=UTC),
+        close_time=datetime(2026, 5, 15, 12, 30, tzinfo=UTC),
+    )
+
+    def tick(contract: ContractWindow, seconds_to_close: int, price: float = 100_050.0) -> Tick:
+        return Tick(ts=contract.close_time - timedelta(seconds=seconds_to_close), price=price, source="test")
+
+    def book(contract: ContractWindow, tick_: Tick, *, yes_ask: float, no_ask: float) -> OrderBookSnapshot:
+        return OrderBookSnapshot(
+            ts=tick_.ts,
+            market_ticker=contract.ticker,
+            yes_bid=max(0.001, yes_ask - 0.01),
+            yes_ask=yes_ask,
+            no_bid=max(0.001, no_ask - 0.01),
+            no_ask=no_ask,
+            raw={
+                "strike": contract.strike,
+                "market_open_time": str(contract.open_time.isoformat() if contract.open_time is not None else ""),
+                "market_close_time": contract.close_time.isoformat(),
+            },
+        )
+
+    ticks: list[Tick] = []
+    books: list[OrderBookSnapshot] = []
+    for contract in (first, second):
+        scenarios = [
+            (780, 0.50, 0.50),  # emit primary seed
+            (779, 0.50, 0.50),  # fill primary, emit hedge
+            (778, 0.50, 0.50),  # fill hedge
+            (360, 0.20, 0.70),  # emit repair if unbalanced
+            (359, 0.20, 0.70),  # fill repair
+            (10, 0.20, 0.70),   # settle/rollover boundary guard
+        ]
+        for seconds_to_close, yes_ask, no_ask in scenarios:
+            tick_ = tick(contract, seconds_to_close)
+            ticks.append(tick_)
+            books.append(book(contract, tick_, yes_ask=yes_ask, no_ask=no_ask))
+
+    strategy = SeedCheapAccumulateRepairV1Strategy(
+        SeedCheapAccumulateRepairConfig(
+            seed_primary_spend=30,
+            seed_hedge_spend=10,
+            repair_start_seconds=360,
+            max_total_cost=50,
+            max_net_ratio=1.0,
+            min_order_contracts=5,
+            no_trade_seconds=0,
+        )
+    )
+    report = ReplayEngine(
+        config=BotConfig(),
+        contract=first,
+        strategies=[strategy],
+        risk_manager=RiskManager(RiskLimits(base_size_dollars=50, max_position_dollars=50, max_open_positions=100, max_spread=1.0, min_confidence=0.0)),
+        executor=PaperExecutor(),
+        settle_on_market_rollover=True,
+        fill_timing="next-tick",
+    ).run(ticks=ticks, books=books)
+
+    fills_by_market = {}
+    for fill in report.fills:
+        fills_by_market.setdefault(fill.market_ticker, []).append(fill)
+
+    assert set(fills_by_market) == {"KXBTC15M-SEED-A", "KXBTC15M-SEED-B"}
+    assert [fill.side for fill in fills_by_market["KXBTC15M-SEED-A"]][:2] == ["long_above", "long_below"]
+    assert [fill.side for fill in fills_by_market["KXBTC15M-SEED-B"]][:2] == ["long_above", "long_below"]
+    assert fills_by_market["KXBTC15M-SEED-B"][0].notional == pytest.approx(30)
 
 
 def test_seed_v1_registered_and_accepts_params() -> None:

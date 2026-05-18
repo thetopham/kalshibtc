@@ -7,6 +7,7 @@ import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 
+from kalshibtc.replay.cli import _rows_to_replay_inputs
 from kalshibtc.replay.cli import main as replay_main
 from kalshibtc.runtime_paths import (
     DEFAULT_FEED_DB,
@@ -98,6 +99,7 @@ def test_console_scripts_expose_feed_replay_dashboard_without_legacy_kbtc15() ->
         "kbtc-feed": "kalshibtc.record_1s_snapshots:main",
         "kbtc-replay": "kalshibtc.replay.cli:main",
         "kbtc-dashboard": "kalshibtc.dashboard:main",
+        "kbtc-probability-dataset": "kalshibtc.probability.dataset_cli:main",
         "kbtc-paper": "kalshibtc.paper_signal_executor:main",
         "kbtc-poly-fill-validate": "kalshibtc.polymarket_fill_validation:main",
         "polymarket-btc-15m-recorder": "kalshibtc.polymarket_btc_15m_recorder:main",
@@ -107,6 +109,65 @@ def test_console_scripts_expose_feed_replay_dashboard_without_legacy_kbtc15() ->
 def test_legacy_15m_package_is_archive_only_not_active_import_path() -> None:
     assert importlib.util.find_spec("kalshi_btc_15m_bot") is None
     assert Path("archive/legacy-15m/src/kalshi_btc_15m_bot/streaming.py").is_file()
+
+
+def test_rows_to_replay_inputs_preserves_top_level_market_metadata_when_raw_json_is_nested(tmp_path: Path) -> None:
+    feed_db = tmp_path / "poly-shape.sqlite3"
+    with sqlite3.connect(feed_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE realtime_snapshots_1s (
+                ts TEXT NOT NULL,
+                market_ticker TEXT NOT NULL,
+                market_open_time TEXT,
+                market_close_time TEXT NOT NULL,
+                btc_price REAL NOT NULL,
+                strike REAL NOT NULL,
+                target_price REAL,
+                yes_bid REAL,
+                yes_ask REAL,
+                no_bid REAL,
+                no_ask REAL,
+                orderbook_sequence INTEGER,
+                raw_json TEXT,
+                PRIMARY KEY (market_ticker, ts)
+            )
+            """
+        )
+        nested_raw = json.dumps({"snapshot": {"strike": 15.0, "market_close_time": "2099-01-01T00:00:00+00:00"}})
+        conn.execute(
+            """
+            INSERT INTO realtime_snapshots_1s (
+                ts, market_ticker, market_open_time, market_close_time, btc_price, strike,
+                target_price, yes_bid, yes_ask, no_bid, no_ask, orderbook_sequence, raw_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "2026-05-18T08:45:00+00:00",
+                "btc-updown-15m-1779093900",
+                "2026-05-18T08:45:00+00:00",
+                "2026-05-18T09:00:00+00:00",
+                77_000.0,
+                76_900.0,
+                76_900.0,
+                0.49,
+                0.50,
+                0.49,
+                0.50,
+                1,
+                nested_raw,
+            ),
+        )
+        conn.row_factory = sqlite3.Row
+        rows = list(conn.execute("SELECT * FROM realtime_snapshots_1s"))
+
+    _, books, contract = _rows_to_replay_inputs(rows)
+
+    assert contract.strike == 76_900.0
+    assert contract.close_time == datetime(2026, 5, 18, 9, 0, tzinfo=UTC)
+    assert books[0].raw["strike"] == 76_900.0
+    assert books[0].raw["market_close_time"] == "2026-05-18T09:00:00+00:00"
+    assert books[0].raw["snapshot"]["strike"] == 15.0
 
 
 def test_replay_cli_reads_feed_db_and_writes_immutable_run_outputs(tmp_path: Path) -> None:
