@@ -29,12 +29,15 @@ from .runtime_paths import (
 from .strategy.simple_directional import SimpleDirectionalStrategy
 
 BOUNDARY_TEXT = "Read-only dashboard. No live orders. Active system is 1s recorder + 1s paper executor."
+POLYMARKET_BOUNDARY_TEXT = "Read-only Polymarket public-data dashboard. No live orders. Active system is public-data recorder + read-only dashboard."
 STREAM_TITLE = "Kalshi BTC Stream"
+POLYMARKET_STREAM_TITLE = "Polymarket BTC Stream"
 STATUS_TITLE = "Kalshi BTC 1s Paper Status"
 STRATEGY_RUNS_TITLE = "Kalshi BTC Strategy Runs"
 STRATEGY_RUN_TITLE = "Kalshi BTC Strategy Run"
 STRATEGY_BOUNDARY_TEXT = "Read-only replay/backtest dashboard. No order submission."
 ACTIVE_SERVICES = (
+    "polymarket-btc15m-1s-recorder.service",
     "kalshi-btc15m-1s-recorder.service",
     "kalshi-btc15m-1s-paper.service",
     "kalshi-btc15m-1s-dashboard.service",
@@ -63,11 +66,13 @@ def collect_stream_dashboard_data(*, snapshot_db: str | Path | None = None, hist
     snapshot_path = resolve_snapshot_db(snapshot_db)
     rows = _latest_snapshot_rows(snapshot_path, limit=history_limit)
     latest = _stream_latest_from_row(rows[-1]) if rows else None
+    title = POLYMARKET_STREAM_TITLE if rows and row_get(rows[-1], "market_slug") else STREAM_TITLE
+    boundary = POLYMARKET_BOUNDARY_TEXT if title == POLYMARKET_STREAM_TITLE else BOUNDARY_TEXT
     return {
-        "title": STREAM_TITLE,
+        "title": title,
         "mode": "paper/research/read-only",
         "api_path": "/api/stream",
-        "boundary": BOUNDARY_TEXT,
+        "boundary": boundary,
         "snapshot_db_path": str(snapshot_path),
         "stream": {
             "freshness": _freshness(latest["ts"] if latest else None),
@@ -247,7 +252,7 @@ def render_stream_dashboard_html(data: Mapping[str, Any]) -> str:
         </section>
         <section class="cards">
           {_card('Recorder freshness', _h(stream.get('freshness', {}).get('status')), _h(stream.get('freshness', {}).get('age_seconds')) + 's', value_id='recorder-freshness', note_id='recorder-age')}
-          {_card('Latest BTC price', _money(latest.get('btc_price')), _h(latest.get('above_below_strike')), value_id='btc-price', note_id='above-below-strike')}
+          {_card('Latest BTC price', _money(latest.get('btc_price')), 'source ' + _h(latest.get('btc_price_source') or 'unknown'), value_id='btc-price', note_id='above-below-strike')}
           {_card('Distance from strike', _money(distance), f"strike {_money(latest.get('strike'))}", value_id='distance-from-strike', note_id='strike-price')}
           {_card('Seconds to close', _fmt(latest.get('seconds_to_close')), _h(latest.get('market_ticker')), value_id='seconds-to-close', note_id='market-ticker')}
         </section>
@@ -256,6 +261,8 @@ def render_stream_dashboard_html(data: Mapping[str, Any]) -> str:
             {_kv('YES bid', orderbook.get('yes_bid'), value_id='yes-bid')}{_kv('YES ask', orderbook.get('yes_ask'), value_id='yes-ask')}
             {_kv('NO bid', orderbook.get('no_bid'), value_id='no-bid')}{_kv('NO ask', orderbook.get('no_ask'), value_id='no-ask')}
             {_kv('spread', orderbook.get('spread'), value_id='orderbook-spread')}{_kv('status', orderbook.get('status'), value_id='orderbook-status')}
+            {_kv('BTC price source', latest.get('btc_price_source'), value_id='btc-price-source')}
+            {_kv('condition id', latest.get('condition_id'))}{_kv('YES token', latest.get('yes_token_id'))}{_kv('NO token', latest.get('no_token_id'))}
           </tbody></table></div>
           <div><h2>Slopes</h2><table><tbody>
             {_kv('slope_10s', slopes.get('slope_10s'), value_id='slope-10s')}{_kv('slope_30s', slopes.get('slope_30s'), value_id='slope-30s')}{_kv('slope_60s', slopes.get('slope_60s'), value_id='slope-60s')}
@@ -466,6 +473,11 @@ def _stream_latest_from_row(row: sqlite3.Row) -> JsonDict:
     latest = {
         "ts": ts,
         "market_ticker": row_get(row, "market_ticker"),
+        "market_slug": row_get(row, "market_slug"),
+        "btc_price_source": _btc_price_source(raw_payload if raw_payload else raw_state),
+        "condition_id": row_get(row, "condition_id"),
+        "yes_token_id": row_get(row, "yes_token_id"),
+        "no_token_id": row_get(row, "no_token_id"),
         "market_close_time": close_time,
         "btc_price": btc_price,
         "strike": strike,
@@ -484,6 +496,21 @@ def _stream_latest_from_row(row: sqlite3.Row) -> JsonDict:
         "raw_payload": raw_payload if raw_payload else raw_state,
     }
     return latest
+
+
+def _btc_price_source(payload: Mapping[str, Any]) -> str | None:
+    direct = payload.get("btc_price_source")
+    if direct not in (None, ""):
+        return str(direct)
+    raw = payload.get("btc_price_raw")
+    if isinstance(raw, Mapping) and raw.get("source") not in (None, ""):
+        return str(raw.get("source"))
+    snapshot = payload.get("snapshot")
+    if isinstance(snapshot, Mapping):
+        nested = snapshot.get("btc_price_raw")
+        if isinstance(nested, Mapping) and nested.get("source") not in (None, ""):
+            return str(nested.get("source"))
+    return None
 
 
 def _state_from_snapshot(row: sqlite3.Row) -> MarketState | None:
@@ -690,6 +717,8 @@ def _history_point(row: sqlite3.Row) -> JsonDict:
         "btc_price": _float(row_get(row, "btc_price")),
         "target_price": _float(row_get(row, "target_price")) or _float(row_get(row, "strike")),
         "seconds_to_close": _float(row_get(row, "seconds_to_close")),
+        "yes_ask": _float(row_get(row, "yes_ask")),
+        "no_ask": _float(row_get(row, "no_ask")),
     }
 
 
@@ -969,7 +998,7 @@ function updateStreamDashboard(data) {{
   setText('recorder-freshness', freshness.status || '-');
   setText('recorder-age', (freshness.age_seconds == null ? '-' : freshness.age_seconds + 's'));
   setText('btc-price', fmtMoney(latest.btc_price));
-  setText('above-below-strike', latest.above_below_strike || '-');
+  setText('above-below-strike', 'source ' + (latest.btc_price_source || 'unknown'));
   setText('distance-from-strike', Number.isFinite(price) && Number.isFinite(strike) ? fmtMoney(price - strike) : '-');
   setText('strike-price', 'strike ' + fmtMoney(latest.strike));
   setText('seconds-to-close', fmtNum(latest.seconds_to_close));
@@ -980,6 +1009,7 @@ function updateStreamDashboard(data) {{
   setText('no-ask', fmtNum(orderbook.no_ask));
   setText('orderbook-spread', fmtNum(orderbook.spread));
   setText('orderbook-status', orderbook.status || '-');
+  setText('btc-price-source', latest.btc_price_source || '-');
   setText('slope-10s', fmtNum(slopes.slope_10s));
   setText('slope-30s', fmtNum(slopes.slope_30s));
   setText('slope-60s', fmtNum(slopes.slope_60s));
