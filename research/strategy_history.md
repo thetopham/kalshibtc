@@ -1,6 +1,6 @@
 # Strategy Research History
 
-Generated: 2026-05-19T00:19:30Z
+Generated: 2026-05-19T01:36:48Z
 
 Safety boundary: replay/research summaries only; no live orders.
 
@@ -861,7 +861,7 @@ Runs scanned: 1
 
 ## seed_cheap_accumulate_repair_v1
 
-Runs scanned: 74
+Runs scanned: 75
 
 ### Best by realized PnL
 

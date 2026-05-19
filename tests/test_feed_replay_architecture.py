@@ -97,6 +97,7 @@ def test_console_scripts_expose_feed_replay_dashboard_without_legacy_kbtc15() ->
 
     assert pyproject["project"]["scripts"] == {
         "kbtc-feed": "kalshibtc.record_1s_snapshots:main",
+        "kbtc-feed-derived-columns": "kalshibtc.feed_derived_columns:main",
         "kbtc-replay": "kalshibtc.replay.cli:main",
         "kbtc-dashboard": "kalshibtc.dashboard:main",
         "kbtc-probability-dataset": "kalshibtc.probability.dataset_cli:main",

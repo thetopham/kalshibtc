@@ -828,6 +828,8 @@ def test_replay_uses_official_kalshi_settlements_for_generic_strategies(tmp_path
             "--run-id",
             "official-generic",
             "--settlements-from-feed-db",
+            "--fill-timing",
+            "same-tick",
             "--json",
         ]
     )

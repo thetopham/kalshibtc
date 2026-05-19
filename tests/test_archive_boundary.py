@@ -17,6 +17,7 @@ def test_console_scripts_are_feed_replay_paper_dashboard_validation_and_research
 
     assert pyproject["project"]["scripts"] == {
         "kbtc-feed": "kalshibtc.record_1s_snapshots:main",
+        "kbtc-feed-derived-columns": "kalshibtc.feed_derived_columns:main",
         "kbtc-replay": "kalshibtc.replay.cli:main",
         "kbtc-dashboard": "kalshibtc.dashboard:main",
         "kbtc-probability-dataset": "kalshibtc.probability.dataset_cli:main",

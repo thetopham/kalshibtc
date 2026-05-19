@@ -15,6 +15,59 @@ from kalshibtc.replay.cli import main as replay_main
 from kalshibtc.replay.settlement import compute_portfolio_settlement, estimate_replay_fill_pnls
 
 
+def test_replay_cli_applies_realistic_defaults_to_cross_venue_strategy_runs(tmp_path: Path) -> None:
+    feed_db = tmp_path / "feed.sqlite3"
+    runs_dir = tmp_path / "runs"
+    _write_feed_db(feed_db)
+
+    assert replay_main(
+        [
+            "--feed-db",
+            str(feed_db),
+            "--runs-dir",
+            str(runs_dir),
+            "--strategy",
+            "simple_directional",
+            "--run-id",
+            "improved-defaults",
+            "--json",
+        ]
+    ) == 0
+
+    run_dir = runs_dir / "simple_directional" / "improved-defaults"
+    config = (run_dir / "config.toml").read_text()
+    metrics = json.loads((run_dir / "metrics.json").read_text())
+
+    assert 'venue = "kalshi"' in config
+    assert 'fill_timing = "next-tick"' in config
+    assert "settle_on_market_rollover = true" in config
+    assert "settlements_from_feed_db = true" in config
+    assert metrics["venue"] == "kalshi"
+    assert metrics["fill_timing"] == "next-tick"
+    assert metrics["settlements_from_feed_db"] is True
+    assert metrics["settled_positions"] >= 0
+
+
+def test_replay_cli_rejects_polymarket_only_strategy_on_default_kalshi_venue(tmp_path: Path) -> None:
+    feed_db = tmp_path / "feed.sqlite3"
+    runs_dir = tmp_path / "runs"
+    _write_feed_db(feed_db)
+
+    assert replay_main(
+        [
+            "--feed-db",
+            str(feed_db),
+            "--runs-dir",
+            str(runs_dir),
+            "--strategy",
+            "hedge_volatility_v0",
+            "--run-id",
+            "wrong-venue",
+            "--json",
+        ]
+    ) == 2
+
+
 def test_replay_cli_accepts_max_open_positions_for_research_runs(tmp_path: Path) -> None:
     feed_db = tmp_path / "feed.sqlite3"
     runs_dir = tmp_path / "runs"
@@ -219,6 +272,8 @@ def test_replay_cli_enforces_capital_guardrails_and_reports_capital_metrics(tmp_
             "150",
             "--max-open-positions",
             "10",
+            "--fill-timing",
+            "same-tick",
             "--json",
         ]
     ) == 0

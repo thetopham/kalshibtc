@@ -9,7 +9,7 @@ from test_feed_replay_architecture import _write_feed_db
 
 from kalshibtc import dashboard
 from kalshibtc.replay.cli import main as replay_main
-from kalshibtc.strategy.registry import create_strategy, strategy_names
+from kalshibtc.strategy.registry import create_strategy, strategy_metadata, strategy_names, strategies_for_venue
 
 EXPECTED_STRATEGIES = {
     "simple_directional",
@@ -26,6 +26,16 @@ EXPECTED_STRATEGIES = {
     "seed_cheap_accumulate_repair_v2",
     "strategy_probability_mm_v0",
     "inventory_aware_passive_mm",
+    "hedge_volatility_v0",
+}
+
+POLYMARKET_ONLY_STRATEGIES = {
+    "hedge_volatility_v0",
+    "complement_ladder_v0",
+    "cheap_accumulate_repair_v0",
+    "seed_cheap_accumulate_repair_v1",
+    "seed_cheap_accumulate_repair_v2",
+    "inventory_aware_passive_mm",
 }
 
 
@@ -38,6 +48,24 @@ def test_strategy_registry_lists_initial_ideation_strategies_and_rejects_unknown
 
     with pytest.raises(ValueError, match="unknown strategy"):
         create_strategy("paper_ledger_legacy")
+
+
+def test_strategy_registry_marks_hedging_inventory_strategies_as_polymarket_only() -> None:
+    assert set(strategies_for_venue("polymarket")) == EXPECTED_STRATEGIES
+    assert POLYMARKET_ONLY_STRATEGIES.isdisjoint(strategies_for_venue("kalshi"))
+
+    for name in POLYMARKET_ONLY_STRATEGIES:
+        metadata = strategy_metadata(name)
+        assert metadata.hedges_inventory is True
+        assert metadata.allowed_venues == ("polymarket",)
+        assert metadata.polymarket_only is True
+
+    cross_venue = set(strategies_for_venue("kalshi"))
+    assert "simple_directional" in cross_venue
+    assert strategy_metadata("simple_directional").polymarket_only is False
+
+    with pytest.raises(ValueError, match="not enabled for venue kalshi"):
+        create_strategy("hedge_volatility_v0", venue="kalshi")
 
 
 def test_replay_cli_writes_each_strategy_under_own_run_directory(tmp_path: Path) -> None:

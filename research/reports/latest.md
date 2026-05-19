@@ -1,10 +1,10 @@
 # Latest Strategy Replay Report
 
-Generated: 2026-05-19T00:19:30Z
+Generated: 2026-05-19T01:36:48Z
 
 Safety boundary: replay/research summaries only; no live orders.
 
-Runs scanned: 194
+Runs scanned: 195
 
 ## Top runs
 

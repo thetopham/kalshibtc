@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from .breakout_momentum import BreakoutMomentumStrategy
 from .cheap_accumulate_repair_v0 import CheapAccumulateRepairConfig, CheapAccumulateRepairV0Strategy
 from .complement_ladder_v0 import ComplementLadderConfig, ComplementLadderV0Strategy
+from .hedge_volatility_v0 import HedgeVolatilityV0
 from .inventory_aware_passive_mm import (
     InventoryAwarePassiveMMConfig,
     InventoryAwarePassiveMMStrategy,
@@ -21,7 +23,6 @@ from .seed_cheap_accumulate_repair_v2 import (
     SeedCheapAccumulateRepairV2Config,
     SeedCheapAccumulateRepairV2Strategy,
 )
-from .signals import Strategy
 from .simple_directional import SimpleDirectionalStrategy
 from .simple_inventory_mm import SimpleInventoryMMConfig, SimpleInventoryMMStrategy
 from .spread_aware_momentum import SpreadAwareMomentumStrategy
@@ -31,7 +32,30 @@ from .strategy_probability_mm_v0 import (
 )
 from .volatility_inventory import VolatilityInventoryStrategy
 
-_FACTORIES: dict[str, Callable[[], Strategy]] = {
+
+@dataclass(frozen=True)
+class StrategyMetadata:
+    name: str
+    allowed_venues: tuple[str, ...] = ("kalshi", "polymarket")
+    hedges_inventory: bool = False
+
+    @property
+    def polymarket_only(self) -> bool:
+        return self.allowed_venues == ("polymarket",)
+
+
+POLYMARKET_ONLY_HEDGING_STRATEGIES: frozenset[str] = frozenset(
+    {
+        "hedge_volatility_v0",
+        "complement_ladder_v0",
+        "cheap_accumulate_repair_v0",
+        "seed_cheap_accumulate_repair_v1",
+        "seed_cheap_accumulate_repair_v2",
+        "inventory_aware_passive_mm",
+    }
+)
+
+_FACTORIES: dict[str, Callable[[], Any]] = {
     "simple_directional": SimpleDirectionalStrategy,
     "simple_inventory_mm": SimpleInventoryMMStrategy,
     "complement_ladder_v0": ComplementLadderV0Strategy,
@@ -46,6 +70,16 @@ _FACTORIES: dict[str, Callable[[], Strategy]] = {
     "volatility_inventory": VolatilityInventoryStrategy,
     "strategy_probability_mm_v0": StrategyProbabilityMMV0Strategy,
     "inventory_aware_passive_mm": InventoryAwarePassiveMMStrategy,
+    "hedge_volatility_v0": HedgeVolatilityV0,
+}
+
+_METADATA: dict[str, StrategyMetadata] = {
+    name: StrategyMetadata(
+        name=name,
+        allowed_venues=("polymarket",) if name in POLYMARKET_ONLY_HEDGING_STRATEGIES else ("kalshi", "polymarket"),
+        hedges_inventory=name in POLYMARKET_ONLY_HEDGING_STRATEGIES,
+    )
+    for name in _FACTORIES
 }
 
 
@@ -53,13 +87,34 @@ def strategy_names() -> tuple[str, ...]:
     return tuple(_FACTORIES)
 
 
-def create_strategy(name: str, params: Mapping[str, Any] | None = None) -> Strategy:
+def strategy_metadata(name: str) -> StrategyMetadata:
+    try:
+        return _METADATA[name]
+    except KeyError as exc:
+        expected = ", ".join(strategy_names())
+        raise ValueError(f"unknown strategy: {name}; expected one of: {expected}") from exc
+
+
+def strategies_for_venue(venue: str) -> tuple[str, ...]:
+    normalized = venue.lower()
+    if normalized not in {"kalshi", "polymarket"}:
+        raise ValueError("venue must be kalshi or polymarket")
+    return tuple(name for name, metadata in _METADATA.items() if normalized in metadata.allowed_venues)
+
+
+def create_strategy(name: str, params: Mapping[str, Any] | None = None, *, venue: str | None = None) -> Any:
     params = dict(params or {})
     try:
         factory = _FACTORIES[name]
     except KeyError as exc:
         expected = ", ".join(strategy_names())
         raise ValueError(f"unknown strategy: {name}; expected one of: {expected}") from exc
+    if venue is not None:
+        normalized_venue = venue.lower()
+        metadata = strategy_metadata(name)
+        if normalized_venue not in metadata.allowed_venues:
+            allowed = ", ".join(metadata.allowed_venues)
+            raise ValueError(f"strategy {name} is not enabled for venue {normalized_venue}; allowed venues: {allowed}")
     if name == "simple_inventory_mm" and params:
         return SimpleInventoryMMStrategy(SimpleInventoryMMConfig(**params))
     if name == "complement_ladder_v0" and params:

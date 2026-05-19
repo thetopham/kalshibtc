@@ -30,6 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--feed-db", default=None, help=f"Feed SQLite DB. Default: {DEFAULT_FEED_DB}")
     parser.add_argument("--runs-dir", default=None, help=f"Runs root directory. Default: {DEFAULT_RUNS_DIR}")
     parser.add_argument("--strategy", default="simple_directional", choices=strategy_names())
+    parser.add_argument("--venue", choices=["kalshi", "polymarket"], default="kalshi", help="Venue/feed semantics for strategy eligibility. Default: kalshi.")
     parser.add_argument("--run-id", default=None, help="Run directory name. Defaults to current UTC timestamp.")
     parser.add_argument("--from", dest="from_ts", default=None, help="Inclusive ISO timestamp lower bound.")
     parser.add_argument("--to", dest="to_ts", default=None, help="Inclusive ISO timestamp upper bound.")
@@ -57,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--fill-timing",
         choices=["same-tick", "next-tick"],
-        default="same-tick",
+        default="next-tick",
         help="Replay fill timing. next-tick executes allowed signals on the following snapshot to avoid same-tick hindsight.",
     )
     parser.add_argument("--json", action="store_true", help="Print JSON summary.")
@@ -69,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--research-dir", default="research", help="Research journal output directory. Default: research")
     parser.add_argument("--overwrite", action="store_true", help="Allow replacing an existing run directory.")
     args = parser.parse_args(argv)
+    if not args.settlements_from_feed_db and args.venue == "kalshi":
+        args.settlements_from_feed_db = True
 
     feed_db = resolve_feed_db(args.feed_db)
     runs_dir = resolve_runs_dir(args.runs_dir)
@@ -82,7 +85,11 @@ def main(argv: list[str] | None = None) -> int:
     rows = _load_snapshot_rows(feed_db, from_ts=args.from_ts, to_ts=args.to_ts)
     ticks, books, contract = _rows_to_replay_inputs(rows)
     strategy_params = _parse_strategy_params(args.strategy_param)
-    strategy = create_strategy(args.strategy, params=strategy_params)
+    try:
+        strategy = create_strategy(args.strategy, params=strategy_params, venue=args.venue)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     risk = RiskManager(
         RiskLimits(
             base_size_dollars=args.base_size_dollars,
@@ -106,7 +113,8 @@ def main(argv: list[str] | None = None) -> int:
     _write_results(results_db, report.results, strategies=[strategy])
     config_text = _config_text(args=args, feed_db=feed_db, run_id=run_id)
     (run_dir / "config.toml").write_text(config_text, encoding="utf-8")
-    settlement_rows = _load_official_settlement_rows(feed_db) if args.settlements_from_feed_db else rows
+    official_settlement_rows = _load_official_settlement_rows(feed_db) if args.settlements_from_feed_db else []
+    settlement_rows = official_settlement_rows or rows
     portfolio_settlement = compute_portfolio_settlement(report.fills, settlement_rows)
     if capital_state is not None:
         capital_state.realized_pnl = float(portfolio_settlement.get("aggregate", {}).get("realized_pnl", 0.0) or 0.0)
@@ -125,6 +133,9 @@ def main(argv: list[str] | None = None) -> int:
         strategies=[strategy],
         portfolio_settlement=portfolio_settlement,
         capital_state=capital_state,
+        venue=args.venue,
+        fill_timing=args.fill_timing,
+        settlements_from_feed_db=args.settlements_from_feed_db,
     )
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -592,6 +603,9 @@ def _metrics_payload(
     strategies: Sequence[Any] | None = None,
     portfolio_settlement: Mapping[str, Any] | None = None,
     capital_state: CapitalState | None = None,
+    venue: str = "kalshi",
+    fill_timing: str = "next-tick",
+    settlements_from_feed_db: bool = False,
 ) -> dict[str, Any]:
     settled_fills = estimate_replay_fill_pnls(report.fills, settlement_rows or [])
     kalshi_settled_fills = [fill for fill in settled_fills if fill.get("settlement_source") == "kalshi_api"]
@@ -617,6 +631,7 @@ def _metrics_payload(
     research_metrics = _inventory_research_metrics(strategies or [])
     payload = {
         "feed_db": str(feed_db),
+        "venue": venue,
         "run_dir": str(run_dir),
         "run_id": run_dir.name,
         "strategy": strategy,
@@ -626,6 +641,8 @@ def _metrics_payload(
         "settled_positions": getattr(report, "settled_positions", 0),
         "notional": round(sum(fill.notional for fill in report.fills), 6),
         "max_open_positions": max_open_positions,
+        "fill_timing": fill_timing,
+        "settlements_from_feed_db": settlements_from_feed_db,
         "institutional_metrics": institutional_metrics,
     }
     if research_metrics:
@@ -730,6 +747,7 @@ def _config_text(*, args: argparse.Namespace, feed_db: Path, run_id: str) -> str
         [
             f'feed_db = "{feed_db}"',
             f'strategy = "{args.strategy}"',
+            f'venue = "{args.venue}"',
             f'run_id = "{run_id}"',
             f'from_ts = "{args.from_ts or ""}"',
             f'to_ts = "{args.to_ts or ""}"',
