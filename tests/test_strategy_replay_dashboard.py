@@ -25,6 +25,7 @@ EXPECTED_STRATEGIES = {
     "seed_cheap_accumulate_repair_v1",
     "seed_cheap_accumulate_repair_v2",
     "strategy_probability_mm_v0",
+    "inventory_aware_passive_mm",
 }
 
 

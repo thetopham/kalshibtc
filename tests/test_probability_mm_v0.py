@@ -11,7 +11,9 @@ from kalshibtc.probability.features import build_probability_example, extract_pr
 from kalshibtc.probability.models import (
     BrownianProbabilityModel,
     LogisticProbabilityModel,
+    distance_probability,
     fit_isotonic_calibrator,
+    probability_yes_from_z,
 )
 from kalshibtc.probability.trading import (
     InventoryBalancer,
@@ -113,6 +115,22 @@ def test_brownian_probability_baseline_is_monotonic_around_strike() -> None:
 
     assert below < at < above
     assert at == pytest.approx(0.5)
+
+
+def test_z_probability_maps_to_yes_no_normal_cdf() -> None:
+    assert probability_yes_from_z(0.0) == pytest.approx(0.5)
+    assert probability_yes_from_z(1.0) == pytest.approx(0.841344746, rel=1e-6)
+    assert probability_yes_from_z(-1.0) == pytest.approx(0.158655254, rel=1e-6)
+
+    probability = distance_probability(
+        distance_to_strike=50.0,
+        sigma_per_sqrt_second=10.0,
+        seconds_to_expiry=25.0,
+    )
+
+    assert probability.z_score == pytest.approx(1.0)
+    assert probability.probability_yes == pytest.approx(0.841344746, rel=1e-6)
+    assert probability.probability_no == pytest.approx(0.158655254, rel=1e-6)
 
 
 def test_logistic_and_isotonic_calibration_fit_small_labeled_dataset() -> None:

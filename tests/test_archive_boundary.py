@@ -12,7 +12,7 @@ def test_legacy_15m_package_is_archive_only() -> None:
     assert Path("archive/legacy-15m/src/kalshi_btc_15m_bot/streaming.py").is_file()
 
 
-def test_console_scripts_are_feed_replay_paper_dashboard_and_validation_only() -> None:
+def test_console_scripts_are_feed_replay_paper_dashboard_validation_and_research_only() -> None:
     pyproject = tomllib.loads(Path("pyproject.toml").read_text())
 
     assert pyproject["project"]["scripts"] == {
@@ -21,6 +21,7 @@ def test_console_scripts_are_feed_replay_paper_dashboard_and_validation_only() -
         "kbtc-dashboard": "kalshibtc.dashboard:main",
         "kbtc-probability-dataset": "kalshibtc.probability.dataset_cli:main",
         "kbtc-paper": "kalshibtc.paper_signal_executor:main",
+        "kbtc-research-journal": "kalshibtc.research.journal:main",
         "kbtc-poly-fill-validate": "kalshibtc.polymarket_fill_validation:main",
         "polymarket-btc-15m-recorder": "kalshibtc.polymarket_btc_15m_recorder:main",
     }

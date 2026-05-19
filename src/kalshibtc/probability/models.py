@@ -12,10 +12,68 @@ class BrownianProbabilityModel:
     min_volatility: float = 1e-9
 
     def predict_proba(self, *, distance_to_strike: float, volatility: float, seconds_to_close: float) -> float:
-        vol = max(abs(float(volatility)), self.min_volatility)
-        time = max(float(seconds_to_close), 1.0)
-        z = float(distance_to_strike) / (vol * math.sqrt(time))
-        return _normal_cdf(z)
+        return probability_yes_from_distance(
+            distance_to_strike=distance_to_strike,
+            sigma_per_sqrt_second=volatility,
+            seconds_to_expiry=seconds_to_close,
+            min_sigma=self.min_volatility,
+        )
+
+
+@dataclass(frozen=True)
+class DistanceProbability:
+    distance_to_strike: float
+    sigma_per_sqrt_second: float
+    seconds_to_expiry: float
+    z_score: float
+    probability_yes: float
+    probability_no: float
+
+
+def probability_yes_from_z(z_score: float) -> float:
+    """Risk-neutral-ish Brownian baseline P(BTC expiry > strike | z).
+
+    z = (current_price - strike) / (sigma * sqrt(seconds_to_expiry)).
+    Under a driftless normal/Brownian terminal move assumption, YES probability
+    is Phi(z); NO probability is 1 - Phi(z). This is a model input, not a truth
+    claim: calibrate it against settled 15m markets before using it as edge.
+    """
+
+    return _normal_cdf(float(z_score))
+
+
+def probability_yes_from_distance(
+    *,
+    distance_to_strike: float,
+    sigma_per_sqrt_second: float,
+    seconds_to_expiry: float,
+    min_sigma: float = 1e-9,
+) -> float:
+    vol = max(abs(float(sigma_per_sqrt_second)), min_sigma)
+    time = max(float(seconds_to_expiry), 1.0)
+    z = float(distance_to_strike) / (vol * math.sqrt(time))
+    return probability_yes_from_z(z)
+
+
+def distance_probability(
+    *,
+    distance_to_strike: float,
+    sigma_per_sqrt_second: float,
+    seconds_to_expiry: float,
+    min_sigma: float = 1e-9,
+) -> DistanceProbability:
+    vol = max(abs(float(sigma_per_sqrt_second)), min_sigma)
+    time = max(float(seconds_to_expiry), 1.0)
+    z = float(distance_to_strike) / (vol * math.sqrt(time))
+    yes = probability_yes_from_z(z)
+    return DistanceProbability(
+        distance_to_strike=float(distance_to_strike),
+        sigma_per_sqrt_second=vol,
+        seconds_to_expiry=time,
+        z_score=z,
+        probability_yes=yes,
+        probability_no=1.0 - yes,
+    )
 
 
 @dataclass

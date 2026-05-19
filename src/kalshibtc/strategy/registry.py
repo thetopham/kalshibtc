@@ -6,16 +6,29 @@ from typing import Any
 from .breakout_momentum import BreakoutMomentumStrategy
 from .cheap_accumulate_repair_v0 import CheapAccumulateRepairConfig, CheapAccumulateRepairV0Strategy
 from .complement_ladder_v0 import ComplementLadderConfig, ComplementLadderV0Strategy
+from .inventory_aware_passive_mm import (
+    InventoryAwarePassiveMMConfig,
+    InventoryAwarePassiveMMStrategy,
+)
 from .late_window_only import LateWindowOnlyStrategy
 from .mean_reversion_to_strike import MeanReversionToStrikeStrategy
 from .no_trade_baseline import NoTradeBaselineStrategy
-from .seed_cheap_accumulate_repair_v1 import SeedCheapAccumulateRepairConfig, SeedCheapAccumulateRepairV1Strategy
-from .seed_cheap_accumulate_repair_v2 import SeedCheapAccumulateRepairV2Config, SeedCheapAccumulateRepairV2Strategy
+from .seed_cheap_accumulate_repair_v1 import (
+    SeedCheapAccumulateRepairConfig,
+    SeedCheapAccumulateRepairV1Strategy,
+)
+from .seed_cheap_accumulate_repair_v2 import (
+    SeedCheapAccumulateRepairV2Config,
+    SeedCheapAccumulateRepairV2Strategy,
+)
 from .signals import Strategy
 from .simple_directional import SimpleDirectionalStrategy
 from .simple_inventory_mm import SimpleInventoryMMConfig, SimpleInventoryMMStrategy
 from .spread_aware_momentum import SpreadAwareMomentumStrategy
-from .strategy_probability_mm_v0 import StrategyProbabilityMMV0Config, StrategyProbabilityMMV0Strategy
+from .strategy_probability_mm_v0 import (
+    StrategyProbabilityMMV0Config,
+    StrategyProbabilityMMV0Strategy,
+)
 from .volatility_inventory import VolatilityInventoryStrategy
 
 _FACTORIES: dict[str, Callable[[], Strategy]] = {
@@ -32,6 +45,7 @@ _FACTORIES: dict[str, Callable[[], Strategy]] = {
     "no_trade_baseline": NoTradeBaselineStrategy,
     "volatility_inventory": VolatilityInventoryStrategy,
     "strategy_probability_mm_v0": StrategyProbabilityMMV0Strategy,
+    "inventory_aware_passive_mm": InventoryAwarePassiveMMStrategy,
 }
 
 
@@ -58,6 +72,8 @@ def create_strategy(name: str, params: Mapping[str, Any] | None = None) -> Strat
         return SeedCheapAccumulateRepairV2Strategy(SeedCheapAccumulateRepairV2Config(**params))
     if name == "strategy_probability_mm_v0" and params:
         return StrategyProbabilityMMV0Strategy(StrategyProbabilityMMV0Config(**params))
+    if name == "inventory_aware_passive_mm" and params:
+        return InventoryAwarePassiveMMStrategy(InventoryAwarePassiveMMConfig(**params))
     if params:
         raise ValueError(f"strategy {name} does not accept CLI params")
     return factory()

@@ -61,6 +61,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Replay fill timing. next-tick executes allowed signals on the following snapshot to avoid same-tick hindsight.",
     )
     parser.add_argument("--json", action="store_true", help="Print JSON summary.")
+    parser.add_argument(
+        "--update-research-journal",
+        action="store_true",
+        help="After writing this run, regenerate Git-friendly research/run_index.csv and reports/latest.md.",
+    )
+    parser.add_argument("--research-dir", default="research", help="Research journal output directory. Default: research")
     parser.add_argument("--overwrite", action="store_true", help="Allow replacing an existing run directory.")
     args = parser.parse_args(argv)
 
@@ -121,6 +127,11 @@ def main(argv: list[str] | None = None) -> int:
         capital_state=capital_state,
     )
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    if args.update_research_journal:
+        from ..research.journal import build_research_journal
+
+        build_research_journal(runs_dir=runs_dir, out_dir=Path(args.research_dir))
 
     if args.json:
         print(json.dumps(metrics, sort_keys=True))
