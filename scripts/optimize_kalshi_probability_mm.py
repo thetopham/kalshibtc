@@ -10,6 +10,7 @@ thin/no-trade candidates and high-leakage pair artifacts; report test once.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import itertools
 import json
@@ -62,6 +63,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runs-dir", type=Path, default=RUNS_DIR)
     parser.add_argument("--max-candidates", type=int, default=80)
     parser.add_argument("--top-validation", type=int, default=8)
+    parser.add_argument("--workers", type=int, default=None, help="Parallel candidate workers. Default reserves --reserve-cpus cores for live 1s feeds and system services.")
+    parser.add_argument("--reserve-cpus", type=int, default=4, help="CPU cores to leave unused by replay workers; protects live datafeed recorders.")
+    parser.add_argument("--child-nice", type=int, default=10, help="Nice value applied to child replay processes on POSIX so datafeeds stay responsive.")
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
@@ -72,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"not enough settled markets for split optimization: {len(markets)}")
     splits = chronological_splits(markets)
     candidates = build_candidates(args.max_candidates)
+    workers = effective_workers(args.workers, reserve_cpus=args.reserve_cpus)
     run_prefix = f"kalshi-prob-mm-opt-{started.strftime('%Y%m%dT%H%M%SZ')}"
     out_stem = args.out or args.runs_dir / "strategy_comparisons" / run_prefix
     out_stem.parent.mkdir(parents=True, exist_ok=True)
@@ -79,31 +84,36 @@ def main(argv: list[str] | None = None) -> int:
     checkpoint_csv_path = out_stem.with_suffix(".checkpoint.csv")
 
     print(
-        f"kalshi probability-mm optimization start markets={len(markets)} candidates={len(candidates)} train={len(splits['train'])} validation={len(splits['validation'])} test={len(splits['test'])}",
+        f"kalshi probability-mm optimization start markets={len(markets)} candidates={len(candidates)} train={len(splits['train'])} validation={len(splits['validation'])} test={len(splits['test'])} workers={workers} reserve_cpus={args.reserve_cpus} child_nice={args.child_nice}",
         flush=True,
     )
     train_rows = []
     validation_rows = []
     test_rows = []
 
-    for idx, params in enumerate(candidates, start=1):
-        label = param_label(params)
-        train = run_replay(args, run_prefix, idx, "train", splits["train"], params)
-        train_rows.append(train)
-        print(
-            f"candidate {idx}/{len(candidates)} train pnl={train.get('realized_pnl')} score={train.get('selection_score')} gate={train.get('passes_training_gate')}",
-            flush=True,
-        )
-        if not passes_training_gate(train):
-            validation_rows.append({**stub_row(params, label), "split": "validation", "skipped_reason": "failed_training_gate"})
-        else:
-            validation = run_replay(args, run_prefix, idx, "validation", splits["validation"], params)
+    candidate_jobs = list(enumerate(candidates, start=1))
+    completed = 0
+    if workers <= 1:
+        for idx, params in candidate_jobs:
+            train, validation = run_candidate(args, run_prefix, idx, splits, params)
+            train_rows.append(train)
             validation_rows.append(validation)
-        write_checkpoint(checkpoint_path, checkpoint_csv_path, started, args, run_prefix, markets, splits, candidates, train_rows, validation_rows, test_rows, status=f"candidate_{idx}_complete")
-        if idx % 10 == 0 or idx == len(candidates):
-            best = max([r for r in validation_rows if not r.get("error") and not r.get("skipped_reason")], key=lambda r: r.get("selection_score", -10**9), default=None)
-            best_txt = "none" if best is None else f"{best['selection_score']:.2f} {best['realized_pnl']:.2f} {best['param_label']}"
-            print(f"progress {idx}/{len(candidates)} best_validation={best_txt}", flush=True)
+            completed += 1
+            print_candidate_progress(completed, len(candidates), train, validation)
+            write_checkpoint(checkpoint_path, checkpoint_csv_path, started, args, run_prefix, markets, splits, candidates, train_rows, validation_rows, test_rows, status=f"candidate_{idx}_complete")
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_idx = {executor.submit(run_candidate, args, run_prefix, idx, splits, params): idx for idx, params in candidate_jobs}
+            for future in concurrent.futures.as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                train, validation = future.result()
+                train_rows.append(train)
+                validation_rows.append(validation)
+                completed += 1
+                print_candidate_progress(completed, len(candidates), train, validation)
+                write_checkpoint(checkpoint_path, checkpoint_csv_path, started, args, run_prefix, markets, splits, candidates, train_rows, validation_rows, test_rows, status=f"candidate_{idx}_complete")
+    train_rows.sort(key=lambda r: r.get("run_id", ""))
+    validation_rows.sort(key=lambda r: r.get("run_id", ""))
 
     finalists = sorted(
         [r for r in validation_rows if not r.get("error") and not r.get("skipped_reason") and passes_validation_gate(r)],
@@ -130,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
         "market_count": len(markets),
         "splits": {name: split_info(ms) for name, ms in splits.items()},
         "candidate_count": len(candidates),
+        "worker_controls": {"workers": workers, "reserve_cpus": args.reserve_cpus, "cpu_count": os.cpu_count(), "child_nice": args.child_nice},
         "metrics_to_optimize": metrics_manifest(),
         "selection_rule": "Pick by validation selection_score after training/validation gates; evaluate selected finalists on test once.",
         "top_validation": sorted([r for r in validation_rows if not r.get("error") and not r.get("skipped_reason")], key=lambda r: r.get("selection_score", -10**9), reverse=True)[:20],
@@ -217,6 +228,43 @@ def build_candidates(max_candidates: int) -> list[dict[str, Any]]:
     return unique
 
 
+def effective_workers(requested: int | None, *, reserve_cpus: int) -> int:
+    cpu_count = os.cpu_count() or 1
+    if requested is not None:
+        return max(1, min(int(requested), cpu_count))
+    return max(1, cpu_count - max(0, reserve_cpus))
+
+
+def child_preexec(nice_value: int):
+    if os.name != "posix" or nice_value <= 0:
+        return None
+
+    def _preexec() -> None:
+        try:
+            os.nice(nice_value)
+        except OSError:
+            pass
+
+    return _preexec
+
+
+def run_candidate(args: argparse.Namespace, run_prefix: str, idx: int, splits: dict[str, list[dict[str, str]]], params: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    label = param_label(params)
+    train = run_replay(args, run_prefix, idx, "train", splits["train"], params)
+    if not passes_training_gate(train):
+        validation = {**stub_row(params, label), "split": "validation", "skipped_reason": "failed_training_gate"}
+    else:
+        validation = run_replay(args, run_prefix, idx, "validation", splits["validation"], params)
+    return train, validation
+
+
+def print_candidate_progress(done: int, total: int, train: dict[str, Any], validation: dict[str, Any]) -> None:
+    print(
+        f"candidate {done}/{total} run={train.get('run_id')} train_pnl={train.get('realized_pnl')} train_score={train.get('selection_score')} validation_pnl={validation.get('realized_pnl')} validation_score={validation.get('selection_score')} gate={train.get('passes_training_gate')}",
+        flush=True,
+    )
+
+
 def run_replay(args: argparse.Namespace, run_prefix: str, idx: int, split: str, markets: list[dict[str, str]], params: dict[str, Any]) -> dict[str, Any]:
     from_ts = markets[0]["first_ts"]
     to_ts = markets[-1]["last_ts"]
@@ -259,7 +307,7 @@ def run_replay(args: argparse.Namespace, run_prefix: str, idx: int, split: str, 
     ]
     for key, value in params.items():
         cmd += ["--strategy-param", f"{key}={value}"]
-    proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, timeout=900)
+    proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, timeout=900, preexec_fn=child_preexec(args.child_nice))
     label = param_label(params)
     run_dir = args.runs_dir / STRATEGY / run_id
     base = {
@@ -409,6 +457,7 @@ def write_checkpoint(
         "market_count": len(markets),
         "splits": {name: split_info(ms) for name, ms in splits.items()},
         "candidate_count": len(candidates),
+        "worker_controls": {"workers": effective_workers(args.workers, reserve_cpus=args.reserve_cpus), "reserve_cpus": args.reserve_cpus, "cpu_count": os.cpu_count(), "child_nice": args.child_nice},
         "completed_train": len(train_rows),
         "completed_validation": len(validation_rows),
         "completed_test": len(test_rows),
@@ -445,6 +494,7 @@ def write_md(path: Path, artifact: dict[str, Any]) -> None:
         f"Created: {artifact['created_at']}",
         f"Safety boundary: {artifact['safety_boundary']}",
         f"Markets: {artifact['market_count']} official-settled Kalshi markets",
+        f"Workers: {artifact['worker_controls']['workers']} (reserve_cpus={artifact['worker_controls']['reserve_cpus']}, cpu_count={artifact['worker_controls']['cpu_count']}, child_nice={artifact['worker_controls']['child_nice']})",
         "",
         "## Splits",
     ]

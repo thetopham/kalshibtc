@@ -9,9 +9,11 @@ not replayed on Kalshi.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import json
 import math
+import os
 import sqlite3
 import subprocess
 import sys
@@ -48,6 +50,9 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Optional smoke/screening cap per venue. Uses earliest rows in the selected window.",
     )
+    parser.add_argument("--workers", type=int, default=None, help="Parallel replay workers. Default reserves --reserve-cpus cores for live 1s feeds and system services.")
+    parser.add_argument("--reserve-cpus", type=int, default=4, help="CPU cores to leave unused by replay workers; protects live datafeed recorders.")
+    parser.add_argument("--child-nice", type=int, default=10, help="Nice value applied to child replay processes on POSIX so datafeeds stay responsive.")
     parser.add_argument(
         "--strategy",
         action="append",
@@ -81,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
     selected_venues = tuple(args.venue or VENUES)
     selected_strategies = tuple(args.strategy or strategy_names())
     feeds = {"kalshi": args.kalshi_feed_db, "polymarket": args.polymarket_feed_db}
+    workers = effective_workers(args.workers, reserve_cpus=args.reserve_cpus)
 
     venue_windows = {
         venue: selected_window(feeds[venue], from_ts=args.from_ts, to_ts=args.to_ts, row_limit=args.row_limit)
@@ -100,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
 
+    jobs: list[dict[str, Any]] = []
     for venue in selected_venues:
         feed_db = feeds[venue]
         window = venue_windows[venue]
@@ -115,15 +122,29 @@ def main(argv: list[str] | None = None) -> int:
                     }
                 )
                 continue
-            done += 1
             run_id = f"{run_prefix}-{venue}-{strategy}"
-            row = run_one(args, venue=venue, strategy=strategy, feed_db=feed_db, run_id=run_id, window=window)
-            results.append(row)
-            print(
-                f"progress {done}/{total} venue={venue} strategy={strategy} pnl={row.get('realized_pnl')} fills={row.get('fills')} error={row.get('error')}",
-                flush=True,
-            )
+            jobs.append({"venue": venue, "strategy": strategy, "feed_db": feed_db, "run_id": run_id, "window": window})
 
+    print(
+        f"parallel replay workers={workers} reserve_cpus={args.reserve_cpus} child_nice={args.child_nice}",
+        flush=True,
+    )
+    if workers <= 1:
+        for job in jobs:
+            row = run_one(args, **job)
+            results.append(row)
+            done += 1
+            print_progress(done, total, row)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_job = {executor.submit(run_one, args, **job): job for job in jobs}
+            for future in concurrent.futures.as_completed(future_to_job):
+                row = future.result()
+                results.append(row)
+                done += 1
+                print_progress(done, total, row)
+
+    results.sort(key=lambda r: (r.get("venue", ""), r.get("strategy", "")))
     finished = datetime.now(tz=UTC)
     valid = [r for r in results if not r.get("error")]
     for row in valid:
@@ -145,6 +166,7 @@ def main(argv: list[str] | None = None) -> int:
         "scope": "Read-only replay of every strategy split by venue and strategy; venue-ineligible strategies are skipped.",
         "safety_boundary": "replay/backtest only; no order submission",
         "run_prefix": run_prefix,
+        "worker_controls": {"workers": workers, "reserve_cpus": args.reserve_cpus, "cpu_count": os.cpu_count(), "child_nice": args.child_nice},
         "feeds": {venue: str(feeds[venue]) for venue in selected_venues},
         "window_request": {"from": args.from_ts, "to": args.to_ts, "row_limit": args.row_limit},
         "venue_windows": venue_windows,
@@ -196,6 +218,33 @@ def main(argv: list[str] | None = None) -> int:
     }
     print(json.dumps(payload, sort_keys=True) if args.json else payload)
     return 0 if not artifact["error_count"] else 1
+
+
+def effective_workers(requested: int | None, *, reserve_cpus: int) -> int:
+    cpu_count = os.cpu_count() or 1
+    if requested is not None:
+        return max(1, min(int(requested), cpu_count))
+    return max(1, cpu_count - max(0, reserve_cpus))
+
+
+def child_preexec(nice_value: int):
+    if os.name != "posix" or nice_value <= 0:
+        return None
+
+    def _preexec() -> None:
+        try:
+            os.nice(nice_value)
+        except OSError:
+            pass
+
+    return _preexec
+
+
+def print_progress(done: int, total: int, row: dict[str, Any]) -> None:
+    print(
+        f"progress {done}/{total} venue={row.get('venue')} strategy={row.get('strategy')} pnl={row.get('realized_pnl')} fills={row.get('fills')} error={row.get('error')}",
+        flush=True,
+    )
 
 
 def run_one(
@@ -263,7 +312,7 @@ def run_one(
         cmd += ["--to", str(window["to"])]
     if venue == "polymarket" and strategy != "hedge_volatility_v0":
         cmd.append("--settlements-from-feed-db")
-    proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, timeout=900)
+    proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, timeout=900, preexec_fn=child_preexec(args.child_nice))
     run_dir = (args.runs_dir / "replay" / strategy / run_id) if strategy == "hedge_volatility_v0" else (args.runs_dir / strategy / run_id)
     base = {
         "venue": venue,
@@ -372,6 +421,7 @@ def write_md(path: Path, artifact: dict[str, Any]) -> None:
         f"Created: {artifact['created_at']}",
         f"Safety boundary: {artifact['safety_boundary']}",
         f"Scope: {artifact['scope']}",
+        f"Workers: {artifact['worker_controls']['workers']} (reserve_cpus={artifact['worker_controls']['reserve_cpus']}, cpu_count={artifact['worker_controls']['cpu_count']}, child_nice={artifact['worker_controls']['child_nice']})",
         f"Eligible runs: {artifact['eligible_run_count']}; valid: {artifact['valid_run_count']}; errors: {artifact['error_count']}; skipped venue-ineligible: {artifact['skipped_count']}",
         "",
         "## Venue windows",
