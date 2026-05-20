@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import shutil
 import sqlite3
 import subprocess
 from collections import Counter, defaultdict
+from urllib.parse import unquote
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,6 +28,7 @@ from .runtime_paths import (
     resolve_runs_dir,
     resolve_snapshot_db,
 )
+from .strategy.dynamic_complement_hedge import DynamicHedgeConfig, replay_feed_db
 from .strategy.simple_directional import SimpleDirectionalStrategy
 
 BOUNDARY_TEXT = "Read-only dashboard. No live orders. Active system is 1s recorder + 1s paper executor."
@@ -68,6 +71,10 @@ def collect_stream_dashboard_data(*, snapshot_db: str | Path | None = None, hist
     latest = _stream_latest_from_row(rows[-1]) if rows else None
     title = POLYMARKET_STREAM_TITLE if rows and row_get(rows[-1], "market_slug") else STREAM_TITLE
     boundary = POLYMARKET_BOUNDARY_TEXT if title == POLYMARKET_STREAM_TITLE else BOUNDARY_TEXT
+    history = [_history_point(row) for row in rows]
+    complement = _complement_spread_payload(history)
+    complement_by_contract = _complement_by_contract_payload(snapshot_path)
+    temporal_basis_compression = _temporal_basis_compression_payload(snapshot_path)
     return {
         "title": title,
         "mode": "paper/research/read-only",
@@ -77,8 +84,11 @@ def collect_stream_dashboard_data(*, snapshot_db: str | Path | None = None, hist
         "stream": {
             "freshness": _freshness(latest["ts"] if latest else None),
             "latest": latest,
-            "history": [_history_point(row) for row in rows],
+            "history": history,
             "history_limit": history_limit,
+            "complement_spread": complement,
+            "complement_by_contract": complement_by_contract,
+            "temporal_basis_compression": temporal_basis_compression,
         },
     }
 
@@ -131,6 +141,18 @@ def collect_strategy_run_detail_data(*, runs_dir: str | Path | None = None, stra
         "config_text": (run_dir / "config.toml").read_text(encoding="utf-8"),
         "signals": _read_result_rows(run_dir / "results.sqlite3", "replay_signals", limit=200),
         "fills": _read_result_rows(run_dir / "results.sqlite3", "replay_fills", limit=200),
+        "pair_positions": _read_result_rows(run_dir / "results.sqlite3", "pair_positions", limit=200),
+        "hedge_events": _read_result_rows(run_dir / "results.sqlite3", "hedge_events", limit=200),
+        "missed_hedge_opportunities": _read_result_rows(run_dir / "results.sqlite3", "missed_hedge_opportunities", limit=200),
+        "rejected_seed_attempts": _read_result_rows(run_dir / "results.sqlite3", "rejected_seed_attempts", limit=200),
+        "inventory_vol_positions": _read_result_rows(run_dir / "results.sqlite3", "inventory_vol_positions", limit=200),
+        "inventory_vol_events": _read_result_rows(run_dir / "results.sqlite3", "inventory_vol_events", limit=500),
+        "inventory_vol_research_metrics": _read_result_rows(run_dir / "results.sqlite3", "inventory_vol_research_metrics", limit=200),
+        "inventory_vol_regime_positions": _read_result_rows(run_dir / "results.sqlite3", "inventory_vol_regime_positions", limit=200),
+        "inventory_vol_regime_events": _read_result_rows(run_dir / "results.sqlite3", "inventory_vol_regime_events", limit=500),
+        "inventory_vol_regime_research_metrics": _read_result_rows(run_dir / "results.sqlite3", "inventory_vol_regime_research_metrics", limit=200),
+        "volatility_hedge_positions": _read_result_rows(run_dir / "results.sqlite3", "volatility_hedge_positions", limit=200),
+        "volatility_hedge_events": _read_result_rows(run_dir / "results.sqlite3", "volatility_hedge_events", limit=120),
     }
 
 
@@ -139,6 +161,9 @@ def render_strategy_runs_dashboard_html(data: Mapping[str, Any]) -> str:
         "<tr>"
         f"<td>{_h(run.get('strategy'))}</td><td><a href=\"{_h(run.get('href'))}\">{_h(run.get('run_id'))}</a></td>"
         f"<td>{_fmt(run.get('snapshots'))}</td><td>{_fmt(run.get('signals'))}</td><td>{_fmt(run.get('fills'))}</td><td>{_fmt(run.get('notional'))}</td>"
+        f"<td>{_pct(run.get('win_rate'))}</td><td>{_money(run.get('ev_per_trade'))}</td><td>{_money(run.get('max_drawdown'))}</td>"
+        f"<td>{_fmt(run.get('sharpe'))}</td><td>{_fmt(run.get('profit_factor'))}</td><td>{_h(run.get('settlement_source'))}</td>"
+        f"<td>{_manage_run_cell(run)}</td>"
         "</tr>"
         for run in data.get("runs", [])
     )
@@ -147,9 +172,13 @@ def render_strategy_runs_dashboard_html(data: Mapping[str, Any]) -> str:
         f"<tr><td>{_h(row.get('strategy'))}</td><td>{_h(row.get('run_id'))}</td><td>{_h(row.get('reason'))}</td></tr>"
         for row in ignored
     )
+    rejected_seed_rows = "".join(
+        f"<tr><td>{_h(row.get('ts'))}</td><td>{_h(row.get('market_ticker'))}</td><td>{_h(row.get('side'))}</td><td>{_fmt(row.get('ask_price'))}</td><td>{_h(row.get('reason'))}</td></tr>"
+        for row in data.get("rejected_seed_attempts", [])
+    )
     body = f"""
     <p class="boundary">{_h(data.get('boundary'))}</p>
-    <section><h2>Strategy comparison</h2><table id="strategy-runs-table"><thead><tr><th>strategy</th><th>run</th><th>snapshots</th><th>signals</th><th>fills</th><th>notional</th></tr></thead><tbody>{rows}</tbody></table></section>
+    <section><h2>Strategy comparison</h2><table id="strategy-runs-table"><thead><tr><th>strategy</th><th>run</th><th>snapshots</th><th>signals</th><th>fills</th><th>notional</th><th>win rate</th><th>EV/trade</th><th>max drawdown</th><th>Sharpe</th><th>profit factor</th><th>settlement</th><th>manage</th></tr></thead><tbody>{rows}</tbody></table></section>
     <section><h2>Run artifacts</h2><table><tbody>{_kv('runs dir', data.get('runs_dir_path'))}{_kv('API', data.get('api_path'))}{_kv('scan cap', f"{data.get('max_total_runs')} total / {data.get('max_runs_per_strategy')} per strategy")}</tbody></table></section>
     <section><h2>Ignored/incomplete runs</h2><table><tbody>{ignored_rows}</tbody></table></section>
     """
@@ -162,6 +191,13 @@ def render_strategy_runs_dashboard_html(data: Mapping[str, Any]) -> str:
     )
 
 
+def _manage_run_cell(run: Mapping[str, Any]) -> str:
+    if str(run.get("run_id") or "") == "live" or str(run.get("mode") or "") == "live_paper":
+        return '<span class="muted">live slot</span>'
+    href = run.get("delete_href") or run.get("api_href")
+    return f'<button type="button" data-method="DELETE" data-url="{_h(href)}" onclick="confirmDeleteRun(this)">Delete</button>'
+
+
 def render_strategy_run_detail_html(data: Mapping[str, Any]) -> str:
     run = data.get("run") if isinstance(data.get("run"), Mapping) else {}
     signal_rows = "".join(
@@ -172,13 +208,68 @@ def render_strategy_run_detail_html(data: Mapping[str, Any]) -> str:
         f"<tr><td>{_h(row.get('ts'))}</td><td>{_h(row.get('side'))}</td><td>{_fmt(row.get('entry_price'))}</td><td>{_fmt(row.get('contracts'))}</td><td>{_fmt(row.get('notional'))}</td></tr>"
         for row in data.get("fills", [])
     )
+    pair_rows = "".join(
+        "<tr>"
+        f"<td>{_h(row.get('market_ticker'))}</td><td>{_fmt(row.get('held_above_qty'))}</td><td>{_fmt(row.get('held_above_avg'))}</td>"
+        f"<td>{_fmt(row.get('held_below_qty'))}</td><td>{_fmt(row.get('held_below_avg'))}</td><td>{_fmt(row.get('pair_cost'))}</td>"
+        f"<td>{_fmt(row.get('locked_profit'))}</td><td>{_fmt(row.get('unpaired_directional_exposure'))}</td>"
+        f"<td>{_fmt(row.get('time_to_expiry'))}</td><td>{_fmt(row.get('distance_from_strike'))}</td>"
+        "</tr>"
+        for row in data.get("pair_positions", [])
+    )
+    rejected_seed_rows = "".join(
+        f"<tr><td>{_h(row.get('ts'))}</td><td>{_h(row.get('market_ticker'))}</td><td>{_h(row.get('side'))}</td><td>{_fmt(row.get('ask_price'))}</td><td>{_h(row.get('reason'))}</td></tr>"
+        for row in data.get("rejected_seed_attempts", [])
+    )
+    inventory_rows = "".join(
+        "<tr>"
+        f"<td>{_h(row.get('market_ticker'))}</td><td>{_fmt(row.get('held_above_qty'))}</td><td>{_fmt(row.get('held_above_avg'))}</td>"
+        f"<td>{_fmt(row.get('held_below_qty'))}</td><td>{_fmt(row.get('held_below_avg'))}</td><td>{_fmt(row.get('blended_basis'))}</td>"
+        f"<td>{_fmt(row.get('inventory_imbalance_ratio'))}</td><td>{_fmt(row.get('mark_to_market_equity'))}</td><td>{_fmt(row.get('realized_pnl'))}</td><td>{_fmt(row.get('unrealized_pnl'))}</td><td>{_fmt(row.get('max_drawdown'))}</td>"
+        "</tr>"
+        for row in [*data.get("inventory_vol_positions", []), *data.get("inventory_vol_regime_positions", [])]
+    )
+    inventory_event_rows = "".join(
+        f"<tr><td>{_h(row.get('ts'))}</td><td>{_h(row.get('event_type'))}</td><td>{_h(row.get('side'))}</td><td>{_fmt(row.get('price'))}</td><td>{_fmt(row.get('quantity'))}</td><td>{_h(row.get('reason'))}</td></tr>"
+        for row in [*data.get("inventory_vol_events", []), *data.get("inventory_vol_regime_events", [])][:200]
+    )
+    inventory_research_rows = "".join(
+        f"<tr><td>{_h(row.get('metric_name'))}</td><td><pre>{_h(row.get('metric_json'))}</pre></td></tr>"
+        for row in [*data.get("inventory_vol_research_metrics", []), *data.get("inventory_vol_regime_research_metrics", [])]
+    )
+    volatility_hedge_rows = "".join(
+        "<tr>"
+        f"<td>{_h(row.get('market_ticker'))}</td><td>{_fmt(row.get('up_qty'))}</td><td>{_fmt(row.get('up_avg_entry'))}</td>"
+        f"<td>{_fmt(row.get('down_qty'))}</td><td>{_fmt(row.get('down_avg_entry'))}</td><td>{_fmt(row.get('paired_qty'))}</td>"
+        f"<td>{_fmt(row.get('paired_cost'))}</td><td>{_fmt(row.get('edge'))}</td><td>{_fmt(row.get('locked_edge_dollars'))}</td>"
+        f"<td>{_fmt(row.get('imbalance_ratio'))}</td>"
+        "</tr>"
+        for row in data.get("volatility_hedge_positions", [])
+    )
+    volatility_hedge_event_rows = "".join(
+        f"<tr><td>{_h(row.get('ts'))}</td><td>{_h(row.get('event_type'))}</td><td>{_h(row.get('side'))}</td><td>{_fmt(row.get('price'))}</td><td>{_fmt(row.get('qty'))}</td><td>{_fmt(row.get('projected_paired_cost'))}</td><td>{_fmt(row.get('current_paired_cost'))}</td><td>{_fmt(row.get('slope'))}</td><td>{_fmt(row.get('atr'))}</td><td>{_fmt(row.get('distance_from_strike'))}</td><td>{_h(row.get('reason'))}</td></tr>"
+        for row in data.get("volatility_hedge_events", [])[:200]
+    )
     body = f"""
     <p class="boundary">{_h(data.get('boundary'))}</p>
     <section><h2>Strategy run drilldown</h2><table><tbody>
-      {_kv('strategy', run.get('strategy'))}{_kv('run id', run.get('run_id'))}{_kv('snapshots', run.get('snapshots'))}{_kv('signals', run.get('signals'))}{_kv('fills', run.get('fills'))}{_kv('notional', run.get('notional'))}{_kv('results DB', run.get('results_db'))}
+      {_kv('strategy', run.get('strategy'))}{_kv('run id', run.get('run_id'))}{_kv('snapshots', run.get('snapshots'))}{_kv('signals', run.get('signals'))}{_kv('fills', run.get('fills'))}{_kv('notional', run.get('notional'))}{_kv('win rate', _pct(run.get('win_rate')))}{_kv('EV/trade', _money(run.get('ev_per_trade')))}{_kv('max drawdown', _money(run.get('max_drawdown')))}{_kv('Sharpe', run.get('sharpe'))}{_kv('profit factor', run.get('profit_factor'))}{_kv('settlement source', run.get('settlement_source'))}{_kv('results DB', run.get('results_db'))}
     </tbody></table></section>
     <section><h2>Signals</h2><table id="strategy-signals-table"><thead><tr><th>ts</th><th>side</th><th>confidence</th><th>allowed</th><th>reason</th></tr></thead><tbody>{signal_rows}</tbody></table></section>
     <section><h2>Fills</h2><table id="strategy-fills-table"><thead><tr><th>ts</th><th>side</th><th>entry</th><th>contracts</th><th>notional</th></tr></thead><tbody>{fill_rows}</tbody></table></section>
+    <section><h2>Pair positions</h2><table id="pair-positions-table"><thead><tr><th>market</th><th>held above qty</th><th>held above avg</th><th>held below qty</th><th>held below avg</th><th>pair cost</th><th>locked profit</th><th>unpaired directional exposure</th><th>time to expiry</th><th>distance from strike</th></tr></thead><tbody>{pair_rows}</tbody></table></section>
+    <section><h2>Volatility regime state</h2><p class="muted">inventory_vol_regime opens a 3:2 trend/countertrend starter, then adds to either side only when volatility creates better combined-basis inventory opportunities. Paper/read-only; no order submission.</p></section>
+    <section><h2>Inventory imbalance heatmap</h2><h3>Inventory imbalance gauge</h3><table id="inventory-imbalance-gauge"><thead><tr><th>market</th><th>above qty</th><th>above avg</th><th>below qty</th><th>below avg</th><th>blended basis</th><th>imbalance ratio</th><th>MTM equity</th><th>realized PnL</th><th>unrealized PnL</th><th>largest drawdown</th></tr></thead><tbody>{inventory_rows}</tbody></table></section>
+    <section><h2>Blended basis over time</h2><p class="muted">Stored in each inventory row equity_curve_json for read-only charting.</p></section>
+    <section><h2>Mark-to-market equity curve</h2><p class="muted">Paper-only mark-to-market from bid-side inventory marks; no order submission.</p></section>
+    <section><h2>Add/reduction event timeline</h2><table id="inventory-event-timeline"><thead><tr><th>ts</th><th>type</th><th>side</th><th>price</th><th>qty</th><th>reason</th></tr></thead><tbody>{inventory_event_rows}</tbody></table></section>
+    <section><h2>ATR expansion graph</h2><p class="muted">Stored in inventory research metrics as atr_expansion_graph.</p></section>
+    <section><h2>Distance-from-strike velocity graph</h2><p class="muted">Stored in inventory research metrics as distance_from_strike_velocity_graph.</p></section>
+    <section><h2>Volatility overlay</h2><table id="inventory-research-metrics"><tbody>{inventory_research_rows}</tbody></table></section>
+    <section><h2>Per-side inventory ladder</h2><p class="muted">Above/Below quantities, averages, reductions, exposure over time, and volatility-add events are persisted in inventory_vol_positions/events and inventory_vol_regime_positions/events.</p></section>
+    <section><h2>Rejected seed attempts</h2><table id="rejected-seed-attempts-table"><thead><tr><th>ts</th><th>market</th><th>side</th><th>ask</th><th>reason</th></tr></thead><tbody>{rejected_seed_rows}</tbody></table></section>
+    <section><h2>VolatilityHedgeStrategy paired cost</h2><p class="muted">Paper-only synthetic hedge. Primary metric: UP avg + DOWN avg. Adds are rejected unless projected paired cost improves, ideally below 0.98 after estimated slippage/fees.</p><table id="volatility-hedge-positions-table"><thead><tr><th>market</th><th>UP qty</th><th>UP avg</th><th>DOWN qty</th><th>DOWN avg</th><th>paired qty</th><th>paired cost</th><th>edge</th><th>locked edge $</th><th>imbalance ratio</th></tr></thead><tbody>{volatility_hedge_rows}</tbody></table></section>
+    <section><h2>VolatilityHedgeStrategy decisions</h2><table id="volatility-hedge-events-table"><thead><tr><th>ts</th><th>type</th><th>side</th><th>price</th><th>qty</th><th>projected paired cost</th><th>current paired cost</th><th>slope</th><th>ATR</th><th>distance</th><th>reason</th></tr></thead><tbody>{volatility_hedge_event_rows}</tbody></table></section>
     <section><h2>Config</h2><pre>{_h(data.get('config_text'))}</pre></section>
     """
     return _page(
@@ -234,6 +325,32 @@ def render_stream_dashboard_html(data: Mapping[str, Any]) -> str:
             for point in history[-20:]
         )
         chart_points_json = _h(json.dumps(history[-90:], default=str))
+        complement = stream.get("complement_spread") if isinstance(stream.get("complement_spread"), Mapping) else {}
+        complement_history_json = _h(json.dumps((complement.get("history") or [])[-90:], default=str))
+        complement_latest = complement.get("latest") if isinstance(complement.get("latest"), Mapping) else {}
+        complement_summary = complement.get("summary") if isinstance(complement.get("summary"), Mapping) else {}
+        by_contract = stream.get("complement_by_contract") if isinstance(stream.get("complement_by_contract"), Mapping) else {}
+        temporal = stream.get("temporal_basis_compression") if isinstance(stream.get("temporal_basis_compression"), Mapping) else {}
+        by_contract_rows = "".join(
+            "<tr>"
+            f"<td>{_h(row.get('market_ticker'))}</td><td>{_fmt(row.get('strike'))}</td><td>{_h(row.get('market_close_time'))}</td>"
+            f"<td>{_fmt(row.get('samples'))}</td><td>{_fmt(row.get('max_buy_both_edge'))}</td><td>{_fmt(row.get('max_sell_both_edge'))}</td>"
+            f"<td>{_fmt(row.get('avg_buy_both_edge'))}</td><td>{_fmt(row.get('best_buy_seconds_to_close'))}</td>"
+            f"<td>{_fmt(row.get('buy_gt_1c'))}/{_fmt(row.get('buy_gt_2c'))}/{_fmt(row.get('buy_gt_5c'))}</td>"
+            f"<td>{_fmt(row.get('sell_gt_1c'))}/{_fmt(row.get('sell_gt_2c'))}/{_fmt(row.get('sell_gt_5c'))}</td>"
+            "</tr>"
+            for row in by_contract.get("rows", [])
+        )
+        temporal_rows = "".join(
+            "<tr>"
+            f"<td>{_h(row.get('market_ticker'))}</td><td>{_h(row.get('initial_side'))}</td>"
+            f"<td>{_fmt(row.get('initial_entry_price'))}</td><td>{_fmt(row.get('best_combined_basis_seen'))}</td>"
+            f"<td>{_fmt(row.get('best_locked_edge_seen'))}</td><td>{_fmt(row.get('time_to_expiry_at_best'))}</td>"
+            f"<td>{_fmt(row.get('distance_from_strike_at_best'))}</td><td>{_h(row.get('ts_at_best'))}</td>"
+            "</tr>"
+            for row in temporal.get("rows", [])
+        )
+        temporal_chart_json = _h(json.dumps((temporal.get("rows") or [])[:200], default=str))
         distance = _distance(latest.get('btc_price'), latest.get('strike'))
         decision_class = _decision_class(decision.get('action'))
         body = f"""
@@ -272,6 +389,34 @@ def render_stream_dashboard_html(data: Mapping[str, Any]) -> str:
           <canvas id="price-chart" width="960" height="260" aria-label="BTC price versus strike chart"></canvas>
           <div id="stream-chart">Read-only chart source: /api/stream history</div>
           <table><thead><tr><th>ts</th><th>BTC</th><th>target</th><th>sec close</th></tr></thead><tbody id="graph-points-body">{graph_rows}</tbody></table>
+        </section>
+        <section><h2>YES+NO Complement Spread</h2>
+          <div class="cards">
+            {_card('Buy both cost', _fmt(complement_latest.get('buy_both_cost')), 'YES ask + NO ask')}
+            {_card('Buy both edge', _fmt(complement_latest.get('buy_both_edge')), '1 - cost; positive means buy-both lock')}
+            {_card('Sell both credit', _fmt(complement_latest.get('sell_both_credit')), 'YES bid + NO bid')}
+            {_card('Sell both edge', _fmt(complement_latest.get('sell_both_edge')), 'credit - 1')}
+          </div>
+          <canvas id="complement-spread-chart" width="960" height="220" aria-label="YES plus NO complement spread"></canvas>
+          <table><tbody>
+            {_kv('max buy_both_edge', complement_summary.get('max_buy_both_edge'))}{_kv('max sell_both_edge', complement_summary.get('max_sell_both_edge'))}{_kv('buy edge > 1c / 2c / 5c', f"{complement_summary.get('count_buy_edge_gt_1c')} / {complement_summary.get('count_buy_edge_gt_2c')} / {complement_summary.get('count_buy_edge_gt_5c')}")}{_kv('sell edge > 1c / 2c / 5c', f"{complement_summary.get('count_sell_edge_gt_1c')} / {complement_summary.get('count_sell_edge_gt_2c')} / {complement_summary.get('count_sell_edge_gt_5c')}")}
+          </tbody></table>
+        </section>
+        <script type="application/json" id="complement-spread-data">{complement_history_json}</script>
+        <section><h2>Complement by 15m Contract / Strike</h2>
+          <p class="muted">Full recorded history per market ticker/strike, not just the latest chart window. Positive buy edge means YES ask + NO ask &lt; 1. Positive sell edge means YES bid + NO bid &gt; 1.</p>
+          <table id="complement-by-contract-table"><thead><tr><th>market</th><th>strike</th><th>close</th><th>samples</th><th>max buy edge</th><th>max sell edge</th><th>avg buy edge</th><th>best buy sec close</th><th>buy &gt;1c/2c/5c</th><th>sell &gt;1c/2c/5c</th></tr></thead><tbody>{by_contract_rows}</tbody></table>
+          <table><tbody>{_kv('contracts scanned', by_contract.get('contracts'))}{_kv('source rows', by_contract.get('source_rows'))}</tbody></table>
+        </section>
+        <section><h2>Temporal Basis Compression</h2>
+          <p class="muted">Scan-only geometry: after the first directional entry window, track best future opposite ask. Evaluate combined settlement basis, locked payout, worst-case value, and residual exposure rather than standalone hedge-leg mark-to-market.</p>
+          <canvas id="temporal-compression-chart" width="960" height="220" aria-label="Temporal basis compression by time to expiry"></canvas>
+          <table><tbody>
+            {_kv('markets basis < 0.99 / 0.95 / 0.92 / 0.90 / 0.85', f"{(temporal.get('count_best_combined_basis_lt') or {}).get('0.99')} / {(temporal.get('count_best_combined_basis_lt') or {}).get('0.95')} / {(temporal.get('count_best_combined_basis_lt') or {}).get('0.92')} / {(temporal.get('count_best_combined_basis_lt') or {}).get('0.9')} / {(temporal.get('count_best_combined_basis_lt') or {}).get('0.85')}")}
+            {_kv('best basis min / avg', f"{_fmt(temporal.get('best_basis_min'))} / {_fmt(temporal.get('best_basis_avg'))}")}{_kv('assessment', temporal.get('structural_exploitability_assessment'))}
+          </tbody></table>
+          <table id="temporal-compression-table"><thead><tr><th>market</th><th>initial side</th><th>initial price</th><th>best basis</th><th>temporal edge</th><th>sec close</th><th>distance</th><th>best ts</th></tr></thead><tbody>{temporal_rows}</tbody></table>
+          <script type="application/json" id="temporal-compression-data">{temporal_chart_json}</script>
         </section>
         <section><h2>Raw payload</h2><button type="button" onclick="copyApiJson('/api/stream')">Copy API JSON</button><pre id="raw-payload">{_h(json.dumps(_safe_raw_payload(latest.get('raw_payload')), indent=2, sort_keys=True))}</pre></section>
         <script type="application/json" id="stream-history-data">{chart_points_json}</script>
@@ -321,6 +466,10 @@ def render_status_dashboard_html(data: Mapping[str, Any]) -> str:
         f"<tr><td>{_h(row.get('blocker'))}</td><td>{row.get('count')}</td></tr>" for row in data.get("top_blockers", [])
     )
     equity_json = _h(json.dumps(perf.get('equity_curve', []), default=str))
+    rejected_seed_rows = "".join(
+        f"<tr><td>{_h(row.get('ts'))}</td><td>{_h(row.get('market_ticker'))}</td><td>{_h(row.get('side'))}</td><td>{_fmt(row.get('ask_price'))}</td><td>{_h(row.get('reason'))}</td></tr>"
+        for row in data.get("rejected_seed_attempts", [])
+    )
     body = f"""
     <p class="boundary">{_h(data.get('boundary'))}</p>
     <section id="status-summary" class="cards status-summary">
@@ -356,6 +505,29 @@ def render_status_dashboard_html(data: Mapping[str, Any]) -> str:
     )
 
 
+def delete_strategy_run(*, runs_dir: str | Path | None = None, strategy: str, run_id: str) -> JsonDict:
+    runs_path = resolve_runs_dir(runs_dir)
+    if run_id == "live" or strategy == "live":
+        raise ValueError("live strategy slots cannot be deleted from the replay dashboard")
+    run_dir = _safe_run_dir(runs_path=runs_path, strategy=strategy, run_id=run_id)
+    if not run_dir.exists():
+        raise FileNotFoundError(f"strategy run not found: {strategy}/{run_id}")
+    if not run_dir.is_dir():
+        raise ValueError("strategy run path is not a directory")
+    shutil.rmtree(run_dir)
+    return {"deleted": True, "strategy": strategy, "run_id": run_id, "run_dir": str(run_dir)}
+
+
+def _safe_run_dir(*, runs_path: Path, strategy: str, run_id: str) -> Path:
+    if any(part in {"", ".", ".."} or "/" in part or "\\" in part for part in (strategy, run_id)):
+        raise ValueError("unsafe strategy/run path")
+    root = runs_path.resolve()
+    candidate = (runs_path / strategy / run_id).resolve()
+    if root != candidate and root not in candidate.parents:
+        raise ValueError("unsafe strategy/run path")
+    return candidate
+
+
 def _run_dir_for_route(*, runs_path: Path, strategy: str, run_id: str) -> Path:
     normal = runs_path / strategy / run_id
     if normal.exists():
@@ -377,9 +549,12 @@ def _run_summary_from_dir(run_dir: Path) -> JsonDict:
     metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
     if not isinstance(metrics, Mapping):
         raise ValueError("metrics.json must contain an object")
+    institutional = metrics.get("institutional_metrics")
+    if not isinstance(institutional, Mapping):
+        institutional = {}
     strategy = str(metrics.get("strategy") or run_dir.parent.name)
     run_id = str(metrics.get("run_id") or run_dir.name)
-    return {
+    summary = {
         "strategy": strategy,
         "run_id": run_id,
         "created_at": metrics.get("created_at") or run_id,
@@ -389,12 +564,29 @@ def _run_summary_from_dir(run_dir: Path) -> JsonDict:
         "notional": metrics.get("notional", 0.0),
         "settled_positions": metrics.get("settled_positions", 0),
         "max_open_positions": metrics.get("max_open_positions"),
+        "mode": metrics.get("mode"),
         "blockers": _result_blockers(results_path),
         "run_dir": str(run_dir),
         "results_db": str(results_path),
         "href": f"/strategy/{_url_component(strategy)}/{_url_component(run_id)}",
         "api_href": f"/api/strategies/{_url_component(strategy)}/{_url_component(run_id)}",
+        "delete_href": f"/api/strategies/{_url_component(strategy)}/{_url_component(run_id)}",
     }
+    summary["institutional_metrics"] = dict(institutional)
+    for key in (
+        "win_rate",
+        "ev_per_trade",
+        "max_drawdown",
+        "max_drawdown_pct",
+        "sharpe",
+        "sortino",
+        "calmar",
+        "profit_factor",
+        "total_pnl",
+        "settlement_source",
+    ):
+        summary[key] = institutional.get(key, metrics.get(key))
+    return summary
 
 
 def _result_blockers(path: Path) -> dict[str, int]:
@@ -431,7 +623,7 @@ def _result_blockers(path: Path) -> dict[str, int]:
 
 
 def _read_result_rows(path: Path, table: str, *, limit: int) -> list[JsonDict]:
-    if table not in {"replay_signals", "replay_fills"}:
+    if table not in {"replay_signals", "replay_fills", "pair_positions", "hedge_events", "missed_hedge_opportunities", "rejected_seed_attempts", "inventory_vol_positions", "inventory_vol_events", "inventory_vol_research_metrics", "inventory_vol_regime_positions", "inventory_vol_regime_events", "inventory_vol_regime_research_metrics", "volatility_hedge_positions", "volatility_hedge_events"}:
         raise ValueError(f"unsupported results table: {table}")
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
     try:
@@ -440,10 +632,32 @@ def _read_result_rows(path: Path, table: str, *, limit: int) -> list[JsonDict]:
         conn.execute("PRAGMA busy_timeout=2000")
         if not _table_exists(conn, table):
             return []
-        rows = conn.execute(f"SELECT * FROM {table} ORDER BY id DESC LIMIT ?", (max(1, limit),)).fetchall()
-        return [dict(row) for row in rows]
+        order_column = "id" if _column_exists(conn, table, "id") else "updated_at" if _column_exists(conn, table, "updated_at") else "rowid"
+        columns = _safe_result_columns(conn, table)
+        selected_columns = ", ".join(columns) if columns else "*"
+        rows = conn.execute(f"SELECT {selected_columns} FROM {table} ORDER BY {order_column} DESC LIMIT ?", (max(1, limit),)).fetchall()
+        return [_normalize_result_row(dict(row)) for row in rows]
     finally:
         conn.close()
+
+
+def _safe_result_columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    columns = [str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")]
+    if table == "volatility_hedge_events":
+        return [column for column in columns if column != "raw_json"]
+    return columns
+
+
+def _normalize_result_row(row: JsonDict) -> JsonDict:
+    for key in ("fills_json", "last_features_json", "equity_curve_json", "features_timeline_json"):
+        if key in row:
+            value = _json_loads(row.get(key), default=row.get(key))
+            if isinstance(value, list):
+                row[f"{key}_count"] = len(value)
+                row[key] = json.dumps(value[-10:], sort_keys=True)
+            elif isinstance(value, dict):
+                row[key] = json.dumps(value, sort_keys=True)
+    return row
 
 
 def _url_component(value: Any) -> str:
@@ -719,7 +933,197 @@ def _history_point(row: sqlite3.Row) -> JsonDict:
         "seconds_to_close": _float(row_get(row, "seconds_to_close")),
         "yes_ask": _float(row_get(row, "yes_ask")),
         "no_ask": _float(row_get(row, "no_ask")),
+        **_complement_metrics_from_prices(
+            _float(row_get(row, "yes_bid")),
+            _float(row_get(row, "yes_ask")),
+            _float(row_get(row, "no_bid")),
+            _float(row_get(row, "no_ask")),
+        ),
     }
+
+
+def _complement_metrics_from_prices(
+    yes_bid: float | None,
+    yes_ask: float | None,
+    no_bid: float | None,
+    no_ask: float | None,
+) -> JsonDict:
+    if yes_bid is None or yes_ask is None or no_bid is None or no_ask is None:
+        return {
+            "buy_both_cost": None,
+            "buy_both_edge": None,
+            "sell_both_credit": None,
+            "sell_both_edge": None,
+        }
+    buy_both_cost = yes_ask + no_ask
+    sell_both_credit = yes_bid + no_bid
+    return {
+        "buy_both_cost": buy_both_cost,
+        "buy_both_edge": 1.0 - buy_both_cost,
+        "sell_both_credit": sell_both_credit,
+        "sell_both_edge": sell_both_credit - 1.0,
+    }
+
+
+def _complement_spread_payload(history: list[JsonDict]) -> JsonDict:
+    rows = [row for row in history if row.get("buy_both_edge") is not None and row.get("sell_both_edge") is not None]
+    latest = rows[-1] if rows else None
+    buy_edges = [_float(row.get("buy_both_edge")) for row in rows]
+    sell_edges = [_float(row.get("sell_both_edge")) for row in rows]
+    buy_edges = [edge for edge in buy_edges if edge is not None]
+    sell_edges = [edge for edge in sell_edges if edge is not None]
+    return {
+        "latest": latest,
+        "history": rows,
+        "summary": {
+            "samples": len(rows),
+            "max_buy_both_edge": max(buy_edges) if buy_edges else None,
+            "max_sell_both_edge": max(sell_edges) if sell_edges else None,
+            "count_buy_edge_gt_1c": sum(edge > 0.01 for edge in buy_edges),
+            "count_buy_edge_gt_2c": sum(edge > 0.02 for edge in buy_edges),
+            "count_buy_edge_gt_5c": sum(edge > 0.05 for edge in buy_edges),
+            "count_sell_edge_gt_1c": sum(edge > 0.01 for edge in sell_edges),
+            "count_sell_edge_gt_2c": sum(edge > 0.02 for edge in sell_edges),
+            "count_sell_edge_gt_5c": sum(edge > 0.05 for edge in sell_edges),
+        },
+    }
+
+
+def _complement_by_contract_payload(path: Path, *, limit: int = 200) -> JsonDict:
+    empty: JsonDict = {"contracts": 0, "source_rows": 0, "rows": []}
+    if not path.exists():
+        return empty
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA busy_timeout=2000")
+        if not _table_exists(conn, STREAM_TABLE):
+            return empty
+        source_rows = conn.execute(f"SELECT COUNT(*) FROM {STREAM_TABLE}").fetchone()[0]
+        rows = conn.execute(
+            f"""
+            WITH priced AS (
+                SELECT
+                    market_ticker,
+                    strike,
+                    market_open_time,
+                    market_close_time,
+                    ts,
+                    seconds_to_close,
+                    1.0 - (yes_ask + no_ask) AS buy_both_edge,
+                    (yes_bid + no_bid) - 1.0 AS sell_both_edge
+                FROM {STREAM_TABLE}
+                WHERE yes_bid IS NOT NULL
+                  AND yes_ask IS NOT NULL
+                  AND no_bid IS NOT NULL
+                  AND no_ask IS NOT NULL
+                  AND market_ticker IS NOT NULL
+            ), grouped AS (
+                SELECT
+                    market_ticker,
+                    strike,
+                    market_open_time,
+                    market_close_time,
+                    MIN(ts) AS first_ts,
+                    MAX(ts) AS last_ts,
+                    COUNT(*) AS samples,
+                    MIN(seconds_to_close) AS min_seconds_to_close,
+                    MAX(seconds_to_close) AS max_seconds_to_close,
+                    MAX(buy_both_edge) AS max_buy_both_edge,
+                    MAX(sell_both_edge) AS max_sell_both_edge,
+                    AVG(buy_both_edge) AS avg_buy_both_edge,
+                    AVG(sell_both_edge) AS avg_sell_both_edge,
+                    SUM(CASE WHEN buy_both_edge > 0.01 THEN 1 ELSE 0 END) AS buy_gt_1c,
+                    SUM(CASE WHEN buy_both_edge > 0.02 THEN 1 ELSE 0 END) AS buy_gt_2c,
+                    SUM(CASE WHEN buy_both_edge > 0.05 THEN 1 ELSE 0 END) AS buy_gt_5c,
+                    SUM(CASE WHEN sell_both_edge > 0.01 THEN 1 ELSE 0 END) AS sell_gt_1c,
+                    SUM(CASE WHEN sell_both_edge > 0.02 THEN 1 ELSE 0 END) AS sell_gt_2c,
+                    SUM(CASE WHEN sell_both_edge > 0.05 THEN 1 ELSE 0 END) AS sell_gt_5c
+                FROM priced
+                GROUP BY market_ticker, strike, market_open_time, market_close_time
+            )
+            SELECT
+                grouped.*,
+                (
+                    SELECT ts FROM priced p
+                    WHERE p.market_ticker = grouped.market_ticker
+                      AND IFNULL(p.strike, -1) = IFNULL(grouped.strike, -1)
+                      AND IFNULL(p.market_open_time, '') = IFNULL(grouped.market_open_time, '')
+                      AND IFNULL(p.market_close_time, '') = IFNULL(grouped.market_close_time, '')
+                    ORDER BY buy_both_edge DESC, ts DESC LIMIT 1
+                ) AS best_buy_ts,
+                (
+                    SELECT seconds_to_close FROM priced p
+                    WHERE p.market_ticker = grouped.market_ticker
+                      AND IFNULL(p.strike, -1) = IFNULL(grouped.strike, -1)
+                      AND IFNULL(p.market_open_time, '') = IFNULL(grouped.market_open_time, '')
+                      AND IFNULL(p.market_close_time, '') = IFNULL(grouped.market_close_time, '')
+                    ORDER BY buy_both_edge DESC, ts DESC LIMIT 1
+                ) AS best_buy_seconds_to_close,
+                (
+                    SELECT ts FROM priced p
+                    WHERE p.market_ticker = grouped.market_ticker
+                      AND IFNULL(p.strike, -1) = IFNULL(grouped.strike, -1)
+                      AND IFNULL(p.market_open_time, '') = IFNULL(grouped.market_open_time, '')
+                      AND IFNULL(p.market_close_time, '') = IFNULL(grouped.market_close_time, '')
+                    ORDER BY sell_both_edge DESC, ts DESC LIMIT 1
+                ) AS best_sell_ts,
+                (
+                    SELECT seconds_to_close FROM priced p
+                    WHERE p.market_ticker = grouped.market_ticker
+                      AND IFNULL(p.strike, -1) = IFNULL(grouped.strike, -1)
+                      AND IFNULL(p.market_open_time, '') = IFNULL(grouped.market_open_time, '')
+                      AND IFNULL(p.market_close_time, '') = IFNULL(grouped.market_close_time, '')
+                    ORDER BY sell_both_edge DESC, ts DESC LIMIT 1
+                ) AS best_sell_seconds_to_close
+            FROM grouped
+            ORDER BY market_close_time DESC, market_ticker ASC
+            LIMIT ?
+            """,
+            (max(1, limit),),
+        ).fetchall()
+    output_rows = [dict(row) for row in rows]
+    return {"contracts": len(output_rows), "source_rows": int(source_rows or 0), "rows": output_rows}
+
+
+def _temporal_basis_compression_payload(path: Path, *, limit: int = 200) -> JsonDict:
+    empty: JsonDict = {
+        "source_rows": 0,
+        "rows": [],
+        "count_best_combined_basis_lt": {"0.99": 0, "0.95": 0, "0.92": 0, "0.9": 0, "0.85": 0},
+        "best_basis_min": None,
+        "best_basis_avg": None,
+        "structural_exploitability_assessment": "no replay rows available",
+    }
+    if not path.exists():
+        return empty
+    try:
+        summary = replay_feed_db(path, config=DynamicHedgeConfig(slippage=0.0), scan_only=True)
+        rows = _temporal_rows_for_dashboard(path, limit=limit)
+    except (OSError, sqlite3.Error, ValueError):
+        return empty
+    compression = dict(summary.get("temporal_basis_compression") or {})
+    compression["rows"] = rows
+    compression["source_rows"] = int(summary.get("opportunities_recorded") or 0)
+    return {**empty, **compression}
+
+
+def _temporal_rows_for_dashboard(path: Path, *, limit: int) -> list[JsonDict]:
+    from .strategy.dynamic_complement_hedge import DynamicComplementHedgeBot, _snapshot_from_row
+
+    bot = DynamicComplementHedgeBot(DynamicHedgeConfig(slippage=0.0))
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA busy_timeout=2000")
+        if not _table_exists(conn, STREAM_TABLE):
+            return []
+        rows = list(conn.execute(f"SELECT * FROM {STREAM_TABLE} ORDER BY market_ticker ASC, ts ASC"))
+    for row in rows:
+        bot.on_snapshot(_snapshot_from_row(row), scan_only=True)
+    output = [item.summary_dict() for item in bot.temporal.values() if item.initial_entry_price is not None]
+    output.sort(key=lambda row: (row.get("best_combined_basis_seen") is None, row.get("best_combined_basis_seen") or 999.0))
+    return output[: max(1, limit)]
 
 
 def _slopes_for_latest(row: sqlite3.Row) -> JsonDict:
@@ -839,6 +1243,29 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 return
 
+    def do_DELETE(self) -> None:  # noqa: N802
+        try:
+            if self.path.startswith("/api/strategies/"):
+                parts = self.path.removeprefix("/api/strategies/").split("/", 1)
+                if len(parts) != 2 or not parts[0] or not parts[1]:
+                    raise FileNotFoundError("strategy/run path requires strategy and run_id")
+                result = delete_strategy_run(
+                    runs_dir=self.runs_dir,
+                    strategy=unquote(parts[0]),
+                    run_id=unquote(parts[1]),
+                )
+                self._send_json(result)
+            else:
+                self.send_error(404)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except (ValueError, FileNotFoundError, OSError) as exc:
+            try:
+                status = 404 if isinstance(exc, FileNotFoundError) else 400
+                self._send_json({"ok": False, "error": type(exc).__name__, "message": str(exc)}, status=status)
+            except (BrokenPipeError, ConnectionResetError):
+                return
+
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         return
 
@@ -933,7 +1360,16 @@ const refreshMs = Number(document.documentElement.dataset.refreshMs || 1000);
 function copyApiJson(path){{ fetch(path).then(r=>r.text()).then(t=>navigator.clipboard && navigator.clipboard.writeText(t)); }}
 function drawLineChart(canvasId, dataId, xKey, yKeys){{ const c=document.getElementById(canvasId), d=document.getElementById(dataId); if(!c||!d) return; let rows=[]; try{{rows=JSON.parse(d.textContent)}}catch(e){{return}}; if(!rows.length) return; const ctx=c.getContext('2d'), w=c.width, h=c.height, pad=28; ctx.clearRect(0,0,w,h); const vals=[]; rows.forEach(r=>yKeys.forEach(k=>{{const v=Number(r[k]); if(Number.isFinite(v)) vals.push(v)}})); if(!vals.length) return; const min=Math.min(...vals), max=Math.max(...vals), span=(max-min)||1; const x=i=>pad+(w-pad*2)*(i/Math.max(1,rows.length-1)); const y=v=>h-pad-(h-pad*2)*((v-min)/span); ctx.strokeStyle='#334155'; ctx.beginPath(); ctx.moveTo(pad,pad); ctx.lineTo(pad,h-pad); ctx.lineTo(w-pad,h-pad); ctx.stroke(); yKeys.forEach((k,idx)=>{{ctx.strokeStyle=idx?'#fbbf24':'#38bdf8'; ctx.lineWidth=2; ctx.beginPath(); rows.forEach((r,i)=>{{const v=Number(r[k]); if(!Number.isFinite(v)) return; const xx=x(i), yy=y(v); if(i===0) ctx.moveTo(xx,yy); else ctx.lineTo(xx,yy);}}); ctx.stroke(); }}); }}
 drawLineChart('price-chart','stream-history-data','ts',['btc_price','target_price']);
+drawLineChart('complement-spread-chart','complement-spread-data','ts',['buy_both_edge','sell_both_edge']);
 drawLineChart('equity-chart','equity-data','ts',['equity']);
+function confirmDeleteRun(button){{
+  const url = button && button.dataset ? button.dataset.url : '';
+  if (!url || !confirm('Delete this replay run from disk? This cannot be undone.')) return;
+  fetch(url, {{method:'DELETE', cache:'no-store'}}).then(r => {{
+    if (!r.ok) return r.text().then(t => {{ throw new Error(t || ('HTTP ' + r.status)); }});
+    const row = button.closest('tr'); if (row) row.remove();
+  }}).catch(err => alert('Delete failed: ' + (err.message || String(err))));
+}}
 {refresh_js}
 </script></body></html>"""
 
@@ -1134,8 +1570,12 @@ def _table_columns(conn: sqlite3.Connection, name: str) -> set[str]:
     return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({name})")}
 
 
-def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
-    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    return bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone())
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(str(row[1]) == column for row in conn.execute(f"PRAGMA table_info({table})"))
 
 
 def _action_for_signal(side: str) -> str:

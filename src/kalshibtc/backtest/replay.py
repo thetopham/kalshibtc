@@ -147,7 +147,7 @@ class ReplayEngine:
                     callback(state, fill)
             if fill is not None:
                 open_positions += 1
-            results.append(PipelineResult(signal=signal, risk=risk, fill=fill))
+            results.append(PipelineResult(signal=signal, risk=risk, fill=fill, state=state))
         pipeline.open_positions = open_positions
         return results
 
@@ -174,7 +174,7 @@ class ReplayEngine:
                         callback(state, fill)
                         break
                 open_positions += 1
-            results.append(PipelineResult(signal=decision.signal, risk=repriced_decision, fill=fill))
+            results.append(PipelineResult(signal=decision.signal, risk=repriced_decision, fill=fill, state=state))
         pipeline.open_positions = open_positions
 
         next_pending = []
@@ -185,7 +185,7 @@ class ReplayEngine:
                 risk = self.capital_state.adjusted_decision(state, risk)
             if risk.allowed:
                 next_pending.append(risk)
-            results.append(PipelineResult(signal=signal, risk=risk, fill=None))
+            results.append(PipelineResult(signal=signal, risk=risk, fill=None, state=state))
         setattr(pipeline, "_replay_pending_decisions", next_pending)
         return results
 

@@ -7,14 +7,20 @@ from typing import Any
 from .breakout_momentum import BreakoutMomentumStrategy
 from .cheap_accumulate_repair_v0 import CheapAccumulateRepairConfig, CheapAccumulateRepairV0Strategy
 from .complement_ladder_v0 import ComplementLadderConfig, ComplementLadderV0Strategy
+from .contrarian_spread_reversion import ContrarianSpreadReversionStrategy
 from .hedge_volatility_v0 import HedgeVolatilityV0
 from .inventory_aware_passive_mm import (
     InventoryAwarePassiveMMConfig,
     InventoryAwarePassiveMMStrategy,
 )
+from .inventory_vol_rebalance import InventoryVolRebalanceStrategy
+from .inventory_vol_regime import InventoryVolRegimeStrategy
 from .late_window_only import LateWindowOnlyStrategy
 from .mean_reversion_to_strike import MeanReversionToStrikeStrategy
 from .no_trade_baseline import NoTradeBaselineStrategy
+from .pair_arb import PairArbStrategy
+from .pair_arb_grid import PairArbGridStrategy
+from .pair_arb_passive import PairArbPassiveStrategy
 from .seed_cheap_accumulate_repair_v1 import (
     SeedCheapAccumulateRepairConfig,
     SeedCheapAccumulateRepairV1Strategy,
@@ -30,6 +36,7 @@ from .strategy_probability_mm_v0 import (
     StrategyProbabilityMMV0Config,
     StrategyProbabilityMMV0Strategy,
 )
+from .volatility_hedge import VolatilityHedgeStrategy
 from .volatility_inventory import VolatilityInventoryStrategy
 
 
@@ -66,6 +73,13 @@ _FACTORIES: dict[str, Callable[[], Any]] = {
     "breakout_momentum": BreakoutMomentumStrategy,
     "late_window_only": LateWindowOnlyStrategy,
     "spread_aware_momentum": SpreadAwareMomentumStrategy,
+    "contrarian_spread_reversion": ContrarianSpreadReversionStrategy,
+    "pair_arb": PairArbStrategy,
+    "pair_arb_grid": PairArbGridStrategy,
+    "pair_arb_passive": PairArbPassiveStrategy,
+    "inventory_vol_rebalance": InventoryVolRebalanceStrategy,
+    "inventory_vol_regime": InventoryVolRegimeStrategy,
+    "volatility_hedge": VolatilityHedgeStrategy,
     "no_trade_baseline": NoTradeBaselineStrategy,
     "volatility_inventory": VolatilityInventoryStrategy,
     "strategy_probability_mm_v0": StrategyProbabilityMMV0Strategy,

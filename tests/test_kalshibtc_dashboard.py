@@ -341,3 +341,67 @@ def test_active_kalshibtc_source_does_not_import_legacy_package() -> None:
                     offenders.append(f"{path.relative_to(package_root)} imports {module}")
 
     assert offenders == []
+
+
+def test_stream_dashboard_exposes_yes_no_complement_spread(tmp_path: Path) -> None:
+    snapshot_db = tmp_path / "realtime-snapshots-1s.sqlite3"
+    _make_snapshot_db(snapshot_db)
+
+    data = dashboard.collect_stream_dashboard_data(snapshot_db=snapshot_db, history_limit=20)
+
+    complement = data["stream"]["complement_spread"]
+    assert complement["latest"]["buy_both_cost"] == pytest.approx(1.01)
+    assert complement["latest"]["buy_both_edge"] == pytest.approx(-0.01)
+    assert complement["latest"]["sell_both_credit"] == pytest.approx(0.97)
+    assert complement["latest"]["sell_both_edge"] == pytest.approx(-0.03)
+    assert complement["summary"]["max_buy_both_edge"] == pytest.approx(-0.01)
+    assert complement["summary"]["count_buy_edge_gt_1c"] == 0
+    assert len(complement["history"]) == 4
+    assert "buy_both_edge" in data["stream"]["history"][-1]
+
+    html = dashboard.render_stream_dashboard_html(data)
+
+    assert "YES+NO Complement Spread" in html
+    assert "id=\"complement-spread-chart\"" in html
+    assert "id=\"complement-spread-data\"" in html
+    assert "buy_both_edge" in html
+
+def test_stream_dashboard_groups_complement_edges_by_full_contract(tmp_path: Path) -> None:
+    snapshot_db = tmp_path / "realtime-snapshots-1s.sqlite3"
+    _make_snapshot_db(snapshot_db)
+    recorder = RealtimeSnapshotRecorder(snapshot_db)
+    base = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
+    recorder.record_snapshot(
+        {
+            "ts": base + timedelta(seconds=1),
+            "market_ticker": "KXBTC15M-SECOND",
+            "market_open_time": base,
+            "market_close_time": base + timedelta(minutes=15),
+            "btc_price": 100_100.0,
+            "strike": 100_050.0,
+            "target_price": 100_050.0,
+            "btc_velocity_30s": 0.0,
+            "yes_bid": 0.50,
+            "yes_ask": 0.51,
+            "no_bid": 0.50,
+            "no_ask": 0.46,
+            "orderbook_sequence": 456,
+            "execution_blocked_by": [],
+        }
+    )
+
+    data = dashboard.collect_stream_dashboard_data(snapshot_db=snapshot_db, history_limit=20)
+
+    by_contract = data["stream"]["complement_by_contract"]
+    assert by_contract["contracts"] == 2
+    rows = {row["market_ticker"]: row for row in by_contract["rows"]}
+    assert rows["KXBTC15M-DASHBOARD"]["samples"] == 4
+    assert rows["KXBTC15M-DASHBOARD"]["max_buy_both_edge"] == pytest.approx(-0.01)
+    assert rows["KXBTC15M-SECOND"]["samples"] == 1
+    assert rows["KXBTC15M-SECOND"]["max_buy_both_edge"] == pytest.approx(0.03)
+    assert rows["KXBTC15M-SECOND"]["buy_gt_2c"] == 1
+    assert rows["KXBTC15M-SECOND"]["best_buy_seconds_to_close"] == pytest.approx(899.0)
+
+    html = dashboard.render_stream_dashboard_html(data)
+    assert "Complement by 15m Contract / Strike" in html
+    assert "KXBTC15M-SECOND" in html

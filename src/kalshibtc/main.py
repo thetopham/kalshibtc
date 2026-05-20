@@ -37,6 +37,7 @@ class PipelineResult:
     signal: Signal
     risk: RiskDecision
     fill: PaperFill | None
+    state: MarketState | None = None
 
 
 class BotPipeline:
@@ -71,6 +72,6 @@ class BotPipeline:
                 strategy.on_fill(state, fill)
             if fill is not None:
                 open_positions += 1
-            results.append(PipelineResult(signal=signal, risk=risk, fill=fill))
+            results.append(PipelineResult(signal=signal, risk=risk, fill=fill, state=state))
         self.open_positions = open_positions
         return results

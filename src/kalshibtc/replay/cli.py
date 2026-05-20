@@ -11,6 +11,7 @@ from typing import Any
 
 from ..backtest.metrics import compute_metrics
 from ..config import BotConfig, RiskLimits
+from ..datafeed.composite_reference import VenueObservation, compute_composite_reference
 from ..datafeed.models import OrderBookSnapshot, Tick
 from ..execution.paper import PaperFill
 from ..execution.risk import CapitalConstraints, CapitalState, RiskDecision, RiskManager
@@ -34,6 +35,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-id", default=None, help="Run directory name. Defaults to current UTC timestamp.")
     parser.add_argument("--from", dest="from_ts", default=None, help="Inclusive ISO timestamp lower bound.")
     parser.add_argument("--to", dest="to_ts", default=None, help="Inclusive ISO timestamp upper bound.")
+    parser.add_argument(
+        "--reference-price-source",
+        choices=("single_venue", "composite_60s_reference"),
+        default="single_venue",
+        help="BTC reference price source for replay ticks. composite_60s_reference uses raw venue observations when available.",
+    )
     parser.add_argument("--base-size-dollars", type=float, default=25.0)
     parser.add_argument("--max-position-dollars", type=float, default=25.0)
     parser.add_argument("--max-open-positions", type=int, default=1)
@@ -83,7 +90,10 @@ def main(argv: list[str] | None = None) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     rows = _load_snapshot_rows(feed_db, from_ts=args.from_ts, to_ts=args.to_ts)
-    ticks, books, contract = _rows_to_replay_inputs(rows)
+    ticks, books, contract, reference_provenance = _rows_to_replay_inputs(
+        rows,
+        reference_price_source=args.reference_price_source,
+    )
     strategy_params = _parse_strategy_params(args.strategy_param)
     try:
         strategy = create_strategy(args.strategy, params=strategy_params, venue=args.venue)
@@ -136,6 +146,8 @@ def main(argv: list[str] | None = None) -> int:
         venue=args.venue,
         fill_timing=args.fill_timing,
         settlements_from_feed_db=args.settlements_from_feed_db,
+        reference_price_source=args.reference_price_source,
+        reference_provenance=reference_provenance,
     )
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -198,7 +210,11 @@ def _load_official_settlement_rows(feed_db: Path) -> list[sqlite3.Row]:
         )
 
 
-def _rows_to_replay_inputs(rows: list[sqlite3.Row]) -> tuple[list[Tick], list[OrderBookSnapshot], ContractWindow]:
+def _rows_to_replay_inputs(
+    rows: list[sqlite3.Row],
+    *,
+    reference_price_source: str = "single_venue",
+) -> tuple[list[Tick], list[OrderBookSnapshot], ContractWindow, dict[str, Any]]:
     if not rows:
         raise ValueError("feed DB query returned no snapshots")
     first = rows[0]
@@ -210,15 +226,41 @@ def _rows_to_replay_inputs(rows: list[sqlite3.Row]) -> tuple[list[Tick], list[Or
     )
     ticks: list[Tick] = []
     books: list[OrderBookSnapshot] = []
+    provenance: dict[str, Any] = {
+        "requested_source": reference_price_source,
+        "single_venue_ticks": 0,
+        "composite_60s_reference_ticks": 0,
+        "warnings": [],
+    }
     for row in rows:
         ts = _parse_dt(row["ts"])
+        raw = _row_market_metadata(row, base_raw=_json_or_empty(row["raw_json"] if _has_column(row, "raw_json") else None))
+        raw_price = float(row["btc_price"])
+        reference_price = raw_price
+        source = "feed_replay"
+        reference = None
+        if reference_price_source == "composite_60s_reference":
+            reference = compute_composite_reference(_venue_observations_from_raw(raw), as_of=ts)
+            if reference is not None:
+                reference_price = reference.price
+                source = reference.source
+                provenance[f"{reference.source}_ticks"] = int(provenance.get(f"{reference.source}_ticks", 0)) + 1
+                provenance["warnings"].extend(reference.provenance.get("warnings", []))
+        if reference is None:
+            provenance["single_venue_ticks"] = int(provenance.get("single_venue_ticks", 0)) + 1
+        tick_raw = dict(raw)
+        tick_raw["reference_price_source"] = source
+        tick_raw["reference_price"] = reference_price
+        tick_raw["raw_btc_price"] = raw_price
+        if reference is not None:
+            tick_raw["reference_price_provenance"] = reference.provenance
         ticks.append(
             Tick(
                 ts=ts,
-                price=float(row["btc_price"]),
-                source="feed_replay",
+                price=reference_price,
+                source=source,
                 symbol="BTC-USD",
-                raw=_row_market_metadata(row, base_raw=_json_or_empty(row["raw_json"] if _has_column(row, "raw_json") else None)),
+                raw=tick_raw,
             )
         )
         books.append(
@@ -233,7 +275,26 @@ def _rows_to_replay_inputs(rows: list[sqlite3.Row]) -> tuple[list[Tick], list[Or
                 raw=_row_market_metadata(row, base_raw=_json_or_empty(row["raw_json"] if _has_column(row, "raw_json") else None)),
             )
         )
-    return ticks, books, contract
+    provenance["warnings"] = sorted({str(warning) for warning in provenance.get("warnings", [])})
+    return ticks, books, contract, provenance
+
+
+def _venue_observations_from_raw(raw: Mapping[str, Any]) -> list[VenueObservation]:
+    observations: list[VenueObservation] = []
+    for item in raw.get("btc_venue_observations") or []:
+        if not isinstance(item, Mapping):
+            continue
+        try:
+            observations.append(
+                VenueObservation(
+                    venue=str(item.get("venue") or "unknown"),
+                    ts=_parse_dt(item.get("ts")),
+                    price=float(item.get("price")),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    return observations
 
 
 def _write_results(path: Path, results: list[Any], *, strategies: Sequence[Any] | None = None) -> None:
@@ -338,8 +399,15 @@ def _write_results(path: Path, results: list[Any], *, strategies: Sequence[Any] 
             risk: RiskDecision = result.risk
             fill: PaperFill | None = result.fill
             ts = fill.ts.isoformat() if fill is not None else ""
+            state = getattr(result, "state", None)
             raw = {
                 "signal": signal.__dict__,
+                "state": {
+                    "reference_price": getattr(getattr(state, "tick", None), "price", None),
+                    "reference_price_source": getattr(getattr(state, "tick", None), "source", None),
+                    "raw_btc_price": (getattr(getattr(state, "tick", None), "raw", {}) or {}).get("raw_btc_price") if state is not None else None,
+                    "tick_raw": getattr(getattr(state, "tick", None), "raw", None),
+                },
                 "risk": {
                     "allowed": risk.allowed,
                     "size_dollars": risk.size_dollars,
@@ -606,6 +674,8 @@ def _metrics_payload(
     venue: str = "kalshi",
     fill_timing: str = "next-tick",
     settlements_from_feed_db: bool = False,
+    reference_price_source: str = "single_venue",
+    reference_provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     settled_fills = estimate_replay_fill_pnls(report.fills, settlement_rows or [])
     kalshi_settled_fills = [fill for fill in settled_fills if fill.get("settlement_source") == "kalshi_api"]
@@ -643,6 +713,8 @@ def _metrics_payload(
         "max_open_positions": max_open_positions,
         "fill_timing": fill_timing,
         "settlements_from_feed_db": settlements_from_feed_db,
+        "reference_price_source": reference_price_source,
+        "reference_price_provenance": dict(reference_provenance or {}),
         "institutional_metrics": institutional_metrics,
     }
     if research_metrics:
@@ -748,6 +820,7 @@ def _config_text(*, args: argparse.Namespace, feed_db: Path, run_id: str) -> str
             f'feed_db = "{feed_db}"',
             f'strategy = "{args.strategy}"',
             f'venue = "{args.venue}"',
+            f'reference_price_source = "{args.reference_price_source}"',
             f'run_id = "{run_id}"',
             f'from_ts = "{args.from_ts or ""}"',
             f'to_ts = "{args.to_ts or ""}"',

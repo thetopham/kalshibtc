@@ -152,7 +152,8 @@ class RiskManager:
             blocked_by.append("confidence_below_min")
         if not book_is_valid(state.orderbook):
             blocked_by.append("invalid_orderbook")
-        if not signal.allow_price_strike_mismatch:
+        allow_mismatch = signal.allow_price_strike_mismatch or "contrarian" in signal.strategy
+        if not allow_mismatch:
             if signal.side == "long_above" and state.price <= state.strike:
                 blocked_by.append("price_not_above_strike")
             if signal.side == "long_below" and state.price >= state.strike:

@@ -88,6 +88,8 @@ def test_live_multi_strategy_paper_writes_one_results_db_per_strategy(tmp_path: 
     assert simple_metrics["strategy"] == "simple_directional"
     assert simple_metrics["snapshots_processed"] == 2
     assert simple_metrics["signals_recorded"] == 2
+    assert simple_metrics["snapshots"] == 2
+    assert simple_metrics["signals"] == 2
     assert simple_metrics["trades_opened"] >= 1
     assert control_metrics["strategy"] == "no_trade_baseline"
     assert control_metrics["trades_opened"] == 0
@@ -125,3 +127,33 @@ def test_paper_executor_cli_accepts_all_strategies_and_live_multi_strategy_mode(
     assert exit_code == 0
     assert (runs_dir / "live" / "simple_directional" / "results.sqlite3").is_file()
     assert (runs_dir / "live" / "no_trade_baseline" / "results.sqlite3").is_file()
+
+
+def test_live_strategy_metrics_are_cumulative_across_loop_passes(tmp_path: Path) -> None:
+    snapshot_db = tmp_path / "feed" / "kalshi-btc-1s.sqlite3"
+    snapshot_db.parent.mkdir()
+    runs_dir = tmp_path / "runs"
+    _write_live_snapshot_db(snapshot_db)
+
+    first = run_live_strategy_paper_once(
+        snapshot_db=snapshot_db,
+        runs_dir=runs_dir,
+        strategies=["simple_directional"],
+        limit=1,
+        no_official_settlement=True,
+    )
+    second = run_live_strategy_paper_once(
+        snapshot_db=snapshot_db,
+        runs_dir=runs_dir,
+        strategies=["simple_directional"],
+        limit=1,
+        no_official_settlement=True,
+    )
+
+    assert first.strategies[0]["snapshots_processed"] == 1
+    assert second.strategies[0]["snapshots_processed"] == 2
+    metrics = json.loads((runs_dir / "live" / "simple_directional" / "metrics.json").read_text())
+    assert metrics["snapshots_processed"] == 2
+    assert metrics["signals_recorded"] == 2
+    assert metrics["snapshots"] == 2
+    assert metrics["signals"] == 2
