@@ -4,6 +4,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from .bayesian_markov_directional import (
+    BayesianMarkovDirectionalConfig,
+    BayesianMarkovDirectionalStrategy,
+)
 from .breakout_momentum import BreakoutMomentumStrategy
 from .cheap_accumulate_repair_v0 import CheapAccumulateRepairConfig, CheapAccumulateRepairV0Strategy
 from .complement_ladder_v0 import ComplementLadderConfig, ComplementLadderV0Strategy
@@ -16,6 +20,7 @@ from .inventory_aware_passive_mm import (
 from .inventory_vol_rebalance import InventoryVolRebalanceStrategy
 from .inventory_vol_regime import InventoryVolRegimeStrategy
 from .late_window_only import LateWindowOnlyStrategy
+from .late_lotto_ticket import LateLottoTicketConfig, LateLottoTicketStrategy
 from .mean_reversion_to_strike import MeanReversionToStrikeStrategy
 from .no_trade_baseline import NoTradeBaselineStrategy
 from .pair_arb import PairArbStrategy
@@ -54,11 +59,21 @@ class StrategyMetadata:
 POLYMARKET_ONLY_HEDGING_STRATEGIES: frozenset[str] = frozenset(
     {
         "hedge_volatility_v0",
+        "volatility_hedge",
+        "contrarian_spread_reversion",
         "complement_ladder_v0",
         "cheap_accumulate_repair_v0",
         "seed_cheap_accumulate_repair_v1",
         "seed_cheap_accumulate_repair_v2",
         "inventory_aware_passive_mm",
+    }
+)
+
+KALSHI_ONLY_DIRECTIONAL_STRATEGIES: frozenset[str] = frozenset(
+    {
+        "strategy_probability_mm_v0",
+        "bayesian_markov_directional",
+        "late_lotto_ticket",
     }
 )
 
@@ -72,6 +87,7 @@ _FACTORIES: dict[str, Callable[[], Any]] = {
     "mean_reversion_to_strike": MeanReversionToStrikeStrategy,
     "breakout_momentum": BreakoutMomentumStrategy,
     "late_window_only": LateWindowOnlyStrategy,
+    "late_lotto_ticket": LateLottoTicketStrategy,
     "spread_aware_momentum": SpreadAwareMomentumStrategy,
     "contrarian_spread_reversion": ContrarianSpreadReversionStrategy,
     "pair_arb": PairArbStrategy,
@@ -83,14 +99,24 @@ _FACTORIES: dict[str, Callable[[], Any]] = {
     "no_trade_baseline": NoTradeBaselineStrategy,
     "volatility_inventory": VolatilityInventoryStrategy,
     "strategy_probability_mm_v0": StrategyProbabilityMMV0Strategy,
+    "bayesian_markov_directional": BayesianMarkovDirectionalStrategy,
     "inventory_aware_passive_mm": InventoryAwarePassiveMMStrategy,
     "hedge_volatility_v0": HedgeVolatilityV0,
 }
 
+
+def _allowed_venues_for_strategy(name: str) -> tuple[str, ...]:
+    if name in POLYMARKET_ONLY_HEDGING_STRATEGIES:
+        return ("polymarket",)
+    if name in KALSHI_ONLY_DIRECTIONAL_STRATEGIES:
+        return ("kalshi",)
+    return ("kalshi", "polymarket")
+
+
 _METADATA: dict[str, StrategyMetadata] = {
     name: StrategyMetadata(
         name=name,
-        allowed_venues=("polymarket",) if name in POLYMARKET_ONLY_HEDGING_STRATEGIES else ("kalshi", "polymarket"),
+        allowed_venues=_allowed_venues_for_strategy(name),
         hedges_inventory=name in POLYMARKET_ONLY_HEDGING_STRATEGIES,
     )
     for name in _FACTORIES
@@ -139,8 +165,16 @@ def create_strategy(name: str, params: Mapping[str, Any] | None = None, *, venue
         return SeedCheapAccumulateRepairV1Strategy(SeedCheapAccumulateRepairConfig(**params))
     if name == "seed_cheap_accumulate_repair_v2" and params:
         return SeedCheapAccumulateRepairV2Strategy(SeedCheapAccumulateRepairV2Config(**params))
-    if name == "strategy_probability_mm_v0" and params:
-        return StrategyProbabilityMMV0Strategy(StrategyProbabilityMMV0Config(**params))
+    if name == "strategy_probability_mm_v0":
+        if venue is not None:
+            params.setdefault("venue", venue.lower())
+        if params:
+            return StrategyProbabilityMMV0Strategy(StrategyProbabilityMMV0Config(**params))
+        return StrategyProbabilityMMV0Strategy(StrategyProbabilityMMV0Config(venue=venue.lower() if venue is not None else "kalshi"))
+    if name == "bayesian_markov_directional":
+        return BayesianMarkovDirectionalStrategy(BayesianMarkovDirectionalConfig(**params))
+    if name == "late_lotto_ticket":
+        return LateLottoTicketStrategy(LateLottoTicketConfig(**params))
     if name == "inventory_aware_passive_mm" and params:
         return InventoryAwarePassiveMMStrategy(InventoryAwarePassiveMMConfig(**params))
     if params:

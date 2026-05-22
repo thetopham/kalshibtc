@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any
 
 CSV_FIELDS = [
     "strategy",
+    "run_timestamp",
     "run_id",
     "exchange",
     "datafeed",
@@ -35,6 +37,7 @@ CSV_FIELDS = [
 @dataclass(frozen=True)
 class RunSummary:
     strategy: str
+    run_timestamp: str
     run_id: str
     run_dir: str
     feed_db: str
@@ -58,6 +61,7 @@ class RunSummary:
     def csv_row(self) -> dict[str, str]:
         return {
             "strategy": self.strategy,
+            "run_timestamp": self.run_timestamp,
             "run_id": self.run_id,
             "exchange": self.exchange,
             "datafeed": self.datafeed,
@@ -101,7 +105,7 @@ def collect_run_summaries(runs_dir: Path | str) -> list[RunSummary]:
         run_dir = metrics_path.parent
         config = _read_config(run_dir / "config.toml")
         summaries.append(_summary_from_metrics(metrics, config=config, run_dir=run_dir))
-    return sorted(summaries, key=lambda row: row.realized_pnl, reverse=True)
+    return sorted(summaries, key=lambda row: (row.run_timestamp, row.run_id), reverse=True)
 
 
 def build_research_journal(*, runs_dir: Path | str, out_dir: Path | str, top: int = 25) -> JournalResult:
@@ -170,6 +174,7 @@ def _summary_from_metrics(metrics: dict[str, Any], *, config: dict[str, Any], ru
     return RunSummary(
         strategy=str(metrics.get("strategy") or config.get("strategy") or run_dir.parent.name),
         run_id=str(metrics.get("run_id") or config.get("run_id") or run_dir.name),
+        run_timestamp=_extract_run_timestamp(str(metrics.get("run_id") or config.get("run_id") or run_dir.name)),
         run_dir=str(metrics.get("run_dir") or run_dir),
         feed_db=feed_db,
         exchange=exchange,
@@ -194,7 +199,7 @@ def _summary_from_metrics(metrics: dict[str, Any], *, config: dict[str, Any], ru
 def _write_index(path: Path, summaries: list[RunSummary]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
+        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS, lineterminator="\n")
         writer.writeheader()
         for summary in summaries:
             writer.writerow(summary.csv_row())
@@ -216,7 +221,7 @@ def _render_strategy_history(summaries: list[RunSummary], *, top: int) -> str:
 
     for strategy in sorted({summary.strategy for summary in summaries}):
         strategy_rows = [summary for summary in summaries if summary.strategy == strategy]
-        lines += [f"## {strategy}", "", f"Runs scanned: {len(strategy_rows)}", "", "### Best by realized PnL", ""]
+        lines += [f"## {strategy}", "", f"Runs scanned: {len(strategy_rows)}", "", "### Runs by date/newest first", ""]
         for idx, summary in enumerate(strategy_rows[:top], start=1):
             lines += _render_run_bullets(summary, prefix=f"{idx}. ")
         lines.append("")
@@ -238,7 +243,7 @@ def _render_latest_report(summaries: list[RunSummary], *, top: int) -> str:
     if not summaries:
         lines += ["No replay runs found.", ""]
         return "\n".join(lines)
-    lines += ["## Top runs", ""]
+    lines += ["## Latest runs", ""]
     for idx, summary in enumerate(summaries[:top], start=1):
         lines += _render_run_bullets(summary, prefix=f"{idx}. ")
     return "\n".join(lines)
@@ -247,6 +252,7 @@ def _render_latest_report(summaries: list[RunSummary], *, top: int) -> str:
 def _render_run_bullets(summary: RunSummary, *, prefix: str = "- ") -> list[str]:
     lines = [
         f"{prefix}`{summary.run_id}`",
+        f"   - Run timestamp: {summary.run_timestamp or 'unknown'}",
         f"   - Strategy: `{summary.strategy}`",
         f"   - Exchange: {summary.exchange}",
         f"   - Datafeed: {summary.datafeed}",
@@ -265,6 +271,25 @@ def _render_run_bullets(summary: RunSummary, *, prefix: str = "- ") -> list[str]
             lines.append(f"     - {key} = {value}")
     lines.append(f"   - Raw run: `{summary.run_dir}`")
     return lines
+
+
+_RUN_TIMESTAMP_PATTERN = re.compile(r"(20\d{6}T\d{6}Z|20\d{6}T\d{4}Z|20\d{6})")
+
+
+def _extract_run_timestamp(run_id: str) -> str:
+    match = _RUN_TIMESTAMP_PATTERN.search(run_id)
+    if not match:
+        return ""
+    raw = match.group(1)
+    if len(raw) == 8:
+        return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
+    date = f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
+    time = raw[9:-1]
+    if len(time) == 4:
+        time = f"{time[:2]}:{time[2:4]}:00"
+    else:
+        time = f"{time[:2]}:{time[2:4]}:{time[4:6]}"
+    return f"{date}T{time}Z"
 
 
 def _read_config(path: Path) -> dict[str, Any]:

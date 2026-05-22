@@ -7,7 +7,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-
 from test_feed_replay_architecture import _write_feed_db
 
 from kalshibtc.backtest.metrics import compute_metrics
@@ -214,6 +213,31 @@ def test_portfolio_settlement_scores_inventory_by_market_not_fill() -> None:
     assert market["completed_pair_pnl"] == pytest.approx(11.0)
     assert market["unpaired_leftover_pnl"] == pytest.approx(0.0)
     assert settlement["aggregate"]["pnl_split"]["completed_pair_pnl"] == pytest.approx(11.0)
+
+
+def test_kalshi_single_position_settlement_treats_opposing_buy_as_exit_flip() -> None:
+    fills = [
+        _Fill("KXBTC15M-TEST", "long_above", 0.56, 56.0, 100.0, datetime(2026, 5, 15, 12, 1, tzinfo=UTC)),
+        _Fill("KXBTC15M-TEST", "long_below", 0.33, 33.0, 100.0, datetime(2026, 5, 15, 12, 2, tzinfo=UTC)),
+    ]
+    settlements = [
+        {
+            "market_ticker": "KXBTC15M-TEST",
+            "winning_side": "yes",
+            "source": "kalshi_api",
+            "status": "settled_official",
+        }
+    ]
+
+    settlement = compute_portfolio_settlement(fills, settlements, position_mode="kalshi_single_position")
+
+    market = settlement["markets"][0]
+    assert market["yes_contracts"] == 0.0
+    assert market["no_contracts"] == 100.0
+    assert market["total_cost"] == 33.0
+    assert market["gross_payout"] == 0.0
+    assert market["realized_pnl"] == -33.0
+    assert market["completed_pair_contracts"] == 0.0
 
 
 def test_portfolio_settlement_splits_completed_pairs_from_unpaired_leftovers() -> None:

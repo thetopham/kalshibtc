@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from collections import defaultdict, deque
-from datetime import datetime
 import re
+from collections import defaultdict, deque
+from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
 SETTLEMENT_SOURCE_REPLAY_FINAL_SNAPSHOT = "replay_final_snapshot"
@@ -62,9 +62,15 @@ def estimate_replay_fill_pnls(
 def compute_portfolio_settlement(
     fills: Sequence[Mapping[str, Any] | Any],
     settlement_rows: Sequence[Mapping[str, Any] | Any],
+    *,
+    position_mode: str = "portfolio",
 ) -> dict[str, Any]:
-    """Settle replay fills as per-market YES/NO inventory portfolios."""
+    """Settle replay fills as per-market portfolios or Kalshi position flips."""
+    if position_mode not in {"portfolio", "kalshi_single_position"}:
+        raise ValueError("position_mode must be 'portfolio' or 'kalshi_single_position'")
     outcomes = _settlement_outcomes(settlement_rows)
+    if position_mode == "kalshi_single_position":
+        fills = _kalshi_single_position_fills(fills)
     by_market: dict[str, dict[str, Any]] = {}
     for fill in fills:
         market_ticker = str(_field(fill, "market_ticker") or "")
@@ -163,6 +169,37 @@ def compute_portfolio_settlement(
         "pnl_split": _aggregate_pnl_split(metric_markets),
     }
     return {"aggregate": aggregate, "markets": markets, "daily": _daily_portfolio_metrics(markets)}
+
+
+def _kalshi_single_position_fills(fills: Sequence[Mapping[str, Any] | Any]) -> list[dict[str, Any]]:
+    """Normalize fills so each Kalshi market has at most one open side.
+
+    Kalshi BTC up/down exposure is a single position: buying the opposite side
+    exits/flips the current position rather than creating simultaneous YES+NO
+    inventory. For settlement accounting, only the latest open position per
+    market should remain at expiry.
+    """
+    current: dict[str, dict[str, Any]] = {}
+    for fill in fills:
+        market_ticker = str(_field(fill, "market_ticker") or "")
+        if not market_ticker:
+            continue
+        side = _normalized_side(_field(fill, "side"))
+        if side is None:
+            continue
+        row = _fill_to_dict(fill)
+        row["side"] = "long_above" if side == "yes" else "long_below"
+        current[market_ticker] = row
+    return [current[key] for key in sorted(current)]
+
+
+def _normalized_side(side: object) -> str | None:
+    value = str(side or "").lower()
+    if value in {"long_above", "yes", "buy_yes"}:
+        return "yes"
+    if value in {"long_below", "no", "buy_no"}:
+        return "no"
+    return None
 
 
 def _daily_portfolio_metrics(markets: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:

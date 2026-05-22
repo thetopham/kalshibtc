@@ -70,6 +70,7 @@ class InventoryBalancer:
     max_net_ratio: float = 0.25
     force_flatten_seconds: float = 60.0
     min_notional: float = 1.0
+    venue: str = "kalshi"
 
     def size_order(
         self,
@@ -85,6 +86,12 @@ class InventoryBalancer:
         desired_side = desired_side.lower()
         if desired_side not in {"yes", "no"}:
             return InventorySizing(False, "none", 0.0, "invalid side", ["invalid_side"])
+        if self.venue.lower() == "kalshi":
+            notional = float(desired_notional)
+            if notional < self.min_notional:
+                return InventorySizing(False, "none", 0.0, "below min notional", ["below_min_notional"])
+            return InventorySizing(True, desired_side, notional, "kalshi directional probability edge sized", [])
+
         if seconds_to_close <= self.force_flatten_seconds and abs(yes_contracts - no_contracts) > 1e-9:
             side = "no" if yes_contracts > no_contracts else "yes"
             price = no_price if side == "no" else yes_price

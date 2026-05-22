@@ -14,7 +14,6 @@ import concurrent.futures
 import csv
 import itertools
 import json
-import math
 import os
 import sqlite3
 import subprocess
@@ -33,20 +32,25 @@ FEED_DB = ROOT / "feed" / "kalshi-btc-1s.sqlite3"
 RUNS_DIR = ROOT / "runs"
 STRATEGY = "strategy_probability_mm_v0"
 
-# Bounded grid around the only Kalshi default strategy that had positive full-feed PnL.
+# Focused grid around the only prior test-positive Kalshi Bayesian-Markov config.
 GRID: dict[str, list[Any]] = {
-    "edge_threshold": [0.02, 0.03, 0.04, 0.05, 0.08],
-    "base_notional": [5.0, 10.0, 15.0],
-    "max_net_ratio": [0.1, 0.25, 0.5],
-    "force_flatten_seconds": [30.0, 60.0, 120.0],
-    "min_seconds_to_close": [30.0, 60.0, 120.0],
-    "max_wickiness": [0.6, 0.75, 0.9],
-    "max_atr_slope": [0.75, 1.5, 3.0],
-    "min_volatility": [0.5, 1.0, 2.0],
+    "probability_model": ["bayesian_markov"],
+    "edge_threshold": [0.045, 0.05, 0.055, 0.06, 0.07],
+    "base_notional": [5.0, 7.5, 10.0],
+    "max_net_ratio": [0.15, 0.2, 0.25, 0.3],
+    "force_flatten_seconds": [45.0, 60.0, 90.0],
+    "min_seconds_to_close": [30.0, 60.0, 90.0],
+    "max_wickiness": [0.65, 0.75],
+    "max_atr_slope": [1.0, 1.5],
+    "min_volatility": [0.75, 1.0, 1.5],
+    "min_probability_confidence": [0.0, 0.10, 0.20],
+    "min_abs_edge": [0.0, 0.04, 0.06],
+    "max_probability_mid_band": [0.0, 0.05, 0.10],
 }
 
 DEFAULT_PARAMS = {
-    "edge_threshold": 0.03,
+    "probability_model": "bayesian_markov",
+    "edge_threshold": 0.05,
     "base_notional": 10.0,
     "max_net_ratio": 0.25,
     "force_flatten_seconds": 60.0,
@@ -54,6 +58,9 @@ DEFAULT_PARAMS = {
     "max_wickiness": 0.75,
     "max_atr_slope": 1.5,
     "min_volatility": 1.0,
+    "min_probability_confidence": 0.0,
+    "min_abs_edge": 0.0,
+    "max_probability_mid_band": 0.0,
 }
 
 
@@ -124,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
         params = validation["params"]
         test = run_replay(args, run_prefix, rank, "test", splits["test"], params)
         test["validation_selection_score"] = validation["selection_score"]
+        test.update(test_gate(test, validation))
         test_rows.append(test)
         write_checkpoint(checkpoint_path, checkpoint_csv_path, started, args, run_prefix, markets, splits, candidates, train_rows, validation_rows, test_rows, status=f"test_finalist_{rank}_complete")
 
@@ -133,8 +141,8 @@ def main(argv: list[str] | None = None) -> int:
         "started_at": started.isoformat(),
         "finished_at": finished.isoformat(),
         "duration_seconds": (finished - started).total_seconds(),
-        "scope": "Kalshi-only bounded optimization for strategy_probability_mm_v0 using official settled markets; train is a chronological row-strided screening subset, validation/test are contiguous chronological holdouts.",
-        "safety_boundary": "read-only replay/backtest only; no order submission",
+        "scope": "Kalshi-only focused optimization for strategy_probability_mm_v0 using official settled markets; train is a chronological row-strided screening subset, validation/test are contiguous chronological holdouts; candidates focus on bayesian_markov parameters around the prior test-positive region.",
+        "safety_boundary": "read-only replay/backtest only; no order submission; Kalshi probability model is directional-only and tracks one open position per market; an opposing long_above/long_below signal is treated as a position flip/exit, not a simultaneous YES+NO hedge/complement/repair inventory leg",
         "feed_db": str(args.feed_db),
         "strategy": STRATEGY,
         "market_count": len(markets),
@@ -307,6 +315,7 @@ def run_replay(args: argparse.Namespace, run_prefix: str, idx: int, split: str, 
     ]
     for key, value in params.items():
         cmd += ["--strategy-param", f"{key}={value}"]
+    cmd += ["--strategy-param", "venue=kalshi"]
     proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, timeout=900, preexec_fn=child_preexec(args.child_nice))
     label = param_label(params)
     run_dir = args.runs_dir / STRATEGY / run_id
@@ -335,6 +344,7 @@ def run_replay(args: argparse.Namespace, run_prefix: str, idx: int, split: str, 
     fills = int(metrics.get("fills", 0) or 0)
     traded_markets = count_traded_markets(run_dir / "results.sqlite3")
     markets_with_loss, worst_market_pnl = market_loss_stats(run_dir / "results.sqlite3")
+    calibration = probability_calibration_stats(run_dir / "results.sqlite3")
     row = {
         **base,
         "snapshots": int(metrics.get("snapshots", 0) or 0),
@@ -353,6 +363,7 @@ def run_replay(args: argparse.Namespace, run_prefix: str, idx: int, split: str, 
         "losing_traded_markets": markets_with_loss,
         "fill_density": round(fills / len(markets), 6) if markets else 0.0,
         "settlement_source": "kalshi_api",
+        **calibration,
     }
     row["selection_score"] = selection_score(row)
     row["passes_training_gate"] = passes_training_gate(row)
@@ -387,8 +398,8 @@ def selection_score(row: dict[str, Any]) -> float:
     unpaired = abs(float(row.get("unpaired_pnl", 0.0) or 0.0))
     leakage = float(row.get("unpaired_leakage_ratio", 0.0) or 0.0)
     fill_density = float(row.get("fill_density", 0.0) or 0.0)
-    # Reward official realized PnL, penalize single-contract tail risk, residual exposure, and hyperactive fill density.
-    return round(pnl - 0.75 * worst - 0.15 * unpaired - 5.0 * max(0.0, leakage - 1.0) - 0.02 * max(0.0, fill_density - 5.0), 6)
+    # Reward official realized PnL, penalize single-contract tail risk, residual exposure, hyperactive fill density, and weak probability calibration.
+    return round(pnl - 1.25 * worst - 0.25 * unpaired - 10.0 * max(0.0, leakage - 1.0) - 0.02 * max(0.0, fill_density - 5.0), 6)
 
 
 def passes_training_gate(row: dict[str, Any]) -> bool:
@@ -397,6 +408,122 @@ def passes_training_gate(row: dict[str, Any]) -> bool:
 
 def passes_validation_gate(row: dict[str, Any]) -> bool:
     return passes_training_gate(row) and float(row.get("realized_pnl", 0.0) or 0.0) > 0.0 and float(row.get("selection_score", -10**9)) > 0.0
+
+
+def test_gate(test: dict[str, Any], validation: dict[str, Any]) -> dict[str, Any]:
+    reasons: list[str] = []
+    test_score = float(test.get("selection_score", 0.0) or 0.0)
+    test_pnl = float(test.get("realized_pnl", 0.0) or 0.0)
+    validation_pnl = float(validation.get("realized_pnl", 0.0) or 0.0)
+    worst = abs(min(float(test.get("worst_market_pnl", 0.0) or 0.0), 0.0))
+    brier = float(test.get("brier_score", 1.0) or 1.0)
+    ece = float(test.get("ece", 1.0) or 1.0)
+    if test_score <= 0:
+        reasons.append("test_selection_score_nonpositive")
+    if test_pnl <= 0:
+        reasons.append("test_pnl_nonpositive")
+    if validation_pnl > 0 and test_pnl > 0 and validation_pnl / max(test_pnl, 1.0) > 4.0:
+        reasons.append("validation_to_test_pnl_ratio_high")
+    if worst > 60.0:
+        reasons.append("worst_market_loss_too_large")
+    if brier > 0.22:
+        reasons.append("brier_score_too_high")
+    if ece > 0.18:
+        reasons.append("ece_too_high")
+    return {"passes_test_gate": not reasons, "test_gate_reasons": reasons}
+
+
+def probability_calibration_stats(results_db: Path) -> dict[str, Any]:
+    if not results_db.exists():
+        return _empty_calibration()
+    samples: list[tuple[float, int]] = []
+    with sqlite3.connect(f"file:{results_db}?mode=ro", uri=True) as conn:
+        settlements = dict(
+            conn.execute(
+                "SELECT market_ticker, settlement_result FROM portfolio_settlement_by_market WHERE settlement_result IN ('yes', 'no', 'above', 'below')"
+            ).fetchall()
+        )
+        if not settlements:
+            return _empty_calibration()
+        for (raw_json,) in conn.execute("SELECT raw_json FROM replay_signals"):
+            try:
+                raw = json.loads(raw_json)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            ticker = _signal_market_ticker(raw)
+            outcome = settlements.get(ticker)
+            if outcome not in {"yes", "no", "above", "below"}:
+                continue
+            features = (raw.get("signal") or {}).get("features") or {}
+            probability = features.get("model_probability")
+            if probability is None:
+                continue
+            try:
+                p = min(1.0, max(0.0, float(probability)))
+            except (TypeError, ValueError):
+                continue
+            samples.append((p, 1 if outcome in {"yes", "above"} else 0))
+    if not samples:
+        return _empty_calibration()
+    brier = sum((p - y) ** 2 for p, y in samples) / len(samples)
+    log_loss = -sum(y * _safe_log(p) + (1 - y) * _safe_log(1.0 - p) for p, y in samples) / len(samples)
+    buckets = _calibration_buckets(samples)
+    ece = sum(bucket["count"] / len(samples) * abs(bucket["avg_probability"] - bucket["empirical_yes_rate"]) for bucket in buckets)
+    return {
+        "calibration_samples": len(samples),
+        "brier_score": round(brier, 6),
+        "log_loss": round(log_loss, 6),
+        "ece": round(ece, 6),
+        "bucket_count": len(buckets),
+        "calibration_buckets": buckets,
+    }
+
+
+def _empty_calibration() -> dict[str, Any]:
+    return {
+        "calibration_samples": 0,
+        "brier_score": 1.0,
+        "log_loss": 99.0,
+        "ece": 1.0,
+        "bucket_count": 0,
+        "calibration_buckets": [],
+    }
+
+
+def _signal_market_ticker(raw: dict[str, Any]) -> str | None:
+    state = raw.get("state") or {}
+    tick_raw = state.get("tick_raw") or {}
+    market_raw = tick_raw.get("market_raw") or {}
+    return (
+        tick_raw.get("market_ticker")
+        or tick_raw.get("ticker")
+        or tick_raw.get("market")
+        or market_raw.get("ticker")
+        or state.get("market_ticker")
+    )
+
+
+def _safe_log(value: float) -> float:
+    return __import__("math").log(min(1.0 - 1e-12, max(1e-12, value)))
+
+
+def _calibration_buckets(samples: list[tuple[float, int]]) -> list[dict[str, Any]]:
+    buckets: list[dict[str, Any]] = []
+    for index in range(10):
+        lo = index / 10.0
+        hi = (index + 1) / 10.0
+        rows = [(p, y) for p, y in samples if lo <= p < hi or (index == 9 and p == 1.0)]
+        if not rows:
+            continue
+        buckets.append(
+            {
+                "bucket": f"{lo:.1f}-{hi:.1f}",
+                "count": len(rows),
+                "avg_probability": round(sum(p for p, _ in rows) / len(rows), 6),
+                "empirical_yes_rate": round(sum(y for _, y in rows) / len(rows), 6),
+            }
+        )
+    return buckets
 
 
 def stub_row(params: dict[str, Any], label: str) -> dict[str, Any]:
@@ -417,7 +544,7 @@ def metrics_manifest() -> list[dict[str, str]]:
         {"metric": "worst-market PnL", "role": "tail-risk penalty; prevents one catastrophic 15m contract"},
         {"metric": "unpaired/residual PnL and leakage ratio", "role": "penalizes directional leftovers masquerading as pair edge"},
         {"metric": "traded markets + fills", "role": "minimum sample gate; avoids no-trade winners"},
-        {"metric": "Pnl per market / ROI", "role": "secondary diagnostics, not primary optimizer alone"},
+        {"metric": "probability calibration", "role": "Brier/log-loss/ECE diagnostics by official YES/NO outcome; used as test-gate guardrails"},
     ]
 
 
@@ -479,7 +606,7 @@ def write_checkpoint(
 
 
 def write_csv(path: Path, *groups: Iterable[dict[str, Any]]) -> None:
-    fields = ["split", "param_label", "selection_score", "realized_pnl", "roi", "pnl_per_market", "pnl_per_traded_market", "completed_pair_pnl", "unpaired_pnl", "unpaired_leakage_ratio", "worst_market_pnl", "losing_traded_markets", "fills", "traded_markets", "notional", "run_dir", "skipped_reason", "error"]
+    fields = ["split", "param_label", "selection_score", "realized_pnl", "roi", "pnl_per_market", "pnl_per_traded_market", "completed_pair_pnl", "unpaired_pnl", "unpaired_leakage_ratio", "worst_market_pnl", "losing_traded_markets", "brier_score", "log_loss", "ece", "calibration_samples", "passes_test_gate", "test_gate_reasons", "fills", "traded_markets", "notional", "run_dir", "skipped_reason", "error"]
     with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
@@ -508,7 +635,8 @@ def write_md(path: Path, artifact: dict[str, Any]) -> None:
         lines.append(f"{i}. score={row['selection_score']:.2f}, pnl=${row['realized_pnl']:.2f}, worst=${row['worst_market_pnl']:.2f}, unpaired=${row['unpaired_pnl']:.2f}, fills={row['fills']}, params=`{row['param_label']}`")
     lines += ["", "## Test-once finalists"]
     for i, row in enumerate(artifact["test_results"], 1):
-        lines.append(f"{i}. test_score={row['selection_score']:.2f}, test_pnl=${row['realized_pnl']:.2f}, roi={row['roi']*100:.2f}%, worst=${row['worst_market_pnl']:.2f}, unpaired=${row['unpaired_pnl']:.2f}, fills={row['fills']}, params=`{row['param_label']}`")
+        gate = "PASS" if row.get("passes_test_gate") else f"FAIL {row.get('test_gate_reasons', [])}"
+        lines.append(f"{i}. {gate}; test_score={row['selection_score']:.2f}, test_pnl=${row['realized_pnl']:.2f}, roi={row['roi']*100:.2f}%, worst=${row['worst_market_pnl']:.2f}, unpaired=${row['unpaired_pnl']:.2f}, brier={row.get('brier_score')}, ece={row.get('ece')}, fills={row['fills']}, params=`{row['param_label']}`")
     lines += ["", "## Caution", "- This is bounded optimization over one strategy family, not proof of deployability.", "- Finalists need full realism audit: fees, depth/min-size, no-lookahead, and live-orderbook fill validation before paper/live consideration."]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 

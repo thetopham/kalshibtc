@@ -5,7 +5,7 @@ from pathlib import Path
 
 from test_feed_replay_architecture import _write_feed_db
 
-from kalshibtc.strategy.registry import strategy_names
+from kalshibtc.strategy.registry import strategy_metadata, strategy_names
 from scripts import replay_strategy_venue_matrix as matrix
 
 
@@ -52,5 +52,43 @@ def test_matrix_default_eligibility_counts_all_strategies() -> None:
         for strategy in strategy_names()
         if venue not in matrix.strategy_metadata(strategy).allowed_venues
     )
-    assert eligible == 38
-    assert skipped == 6
+    assert eligible == 37
+    assert skipped == 11
+
+
+def test_probability_mm_remains_kalshi_eligible_because_probability_model_is_not_hedging() -> None:
+    metadata = strategy_metadata("strategy_probability_mm_v0")
+
+    assert metadata.hedges_inventory is False
+    assert metadata.allowed_venues == ("kalshi",)
+
+
+def test_bayesian_markov_directional_is_kalshi_only_and_non_hedging() -> None:
+    metadata = strategy_metadata("bayesian_markov_directional")
+
+    assert metadata.hedges_inventory is False
+    assert metadata.allowed_venues == ("kalshi",)
+
+
+def test_late_lotto_ticket_is_kalshi_only_and_non_hedging() -> None:
+    metadata = strategy_metadata("late_lotto_ticket")
+
+    assert metadata.hedges_inventory is False
+    assert metadata.allowed_venues == ("kalshi",)
+
+
+def test_all_inventory_hedging_models_are_polymarket_only() -> None:
+    hedging_models = [
+        name
+        for name in strategy_names()
+        if "hedge" in name
+        or "repair" in name
+        or "ladder" in name
+        or name == "inventory_aware_passive_mm"
+    ]
+
+    assert hedging_models
+    for name in hedging_models:
+        metadata = strategy_metadata(name)
+        assert metadata.hedges_inventory is True, name
+        assert metadata.allowed_venues == ("polymarket",), name

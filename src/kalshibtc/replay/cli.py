@@ -125,7 +125,11 @@ def main(argv: list[str] | None = None) -> int:
     (run_dir / "config.toml").write_text(config_text, encoding="utf-8")
     official_settlement_rows = _load_official_settlement_rows(feed_db) if args.settlements_from_feed_db else []
     settlement_rows = official_settlement_rows or rows
-    portfolio_settlement = compute_portfolio_settlement(report.fills, settlement_rows)
+    portfolio_settlement = compute_portfolio_settlement(
+        report.fills,
+        settlement_rows,
+        position_mode="kalshi_single_position" if args.venue == "kalshi" else "portfolio",
+    )
     if capital_state is not None:
         capital_state.realized_pnl = float(portfolio_settlement.get("aggregate", {}).get("realized_pnl", 0.0) or 0.0)
     _write_portfolio_settlement(results_db, portfolio_settlement)
@@ -407,6 +411,7 @@ def _write_results(path: Path, results: list[Any], *, strategies: Sequence[Any] 
                     "reference_price_source": getattr(getattr(state, "tick", None), "source", None),
                     "raw_btc_price": (getattr(getattr(state, "tick", None), "raw", {}) or {}).get("raw_btc_price") if state is not None else None,
                     "tick_raw": getattr(getattr(state, "tick", None), "raw", None),
+                    "market_ticker": getattr(getattr(state, "contract", None), "ticker", None),
                 },
                 "risk": {
                     "allowed": risk.allowed,

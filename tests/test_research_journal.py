@@ -100,13 +100,13 @@ def test_collect_run_summaries_flattens_metrics_and_config_params(tmp_path: Path
     assert summary.strategy_params == {"max_net_ratio": 0.45, "repair_start_seconds": 360}
 
 
-def test_build_research_journal_writes_csv_and_markdown_ranked_by_pnl(tmp_path: Path) -> None:
+def test_build_research_journal_writes_csv_and_markdown_sorted_by_date(tmp_path: Path) -> None:
     runs_dir = tmp_path / "runs"
     out_dir = tmp_path / "research"
     _write_run(
         runs_dir,
         strategy="seed_cheap_accumulate_repair_v1",
-        run_id="weak",
+        run_id="weak-20260518T060000Z",
         realized_pnl=-10.0,
         profit_factor=0.8,
         strategy_params={"repair_start_seconds": 330},
@@ -114,7 +114,7 @@ def test_build_research_journal_writes_csv_and_markdown_ranked_by_pnl(tmp_path: 
     _write_run(
         runs_dir,
         strategy="seed_cheap_accumulate_repair_v1",
-        run_id="winner",
+        run_id="winner-20260517T060000Z",
         realized_pnl=25.0,
         completed_pair_pnl=40.0,
         unpaired_leftover_pnl=-15.0,
@@ -133,24 +133,28 @@ def test_build_research_journal_writes_csv_and_markdown_ranked_by_pnl(tmp_path: 
     assert result.latest_report_path == latest_path
 
     rows = list(csv.DictReader(index_path.read_text(encoding="utf-8").splitlines()))
-    assert [row["run_id"] for row in rows] == ["winner", "weak"]
+    assert [row["run_id"] for row in rows] == ["weak-20260518T060000Z", "winner-20260517T060000Z"]
+    assert rows[0]["run_timestamp"] == "2026-05-18T06:00:00Z"
     assert rows[0]["exchange"] == "kalshi"
     assert rows[0]["datafeed"] == "kalshi-btc-1s"
     assert rows[0]["feed_db"] == "feed/kalshi-btc-1s.sqlite3"
-    assert rows[0]["strategy_params"] == '{"repair_start_seconds": 360}'
-    assert rows[0]["realized_pnl"] == "25.0"
+    assert rows[1]["strategy_params"] == '{"repair_start_seconds": 360}'
+    assert rows[1]["realized_pnl"] == "25.0"
 
     history = history_path.read_text(encoding="utf-8")
     assert "# Strategy Research History" in history
     assert "## seed_cheap_accumulate_repair_v1" in history
-    assert "`winner`" in history
+    assert "Runs by date/newest first" in history
+    assert "`winner-20260517T060000Z`" in history
+    assert "Run timestamp: 2026-05-17T06:00:00Z" in history
     assert "Exchange: kalshi" in history
     assert "Datafeed: kalshi-btc-1s" in history
     assert "Realized PnL: +$25.00" in history
     assert "repair_start_seconds = 360" in history
-    assert "`weak`" in history
+    assert "`weak-20260518T060000Z`" in history
 
     latest = latest_path.read_text(encoding="utf-8")
     assert "# Latest Strategy Replay Report" in latest
-    assert "winner" in latest
+    assert "## Latest runs" in latest
+    assert latest.index("weak-20260518T060000Z") < latest.index("winner-20260517T060000Z")
     assert "Safety boundary: replay/research summaries only; no live orders." in latest

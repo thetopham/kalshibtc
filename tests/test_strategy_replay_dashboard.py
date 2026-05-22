@@ -9,7 +9,12 @@ from test_feed_replay_architecture import _write_feed_db
 
 from kalshibtc import dashboard
 from kalshibtc.replay.cli import main as replay_main
-from kalshibtc.strategy.registry import create_strategy, strategy_metadata, strategy_names, strategies_for_venue
+from kalshibtc.strategy.registry import (
+    create_strategy,
+    strategies_for_venue,
+    strategy_metadata,
+    strategy_names,
+)
 
 EXPECTED_STRATEGIES = {
     "simple_directional",
@@ -31,7 +36,9 @@ EXPECTED_STRATEGIES = {
     "cheap_accumulate_repair_v0",
     "seed_cheap_accumulate_repair_v1",
     "seed_cheap_accumulate_repair_v2",
+    "bayesian_markov_directional",
     "strategy_probability_mm_v0",
+    "late_lotto_ticket",
     "inventory_aware_passive_mm",
     "hedge_volatility_v0",
 }
@@ -58,7 +65,11 @@ def test_strategy_registry_lists_initial_ideation_strategies_and_rejects_unknown
 
 
 def test_strategy_registry_marks_hedging_inventory_strategies_as_polymarket_only() -> None:
-    assert set(strategies_for_venue("polymarket")) == EXPECTED_STRATEGIES
+    assert set(strategies_for_venue("polymarket")) == EXPECTED_STRATEGIES - {
+        "strategy_probability_mm_v0",
+        "bayesian_markov_directional",
+        "late_lotto_ticket",
+    }
     assert POLYMARKET_ONLY_STRATEGIES.isdisjoint(strategies_for_venue("kalshi"))
 
     for name in POLYMARKET_ONLY_STRATEGIES:
