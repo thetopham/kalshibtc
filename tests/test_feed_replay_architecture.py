@@ -103,6 +103,7 @@ def test_console_scripts_expose_feed_replay_dashboard_without_legacy_kbtc15() ->
         "kbtc-probability-dataset": "kalshibtc.probability.dataset_cli:main",
         "kbtc-paper": "kalshibtc.paper_signal_executor:main",
         "kbtc-research-journal": "kalshibtc.research.journal:main",
+        "kbtc-research": "kalshibtc.research.runner:main",
         "kbtc-auto-strategy-creator": "kalshibtc.research.auto_strategy_creator:main",
         "kbtc-poly-fill-validate": "kalshibtc.polymarket_fill_validation:main",
         "polymarket-btc-15m-recorder": "kalshibtc.polymarket_btc_15m_recorder:main",

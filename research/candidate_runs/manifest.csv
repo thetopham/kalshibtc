@@ -1,0 +1,2 @@
+created_at,candidate,run_id,passed,total_pnl,run_dir
+2026-05-22T17:00:57Z,example_parameterized_late_window,example-parameterized-late-window-20260522T000000Z,false,0,runs/research/candidate_example_parameterized_late_window/example-parameterized-late-window-20260522T000000Z

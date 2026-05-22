@@ -1,0 +1,15 @@
+{
+  "name": "example_parameterized_late_window",
+  "economic_story": "Late BTC distance from strike may persist into Kalshi BTC 15m settlement.",
+  "mechanism": "parameterized_late_window",
+  "parameters": {
+    "max_seconds_to_close": 90,
+    "min_distance": 10,
+    "max_entry_price": 0.65,
+    "max_entry_spread": 0.05,
+    "target_notional": 10.0
+  },
+  "falsification": "Reject if official-settled replay cannot clear basic gates or PnL is concentrated in one tail event.",
+  "created_at": "2026-05-22T00:00:00Z",
+  "parent_id": "docs/AI_QUANT_RESEARCH_PRD.md"
+}
