@@ -1,12 +1,45 @@
 # Strategy Research History
 
-Generated: 2026-05-19T01:36:48Z
+Generated: 2026-05-22T04:57:48Z
 
 Safety boundary: replay/research summaries only; no live orders.
 
+## bayesian_markov_directional
+
+Runs scanned: 2
+
+### Best by realized PnL
+
+1. `bayes-markov-directional-smoke-20260520T0800Z`
+   - Strategy: `bayesian_markov_directional`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: -$50.00
+   - Fills: 9
+   - Notional: +$90.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: -$50.00
+   - Profit factor: 1.642857
+   - Max drawdown: +$20.00
+   - Raw run: `runs/bayesian_markov_directional/bayes-markov-directional-smoke-20260520T0800Z`
+2. `bayes-markov-directional-full-20260520T0800Z`
+   - Strategy: `bayesian_markov_directional`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: -$2,479.08
+   - Fills: 535
+   - Notional: +$5,350.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: -$2,479.08
+   - Profit factor: 1.046426
+   - Max drawdown: +$254.82
+   - Raw run: `runs/bayesian_markov_directional/bayes-markov-directional-full-20260520T0800Z`
+
 ## breakout_momentum
 
-Runs scanned: 6
+Runs scanned: 9
 
 ### Best by realized PnL
 
@@ -23,7 +56,20 @@ Runs scanned: 6
    - Profit factor: 1.007344
    - Max drawdown: +$5,147.82
    - Raw run: `runs/breakout_momentum/all-strategies-nexttick-breakout_momentum-1778995478`
-2. `live`
+2. `venue-strategy-matrix-20260520T003002Z-kalshi-breakout_momentum`
+   - Strategy: `breakout_momentum`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 3,461
+   - Notional: +$86,525.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/breakout_momentum/venue-strategy-matrix-20260520T003002Z-kalshi-breakout_momentum`
+3. `live`
    - Strategy: `breakout_momentum`
    - Exchange: unknown
    - Datafeed: unknown
@@ -36,7 +82,7 @@ Runs scanned: 6
    - Profit factor: 0
    - Max drawdown: +$0.00
    - Raw run: `runs/live/breakout_momentum`
-3. `improved-20260516T055637Z`
+4. `improved-20260516T055637Z`
    - Strategy: `breakout_momentum`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -49,7 +95,7 @@ Runs scanned: 6
    - Profit factor: 0.952026
    - Max drawdown: +$250.00
    - Raw run: `runs/breakout_momentum/improved-20260516T055637Z`
-4. `bankroll200-allstats-breakout_momentum-1778996866`
+5. `bankroll200-allstats-breakout_momentum-1778996866`
    - Strategy: `breakout_momentum`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -62,7 +108,7 @@ Runs scanned: 6
    - Profit factor: 0.721733
    - Max drawdown: +$45.00
    - Raw run: `runs/breakout_momentum/bankroll200-allstats-breakout_momentum-1778996866`
-5. `all-strategies-smallcap-breakout_momentum-1778995976`
+6. `all-strategies-smallcap-breakout_momentum-1778995976`
    - Strategy: `breakout_momentum`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -75,7 +121,7 @@ Runs scanned: 6
    - Profit factor: 0.954512
    - Max drawdown: +$237.62
    - Raw run: `runs/breakout_momentum/all-strategies-smallcap-breakout_momentum-1778995976`
-6. `all-strategies-20260517T033359Z-breakout_momentum`
+7. `all-strategies-20260517T033359Z-breakout_momentum`
    - Strategy: `breakout_momentum`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -88,10 +134,36 @@ Runs scanned: 6
    - Profit factor: 0.987992
    - Max drawdown: +$5,494.31
    - Raw run: `runs/breakout_momentum/all-strategies-20260517T033359Z-breakout_momentum`
+8. `venue-strategy-matrix-20260520T003002Z-polymarket-breakout_momentum`
+   - Strategy: `breakout_momentum`
+   - Exchange: polymarket
+   - Datafeed: polymarket-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/polymarket-btc-1s.sqlite3`
+   - Realized PnL: -$261.53
+   - Fills: 2,612
+   - Notional: +$65,300.00
+   - Completed-pair PnL: -$6,027.96
+   - Unpaired-leftover PnL: +$5,766.42
+   - Profit factor: 0.981806
+   - Max drawdown: +$3,220.43
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/breakout_momentum/venue-strategy-matrix-20260520T003002Z-polymarket-breakout_momentum`
+9. `venue-strategy-matrix-20260520T005455Z-kalshi-breakout_momentum`
+   - Strategy: `breakout_momentum`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: -$3,303.85
+   - Fills: 24,369
+   - Notional: +$609,225.00
+   - Completed-pair PnL: -$33,748.05
+   - Unpaired-leftover PnL: +$30,444.19
+   - Profit factor: 0.974952
+   - Max drawdown: +$18,240.86
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/breakout_momentum/venue-strategy-matrix-20260520T005455Z-kalshi-breakout_momentum`
 
 ## cheap_accumulate_repair_v0
 
-Runs scanned: 9
+Runs scanned: 10
 
 ### Best by realized PnL
 
@@ -272,7 +344,20 @@ Runs scanned: 9
      - very_cheap_price = 0.08
      - very_cheap_spend = 2
    - Raw run: `runs/cheap_accumulate_repair_v0/cheap-accumulate-repair-v0-tight-20260518T053741Z`
-9. `cheap-accumulate-repair-v0-20260518T053651Z`
+9. `venue-strategy-matrix-20260520T003002Z-polymarket-cheap_accumulate_repair_v0`
+   - Strategy: `cheap_accumulate_repair_v0`
+   - Exchange: polymarket
+   - Datafeed: polymarket-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/polymarket-btc-1s.sqlite3`
+   - Realized PnL: -$685.86
+   - Fills: 729
+   - Notional: +$7,400.00
+   - Completed-pair PnL: +$19.96
+   - Unpaired-leftover PnL: -$705.82
+   - Profit factor: 0.883753
+   - Max drawdown: +$3,131.82
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/cheap_accumulate_repair_v0/venue-strategy-matrix-20260520T003002Z-polymarket-cheap_accumulate_repair_v0`
+10. `cheap-accumulate-repair-v0-20260518T053651Z`
    - Strategy: `cheap_accumulate_repair_v0`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -288,7 +373,7 @@ Runs scanned: 9
 
 ## complement_ladder_v0
 
-Runs scanned: 5
+Runs scanned: 6
 
 ### Best by realized PnL
 
@@ -305,7 +390,20 @@ Runs scanned: 5
    - Profit factor: 0.965089
    - Max drawdown: +$33.15
    - Raw run: `runs/complement_ladder_v0/complement-ladder-tuned-20260518T050406Z`
-2. `complement-ladder-tuned-backfill-20260518T051043Z`
+2. `venue-strategy-matrix-20260520T003002Z-polymarket-complement_ladder_v0`
+   - Strategy: `complement_ladder_v0`
+   - Exchange: polymarket
+   - Datafeed: polymarket-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/polymarket-btc-1s.sqlite3`
+   - Realized PnL: -$9.99
+   - Fills: 2,291
+   - Notional: +$129.48
+   - Completed-pair PnL: +$14.03
+   - Unpaired-leftover PnL: -$24.01
+   - Profit factor: 0.828657
+   - Max drawdown: +$22.10
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/complement_ladder_v0/venue-strategy-matrix-20260520T003002Z-polymarket-complement_ladder_v0`
+3. `complement-ladder-tuned-backfill-20260518T051043Z`
    - Strategy: `complement_ladder_v0`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -318,7 +416,7 @@ Runs scanned: 5
    - Profit factor: 0.962531
    - Max drawdown: +$33.15
    - Raw run: `runs/complement_ladder_v0/complement-ladder-tuned-backfill-20260518T051043Z`
-3. `complement-ladder-smoke-20260518T043245Z`
+4. `complement-ladder-smoke-20260518T043245Z`
    - Strategy: `complement_ladder_v0`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -337,7 +435,7 @@ Runs scanned: 5
      - max_unpaired_contracts = 50
      - target_pair_cost = 0.95
    - Raw run: `runs/complement_ladder_v0/complement-ladder-smoke-20260518T043245Z`
-4. `complement-ladder-v0-20260518T045426Z`
+5. `complement-ladder-v0-20260518T045426Z`
    - Strategy: `complement_ladder_v0`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -356,7 +454,7 @@ Runs scanned: 5
      - max_unpaired_contracts = 50
      - target_pair_cost = 0.95
    - Raw run: `runs/complement_ladder_v0/complement-ladder-v0-20260518T045426Z`
-5. `complement-ladder-aggressive-backfill-20260518T051006Z`
+6. `complement-ladder-aggressive-backfill-20260518T051006Z`
    - Strategy: `complement_ladder_v0`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -382,11 +480,24 @@ Runs scanned: 5
 
 ## contrarian_spread_reversion
 
-Runs scanned: 2
+Runs scanned: 5
 
 ### Best by realized PnL
 
-1. `live`
+1. `venue-strategy-matrix-20260520T003002Z-kalshi-contrarian_spread_reversion`
+   - Strategy: `contrarian_spread_reversion`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 5,474
+   - Notional: +$136,850.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/contrarian_spread_reversion/venue-strategy-matrix-20260520T003002Z-kalshi-contrarian_spread_reversion`
+2. `live`
    - Strategy: `contrarian_spread_reversion`
    - Exchange: unknown
    - Datafeed: unknown
@@ -399,7 +510,7 @@ Runs scanned: 2
    - Profit factor: 0
    - Max drawdown: +$0.00
    - Raw run: `runs/live/contrarian_spread_reversion`
-2. `contrarian-smoke-20260516T065647Z`
+3. `contrarian-smoke-20260516T065647Z`
    - Strategy: `contrarian_spread_reversion`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -412,6 +523,32 @@ Runs scanned: 2
    - Profit factor: 0.840929
    - Max drawdown: +$5,739.55
    - Raw run: `runs/contrarian_spread_reversion/contrarian-smoke-20260516T065647Z`
+4. `venue-strategy-matrix-20260520T003002Z-polymarket-contrarian_spread_reversion`
+   - Strategy: `contrarian_spread_reversion`
+   - Exchange: polymarket
+   - Datafeed: polymarket-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/polymarket-btc-1s.sqlite3`
+   - Realized PnL: -$17,632.48
+   - Fills: 4,497
+   - Notional: +$112,425.00
+   - Completed-pair PnL: +$39,920.22
+   - Unpaired-leftover PnL: -$57,552.70
+   - Profit factor: 0.826195
+   - Max drawdown: +$68,999.21
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/contrarian_spread_reversion/venue-strategy-matrix-20260520T003002Z-polymarket-contrarian_spread_reversion`
+5. `venue-strategy-matrix-20260520T005455Z-kalshi-contrarian_spread_reversion`
+   - Strategy: `contrarian_spread_reversion`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: -$79,167.70
+   - Fills: 4,679
+   - Notional: +$116,975.00
+   - Completed-pair PnL: +$9,698.72
+   - Unpaired-leftover PnL: -$88,866.42
+   - Profit factor: 0.293619
+   - Max drawdown: +$93,293.79
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/contrarian_spread_reversion/venue-strategy-matrix-20260520T005455Z-kalshi-contrarian_spread_reversion`
 
 ## dynamic_complement_hedge
 
@@ -448,7 +585,7 @@ Runs scanned: 2
 
 ## inventory_aware_passive_mm
 
-Runs scanned: 2
+Runs scanned: 3
 
 ### Best by realized PnL
 
@@ -484,14 +621,112 @@ Runs scanned: 2
      - min_order_contracts = 1
      - min_visible_depth = 0
    - Raw run: `runs/inventory_aware_passive_mm/inventory-aware-passive-mm-smoke`
+3. `venue-strategy-matrix-20260520T003002Z-polymarket-inventory_aware_passive_mm`
+   - Strategy: `inventory_aware_passive_mm`
+   - Exchange: polymarket
+   - Datafeed: polymarket-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/polymarket-btc-1s.sqlite3`
+   - Realized PnL: -$83.62
+   - Fills: 72
+   - Notional: +$872.63
+   - Completed-pair PnL: +$144.85
+   - Unpaired-leftover PnL: -$228.47
+   - Profit factor: 0.825158
+   - Max drawdown: +$133.52
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/inventory_aware_passive_mm/venue-strategy-matrix-20260520T003002Z-polymarket-inventory_aware_passive_mm`
 
-## inventory_vol_regime
+## inventory_vol_rebalance
 
-Runs scanned: 1
+Runs scanned: 3
 
 ### Best by realized PnL
 
-1. `live`
+1. `venue-strategy-matrix-20260520T003002Z-kalshi-inventory_vol_rebalance`
+   - Strategy: `inventory_vol_rebalance`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/inventory_vol_rebalance/venue-strategy-matrix-20260520T003002Z-kalshi-inventory_vol_rebalance`
+2. `venue-strategy-matrix-20260520T003002Z-polymarket-inventory_vol_rebalance`
+   - Strategy: `inventory_vol_rebalance`
+   - Exchange: polymarket
+   - Datafeed: polymarket-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/polymarket-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/inventory_vol_rebalance/venue-strategy-matrix-20260520T003002Z-polymarket-inventory_vol_rebalance`
+3. `venue-strategy-matrix-20260520T005455Z-kalshi-inventory_vol_rebalance`
+   - Strategy: `inventory_vol_rebalance`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/inventory_vol_rebalance/venue-strategy-matrix-20260520T005455Z-kalshi-inventory_vol_rebalance`
+
+## inventory_vol_regime
+
+Runs scanned: 4
+
+### Best by realized PnL
+
+1. `venue-strategy-matrix-20260520T003002Z-kalshi-inventory_vol_regime`
+   - Strategy: `inventory_vol_regime`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/inventory_vol_regime/venue-strategy-matrix-20260520T003002Z-kalshi-inventory_vol_regime`
+2. `venue-strategy-matrix-20260520T003002Z-polymarket-inventory_vol_regime`
+   - Strategy: `inventory_vol_regime`
+   - Exchange: polymarket
+   - Datafeed: polymarket-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/polymarket-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/inventory_vol_regime/venue-strategy-matrix-20260520T003002Z-polymarket-inventory_vol_regime`
+3. `venue-strategy-matrix-20260520T005455Z-kalshi-inventory_vol_regime`
+   - Strategy: `inventory_vol_regime`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/inventory_vol_regime/venue-strategy-matrix-20260520T005455Z-kalshi-inventory_vol_regime`
+4. `live`
    - Strategy: `inventory_vol_regime`
    - Exchange: unknown
    - Datafeed: unknown
@@ -507,7 +742,7 @@ Runs scanned: 1
 
 ## late_window_only
 
-Runs scanned: 9
+Runs scanned: 12
 
 ### Best by realized PnL
 
@@ -524,7 +759,20 @@ Runs scanned: 9
    - Profit factor: 16.203355
    - Max drawdown: +$1,550.00
    - Raw run: `runs/late_window_only/all-strategies-20260517T033359Z-late_window_only`
-2. `bankroll200-allstats-late_window_only-1778996866`
+2. `venue-strategy-matrix-20260520T003002Z-polymarket-late_window_only`
+   - Strategy: `late_window_only`
+   - Exchange: polymarket
+   - Datafeed: polymarket-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/polymarket-btc-1s.sqlite3`
+   - Realized PnL: +$768.63
+   - Fills: 118
+   - Notional: +$2,950.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$768.63
+   - Profit factor: inf
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/late_window_only/venue-strategy-matrix-20260520T003002Z-polymarket-late_window_only`
+3. `bankroll200-allstats-late_window_only-1778996866`
    - Strategy: `late_window_only`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -537,7 +785,7 @@ Runs scanned: 9
    - Profit factor: 1.44522
    - Max drawdown: +$45.00
    - Raw run: `runs/late_window_only/bankroll200-allstats-late_window_only-1778996866`
-3. `improved-20260516T055637Z`
+4. `improved-20260516T055637Z`
    - Strategy: `late_window_only`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -550,7 +798,20 @@ Runs scanned: 9
    - Profit factor: inf
    - Max drawdown: +$0.00
    - Raw run: `runs/late_window_only/improved-20260516T055637Z`
-4. `live`
+5. `venue-strategy-matrix-20260520T003002Z-kalshi-late_window_only`
+   - Strategy: `late_window_only`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 50
+   - Notional: +$1,250.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/late_window_only/venue-strategy-matrix-20260520T003002Z-kalshi-late_window_only`
+6. `live`
    - Strategy: `late_window_only`
    - Exchange: unknown
    - Datafeed: unknown
@@ -563,7 +824,7 @@ Runs scanned: 9
    - Profit factor: 0
    - Max drawdown: +$0.00
    - Raw run: `runs/live/late_window_only`
-5. `all-strategies-smallcap-late_window_only-1778995976`
+7. `all-strategies-smallcap-late_window_only-1778995976`
    - Strategy: `late_window_only`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -576,7 +837,7 @@ Runs scanned: 9
    - Profit factor: 0.768828
    - Max drawdown: +$85.00
    - Raw run: `runs/late_window_only/all-strategies-smallcap-late_window_only-1778995976`
-6. `audit-late_window_only-same-tick-1778989978`
+8. `audit-late_window_only-same-tick-1778989978`
    - Strategy: `late_window_only`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -589,7 +850,7 @@ Runs scanned: 9
    - Profit factor: 0.226047
    - Max drawdown: +$3,253.38
    - Raw run: `runs/late_window_only/audit-late_window_only-same-tick-1778989978`
-7. `audit-late_window_only-next-tick-1778989994`
+9. `audit-late_window_only-next-tick-1778989994`
    - Strategy: `late_window_only`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -602,7 +863,7 @@ Runs scanned: 9
    - Profit factor: 0.215844
    - Max drawdown: +$3,256.96
    - Raw run: `runs/late_window_only/audit-late_window_only-next-tick-1778989994`
-8. `audit2-late_window_only-next-tick-1778990051`
+10. `audit2-late_window_only-next-tick-1778990051`
    - Strategy: `late_window_only`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -615,7 +876,7 @@ Runs scanned: 9
    - Profit factor: 0.215844
    - Max drawdown: +$3,256.96
    - Raw run: `runs/late_window_only/audit2-late_window_only-next-tick-1778990051`
-9. `all-strategies-nexttick-late_window_only-1778995478`
+11. `all-strategies-nexttick-late_window_only-1778995478`
    - Strategy: `late_window_only`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -628,10 +889,23 @@ Runs scanned: 9
    - Profit factor: 0.215844
    - Max drawdown: +$3,256.96
    - Raw run: `runs/late_window_only/all-strategies-nexttick-late_window_only-1778995478`
+12. `venue-strategy-matrix-20260520T005455Z-kalshi-late_window_only`
+   - Strategy: `late_window_only`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: -$18,190.52
+   - Fills: 1,111
+   - Notional: +$27,775.00
+   - Completed-pair PnL: +$74.12
+   - Unpaired-leftover PnL: -$18,264.65
+   - Profit factor: 0.123348
+   - Max drawdown: +$18,473.93
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/late_window_only/venue-strategy-matrix-20260520T005455Z-kalshi-late_window_only`
 
 ## mean_reversion_to_strike
 
-Runs scanned: 6
+Runs scanned: 9
 
 ### Best by realized PnL
 
@@ -713,10 +987,49 @@ Runs scanned: 6
    - Profit factor: 0
    - Max drawdown: +$0.00
    - Raw run: `runs/mean_reversion_to_strike/improved-20260516T055637Z`
+7. `venue-strategy-matrix-20260520T003002Z-kalshi-mean_reversion_to_strike`
+   - Strategy: `mean_reversion_to_strike`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/mean_reversion_to_strike/venue-strategy-matrix-20260520T003002Z-kalshi-mean_reversion_to_strike`
+8. `venue-strategy-matrix-20260520T003002Z-polymarket-mean_reversion_to_strike`
+   - Strategy: `mean_reversion_to_strike`
+   - Exchange: polymarket
+   - Datafeed: polymarket-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/polymarket-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/mean_reversion_to_strike/venue-strategy-matrix-20260520T003002Z-polymarket-mean_reversion_to_strike`
+9. `venue-strategy-matrix-20260520T005455Z-kalshi-mean_reversion_to_strike`
+   - Strategy: `mean_reversion_to_strike`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/mean_reversion_to_strike/venue-strategy-matrix-20260520T005455Z-kalshi-mean_reversion_to_strike`
 
 ## no_trade_baseline
 
-Runs scanned: 6
+Runs scanned: 13
 
 ### Best by realized PnL
 
@@ -798,10 +1111,101 @@ Runs scanned: 6
    - Profit factor: 0
    - Max drawdown: +$0.00
    - Raw run: `runs/no_trade_baseline/improved-20260516T055637Z`
+7. `venue-strategy-matrix-20260520T003002Z-kalshi-no_trade_baseline`
+   - Strategy: `no_trade_baseline`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/no_trade_baseline/venue-strategy-matrix-20260520T003002Z-kalshi-no_trade_baseline`
+8. `venue-strategy-matrix-20260520T003002Z-polymarket-no_trade_baseline`
+   - Strategy: `no_trade_baseline`
+   - Exchange: polymarket
+   - Datafeed: polymarket-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/polymarket-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/no_trade_baseline/venue-strategy-matrix-20260520T003002Z-polymarket-no_trade_baseline`
+9. `venue-strategy-matrix-20260520T005455Z-kalshi-no_trade_baseline`
+   - Strategy: `no_trade_baseline`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/no_trade_baseline/venue-strategy-matrix-20260520T005455Z-kalshi-no_trade_baseline`
+10. `venue-strategy-matrix-20260520T025727Z-kalshi-no_trade_baseline`
+   - Strategy: `no_trade_baseline`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/no_trade_baseline/venue-strategy-matrix-20260520T025727Z-kalshi-no_trade_baseline`
+11. `venue-strategy-matrix-20260520T025727Z-polymarket-no_trade_baseline`
+   - Strategy: `no_trade_baseline`
+   - Exchange: polymarket
+   - Datafeed: polymarket-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/polymarket-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/no_trade_baseline/venue-strategy-matrix-20260520T025727Z-polymarket-no_trade_baseline`
+12. `venue-strategy-matrix-20260520T025954Z-kalshi-no_trade_baseline`
+   - Strategy: `no_trade_baseline`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/no_trade_baseline/venue-strategy-matrix-20260520T025954Z-kalshi-no_trade_baseline`
+13. `venue-strategy-matrix-20260520T025954Z-polymarket-no_trade_baseline`
+   - Strategy: `no_trade_baseline`
+   - Exchange: polymarket
+   - Datafeed: polymarket-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/polymarket-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/no_trade_baseline/venue-strategy-matrix-20260520T025954Z-polymarket-no_trade_baseline`
 
 ## pair_arb
 
-Runs scanned: 1
+Runs scanned: 4
 
 ### Best by realized PnL
 
@@ -818,10 +1222,49 @@ Runs scanned: 1
    - Profit factor: 0
    - Max drawdown: +$0.00
    - Raw run: `runs/live/pair_arb`
+2. `venue-strategy-matrix-20260520T003002Z-kalshi-pair_arb`
+   - Strategy: `pair_arb`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 6,374
+   - Notional: +$159,350.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/pair_arb/venue-strategy-matrix-20260520T003002Z-kalshi-pair_arb`
+3. `venue-strategy-matrix-20260520T003002Z-polymarket-pair_arb`
+   - Strategy: `pair_arb`
+   - Exchange: polymarket
+   - Datafeed: polymarket-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/polymarket-btc-1s.sqlite3`
+   - Realized PnL: -$2,848.39
+   - Fills: 5,238
+   - Notional: +$130,950.00
+   - Completed-pair PnL: -$11,354.80
+   - Unpaired-leftover PnL: +$8,506.41
+   - Profit factor: 0.903444
+   - Max drawdown: +$7,214.34
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/pair_arb/venue-strategy-matrix-20260520T003002Z-polymarket-pair_arb`
+4. `venue-strategy-matrix-20260520T005455Z-kalshi-pair_arb`
+   - Strategy: `pair_arb`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: -$15,808.94
+   - Fills: 49,922
+   - Notional: +$1,248,050.00
+   - Completed-pair PnL: -$70,688.00
+   - Unpaired-leftover PnL: +$54,879.06
+   - Profit factor: 0.940372
+   - Max drawdown: +$43,473.09
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/pair_arb/venue-strategy-matrix-20260520T005455Z-kalshi-pair_arb`
 
 ## pair_arb_grid
 
-Runs scanned: 1
+Runs scanned: 4
 
 ### Best by realized PnL
 
@@ -838,10 +1281,49 @@ Runs scanned: 1
    - Profit factor: 0
    - Max drawdown: +$0.00
    - Raw run: `runs/live/pair_arb_grid`
+2. `venue-strategy-matrix-20260520T003002Z-kalshi-pair_arb_grid`
+   - Strategy: `pair_arb_grid`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/pair_arb_grid/venue-strategy-matrix-20260520T003002Z-kalshi-pair_arb_grid`
+3. `venue-strategy-matrix-20260520T003002Z-polymarket-pair_arb_grid`
+   - Strategy: `pair_arb_grid`
+   - Exchange: polymarket
+   - Datafeed: polymarket-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/polymarket-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/pair_arb_grid/venue-strategy-matrix-20260520T003002Z-polymarket-pair_arb_grid`
+4. `venue-strategy-matrix-20260520T005455Z-kalshi-pair_arb_grid`
+   - Strategy: `pair_arb_grid`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/pair_arb_grid/venue-strategy-matrix-20260520T005455Z-kalshi-pair_arb_grid`
 
 ## pair_arb_passive
 
-Runs scanned: 1
+Runs scanned: 4
 
 ### Best by realized PnL
 
@@ -858,10 +1340,49 @@ Runs scanned: 1
    - Profit factor: 0
    - Max drawdown: +$0.00
    - Raw run: `runs/live/pair_arb_passive`
+2. `venue-strategy-matrix-20260520T003002Z-kalshi-pair_arb_passive`
+   - Strategy: `pair_arb_passive`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/pair_arb_passive/venue-strategy-matrix-20260520T003002Z-kalshi-pair_arb_passive`
+3. `venue-strategy-matrix-20260520T003002Z-polymarket-pair_arb_passive`
+   - Strategy: `pair_arb_passive`
+   - Exchange: polymarket
+   - Datafeed: polymarket-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/polymarket-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/pair_arb_passive/venue-strategy-matrix-20260520T003002Z-polymarket-pair_arb_passive`
+4. `venue-strategy-matrix-20260520T005455Z-kalshi-pair_arb_passive`
+   - Strategy: `pair_arb_passive`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/pair_arb_passive/venue-strategy-matrix-20260520T005455Z-kalshi-pair_arb_passive`
 
 ## seed_cheap_accumulate_repair_v1
 
-Runs scanned: 75
+Runs scanned: 76
 
 ### Best by realized PnL
 
@@ -1504,9 +2025,29 @@ Runs scanned: 75
      - very_cheap_spend = 2
    - Raw run: `runs/seed_cheap_accumulate_repair_v1/tune_90_30_r330_net0.45-20260518T065150Z`
 
+## seed_cheap_accumulate_repair_v2
+
+Runs scanned: 1
+
+### Best by realized PnL
+
+1. `venue-strategy-matrix-20260520T003002Z-polymarket-seed_cheap_accumulate_repair_v2`
+   - Strategy: `seed_cheap_accumulate_repair_v2`
+   - Exchange: polymarket
+   - Datafeed: polymarket-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/polymarket-btc-1s.sqlite3`
+   - Realized PnL: +$66.90
+   - Fills: 103
+   - Notional: +$1,595.05
+   - Completed-pair PnL: +$126.67
+   - Unpaired-leftover PnL: -$59.77
+   - Profit factor: 1.085158
+   - Max drawdown: +$58.52
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/seed_cheap_accumulate_repair_v2/venue-strategy-matrix-20260520T003002Z-polymarket-seed_cheap_accumulate_repair_v2`
+
 ## simple_directional
 
-Runs scanned: 9
+Runs scanned: 12
 
 ### Best by realized PnL
 
@@ -1627,10 +2168,49 @@ Runs scanned: 9
    - Profit factor: 0
    - Max drawdown: +$0.00
    - Raw run: `runs/live/simple_directional`
+10. `venue-strategy-matrix-20260520T003002Z-kalshi-simple_directional`
+   - Strategy: `simple_directional`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 7,600
+   - Notional: +$190,000.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/simple_directional/venue-strategy-matrix-20260520T003002Z-kalshi-simple_directional`
+11. `venue-strategy-matrix-20260520T005455Z-kalshi-simple_directional`
+   - Strategy: `simple_directional`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: -$4,774.22
+   - Fills: 74,600
+   - Notional: +$1,865,000.00
+   - Completed-pair PnL: -$73,178.73
+   - Unpaired-leftover PnL: +$68,404.51
+   - Profit factor: 0.991948
+   - Max drawdown: +$69,766.30
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/simple_directional/venue-strategy-matrix-20260520T005455Z-kalshi-simple_directional`
+12. `venue-strategy-matrix-20260520T003002Z-polymarket-simple_directional`
+   - Strategy: `simple_directional`
+   - Exchange: polymarket
+   - Datafeed: polymarket-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/polymarket-btc-1s.sqlite3`
+   - Realized PnL: -$10,642.07
+   - Fills: 7,600
+   - Notional: +$190,000.00
+   - Completed-pair PnL: -$11,527.76
+   - Unpaired-leftover PnL: +$885.70
+   - Profit factor: 0.850847
+   - Max drawdown: +$16,397.98
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/simple_directional/venue-strategy-matrix-20260520T003002Z-polymarket-simple_directional`
 
 ## simple_inventory_mm
 
-Runs scanned: 43
+Runs scanned: 46
 
 ### Best by realized PnL
 
@@ -1682,7 +2262,20 @@ Runs scanned: 43
      - seed_add_contracts = 5
      - very_cheap_add_contracts = 5
    - Raw run: `runs/simple_inventory_mm/limit5-net200-gross200-contract-daily-20260517T161006Z`
-3. `bankroll200-allstats-simple_inventory_mm-1778996866`
+3. `venue-strategy-matrix-20260520T003002Z-polymarket-simple_inventory_mm`
+   - Strategy: `simple_inventory_mm`
+   - Exchange: polymarket
+   - Datafeed: polymarket-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/polymarket-btc-1s.sqlite3`
+   - Realized PnL: +$1.80
+   - Fills: 97
+   - Notional: +$361.94
+   - Completed-pair PnL: +$40.85
+   - Unpaired-leftover PnL: -$39.05
+   - Profit factor: 1.009569
+   - Max drawdown: +$25.88
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/simple_inventory_mm/venue-strategy-matrix-20260520T003002Z-polymarket-simple_inventory_mm`
+4. `bankroll200-allstats-simple_inventory_mm-1778996866`
    - Strategy: `simple_inventory_mm`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -1706,7 +2299,7 @@ Runs scanned: 43
      - seed_add_contracts = 2
      - very_cheap_add_contracts = 3
    - Raw run: `runs/simple_inventory_mm/bankroll200-allstats-simple_inventory_mm-1778996866`
-4. `limit5-net200-gross400-20260517T160524Z`
+5. `limit5-net200-gross400-20260517T160524Z`
    - Strategy: `simple_inventory_mm`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -1730,7 +2323,20 @@ Runs scanned: 43
      - seed_add_contracts = 5
      - very_cheap_add_contracts = 5
    - Raw run: `runs/simple_inventory_mm/limit5-net200-gross400-20260517T160524Z`
-5. `all-strategies-smallcap-simple_inventory_mm-1778995976`
+6. `venue-strategy-matrix-20260520T003002Z-kalshi-simple_inventory_mm`
+   - Strategy: `simple_inventory_mm`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 104
+   - Notional: +$374.54
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/simple_inventory_mm/venue-strategy-matrix-20260520T003002Z-kalshi-simple_inventory_mm`
+7. `all-strategies-smallcap-simple_inventory_mm-1778995976`
    - Strategy: `simple_inventory_mm`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -1754,7 +2360,20 @@ Runs scanned: 43
      - seed_add_contracts = 2
      - very_cheap_add_contracts = 3
    - Raw run: `runs/simple_inventory_mm/all-strategies-smallcap-simple_inventory_mm-1778995976`
-6. `limit5-net200-gross200-recycle-bankroll2000-20260517T162153Z`
+8. `venue-strategy-matrix-20260520T005455Z-kalshi-simple_inventory_mm`
+   - Strategy: `simple_inventory_mm`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: -$9.59
+   - Fills: 1,041
+   - Notional: +$3,712.01
+   - Completed-pair PnL: +$427.49
+   - Unpaired-leftover PnL: -$437.09
+   - Profit factor: 0.99485
+   - Max drawdown: +$85.95
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/simple_inventory_mm/venue-strategy-matrix-20260520T005455Z-kalshi-simple_inventory_mm`
+9. `limit5-net200-gross200-recycle-bankroll2000-20260517T162153Z`
    - Strategy: `simple_inventory_mm`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -1778,7 +2397,7 @@ Runs scanned: 43
      - seed_add_contracts = 5
      - very_cheap_add_contracts = 5
    - Raw run: `runs/simple_inventory_mm/limit5-net200-gross200-recycle-bankroll2000-20260517T162153Z`
-7. `matrix2-mm-net30-repair300-cheap40-1778994679`
+10. `matrix2-mm-net30-repair300-cheap40-1778994679`
    - Strategy: `simple_inventory_mm`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -1795,7 +2414,7 @@ Runs scanned: 43
      - max_net_contracts = 30
      - repair_window_seconds = 300
    - Raw run: `runs/simple_inventory_mm/matrix2-mm-net30-repair300-cheap40-1778994679`
-8. `resting-state-smoke`
+11. `resting-state-smoke`
    - Strategy: `simple_inventory_mm`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -1808,7 +2427,7 @@ Runs scanned: 43
    - Profit factor: 0.882983
    - Max drawdown: +$80.83
    - Raw run: `runs/simple_inventory_mm/resting-state-smoke`
-9. `matrix2-mm-net20-repair300-cheap40-1778994607`
+12. `matrix2-mm-net20-repair300-cheap40-1778994607`
    - Strategy: `simple_inventory_mm`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -1825,7 +2444,7 @@ Runs scanned: 43
      - max_net_contracts = 20
      - repair_window_seconds = 300
    - Raw run: `runs/simple_inventory_mm/matrix2-mm-net20-repair300-cheap40-1778994607`
-10. `matrix2-mm-net30-repair300-cheap35-1778994661`
+13. `matrix2-mm-net30-repair300-cheap35-1778994661`
    - Strategy: `simple_inventory_mm`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -1842,7 +2461,7 @@ Runs scanned: 43
      - max_net_contracts = 30
      - repair_window_seconds = 300
    - Raw run: `runs/simple_inventory_mm/matrix2-mm-net30-repair300-cheap35-1778994661`
-11. `limit5-net200-gross200-recycle-20260517T162104Z`
+14. `limit5-net200-gross200-recycle-20260517T162104Z`
    - Strategy: `simple_inventory_mm`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -1866,7 +2485,7 @@ Runs scanned: 43
      - seed_add_contracts = 5
      - very_cheap_add_contracts = 5
    - Raw run: `runs/simple_inventory_mm/limit5-net200-gross200-recycle-20260517T162104Z`
-12. `matrix2-mm-net20-repair300-cheap35-1778994589`
+15. `matrix2-mm-net20-repair300-cheap35-1778994589`
    - Strategy: `simple_inventory_mm`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -1883,7 +2502,7 @@ Runs scanned: 43
      - max_net_contracts = 20
      - repair_window_seconds = 300
    - Raw run: `runs/simple_inventory_mm/matrix2-mm-net20-repair300-cheap35-1778994589`
-13. `matrix2-mm-net10-repair300-cheap35-1778994518`
+16. `matrix2-mm-net10-repair300-cheap35-1778994518`
    - Strategy: `simple_inventory_mm`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -1900,7 +2519,7 @@ Runs scanned: 43
      - max_net_contracts = 10
      - repair_window_seconds = 300
    - Raw run: `runs/simple_inventory_mm/matrix2-mm-net10-repair300-cheap35-1778994518`
-14. `matrix2-mm-net30-repair180-cheap40-1778994643`
+17. `matrix2-mm-net30-repair180-cheap40-1778994643`
    - Strategy: `simple_inventory_mm`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -1917,7 +2536,7 @@ Runs scanned: 43
      - max_net_contracts = 30
      - repair_window_seconds = 180
    - Raw run: `runs/simple_inventory_mm/matrix2-mm-net30-repair180-cheap40-1778994643`
-15. `matrix2-mm-net10-repair300-cheap40-1778994536`
+18. `matrix2-mm-net10-repair300-cheap40-1778994536`
    - Strategy: `simple_inventory_mm`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -1934,7 +2553,7 @@ Runs scanned: 43
      - max_net_contracts = 10
      - repair_window_seconds = 300
    - Raw run: `runs/simple_inventory_mm/matrix2-mm-net10-repair300-cheap40-1778994536`
-16. `audit-simple_inventory_mm-portfolio-1778993167`
+19. `audit-simple_inventory_mm-portfolio-1778993167`
    - Strategy: `simple_inventory_mm`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -1947,7 +2566,7 @@ Runs scanned: 43
    - Profit factor: 0.9694
    - Max drawdown: +$380.95
    - Raw run: `runs/simple_inventory_mm/audit-simple_inventory_mm-portfolio-1778993167`
-17. `audit-simple_inventory_mm-next-tick-state-1778991373`
+20. `audit-simple_inventory_mm-next-tick-state-1778991373`
    - Strategy: `simple_inventory_mm`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -1960,7 +2579,7 @@ Runs scanned: 43
    - Profit factor: 0.9694
    - Max drawdown: +$380.95
    - Raw run: `runs/simple_inventory_mm/audit-simple_inventory_mm-next-tick-state-1778991373`
-18. `matrix2-mm-net10-repair180-cheap35-1778994483`
+21. `matrix2-mm-net10-repair180-cheap35-1778994483`
    - Strategy: `simple_inventory_mm`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -1977,7 +2596,7 @@ Runs scanned: 43
      - max_net_contracts = 10
      - repair_window_seconds = 180
    - Raw run: `runs/simple_inventory_mm/matrix2-mm-net10-repair180-cheap35-1778994483`
-19. `matrix2-mm-net10-repair180-cheap40-1778994500`
+22. `matrix2-mm-net10-repair180-cheap40-1778994500`
    - Strategy: `simple_inventory_mm`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -1994,7 +2613,7 @@ Runs scanned: 43
      - max_net_contracts = 10
      - repair_window_seconds = 180
    - Raw run: `runs/simple_inventory_mm/matrix2-mm-net10-repair180-cheap40-1778994500`
-20. `matrix2-mm-net20-repair180-cheap40-1778994571`
+23. `matrix2-mm-net20-repair180-cheap40-1778994571`
    - Strategy: `simple_inventory_mm`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -2011,7 +2630,7 @@ Runs scanned: 43
      - max_net_contracts = 20
      - repair_window_seconds = 180
    - Raw run: `runs/simple_inventory_mm/matrix2-mm-net20-repair180-cheap40-1778994571`
-21. `matrix-mm-net20-repair300-cheap35-1778993875`
+24. `matrix-mm-net20-repair300-cheap35-1778993875`
    - Strategy: `simple_inventory_mm`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -2028,7 +2647,7 @@ Runs scanned: 43
      - max_net_contracts = 20
      - repair_window_seconds = 300
    - Raw run: `runs/simple_inventory_mm/matrix-mm-net20-repair300-cheap35-1778993875`
-22. `matrix-mm-net20-repair300-cheap40-1778993892`
+25. `matrix-mm-net20-repair300-cheap40-1778993892`
    - Strategy: `simple_inventory_mm`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -2045,65 +2664,27 @@ Runs scanned: 43
      - max_net_contracts = 20
      - repair_window_seconds = 300
    - Raw run: `runs/simple_inventory_mm/matrix-mm-net20-repair300-cheap40-1778993892`
-23. `matrix-mm-net20-repair180-cheap35-1778993805`
-   - Strategy: `simple_inventory_mm`
-   - Exchange: kalshi
-   - Datafeed: kalshi-btc-1s
-   - Feed DB: `feed/kalshi-btc-1s.sqlite3`
-   - Realized PnL: -$126.86
-   - Fills: 4,364
-   - Notional: +$6,468.92
-   - Completed-pair PnL: +$0.00
-   - Unpaired-leftover PnL: +$0.00
-   - Profit factor: 0.957479
-   - Max drawdown: +$255.47
-   - Params:
-     - cheap_limit_price = 0.35
-     - max_net_contracts = 20
-     - repair_window_seconds = 180
-   - Raw run: `runs/simple_inventory_mm/matrix-mm-net20-repair180-cheap35-1778993805`
-24. `matrix-mm-net20-repair180-cheap40-1778993822`
-   - Strategy: `simple_inventory_mm`
-   - Exchange: kalshi
-   - Datafeed: kalshi-btc-1s
-   - Feed DB: `feed/kalshi-btc-1s.sqlite3`
-   - Realized PnL: -$132.00
-   - Fills: 4,732
-   - Notional: +$6,759.15
-   - Completed-pair PnL: +$0.00
-   - Unpaired-leftover PnL: +$0.00
-   - Profit factor: 0.956509
-   - Max drawdown: +$285.18
-   - Params:
-     - cheap_limit_price = 0.4
-     - max_net_contracts = 20
-     - repair_window_seconds = 180
-   - Raw run: `runs/simple_inventory_mm/matrix-mm-net20-repair180-cheap40-1778993822`
-25. `matrix2-mm-net20-repair180-cheap35-1778994553`
-   - Strategy: `simple_inventory_mm`
-   - Exchange: kalshi
-   - Datafeed: kalshi-btc-1s
-   - Feed DB: `feed/kalshi-btc-1s.sqlite3`
-   - Realized PnL: -$143.50
-   - Fills: 1,708
-   - Notional: +$5,258.38
-   - Completed-pair PnL: +$0.00
-   - Unpaired-leftover PnL: +$0.00
-   - Profit factor: 0.940757
-   - Max drawdown: +$190.06
-   - Params:
-     - cheap_limit_price = 0.35
-     - max_net_contracts = 20
-     - repair_window_seconds = 180
-   - Raw run: `runs/simple_inventory_mm/matrix2-mm-net20-repair180-cheap35-1778994553`
 
 ## spread_aware_momentum
 
-Runs scanned: 7
+Runs scanned: 10
 
 ### Best by realized PnL
 
-1. `all-strategies-nexttick-spread_aware_momentum-1778995478`
+1. `venue-strategy-matrix-20260520T003002Z-polymarket-spread_aware_momentum`
+   - Strategy: `spread_aware_momentum`
+   - Exchange: polymarket
+   - Datafeed: polymarket-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/polymarket-btc-1s.sqlite3`
+   - Realized PnL: +$365.99
+   - Fills: 735
+   - Notional: +$18,375.00
+   - Completed-pair PnL: -$780.65
+   - Unpaired-leftover PnL: +$1,146.64
+   - Profit factor: 1.046182
+   - Max drawdown: +$2,552.02
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/spread_aware_momentum/venue-strategy-matrix-20260520T003002Z-polymarket-spread_aware_momentum`
+2. `all-strategies-nexttick-spread_aware_momentum-1778995478`
    - Strategy: `spread_aware_momentum`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -2116,7 +2697,7 @@ Runs scanned: 7
    - Profit factor: 1.008992
    - Max drawdown: +$4,659.72
    - Raw run: `runs/spread_aware_momentum/all-strategies-nexttick-spread_aware_momentum-1778995478`
-2. `bankroll200-allstats-spread_aware_momentum-1778996866`
+3. `bankroll200-allstats-spread_aware_momentum-1778996866`
    - Strategy: `spread_aware_momentum`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -2129,7 +2710,7 @@ Runs scanned: 7
    - Profit factor: 2.419928
    - Max drawdown: +$65.00
    - Raw run: `runs/spread_aware_momentum/bankroll200-allstats-spread_aware_momentum-1778996866`
-3. `bankroll200-smoke-spread`
+4. `bankroll200-smoke-spread`
    - Strategy: `spread_aware_momentum`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -2142,7 +2723,7 @@ Runs scanned: 7
    - Profit factor: 2.419928
    - Max drawdown: +$65.00
    - Raw run: `runs/spread_aware_momentum/bankroll200-smoke-spread`
-4. `all-strategies-smallcap-spread_aware_momentum-1778995976`
+5. `all-strategies-smallcap-spread_aware_momentum-1778995976`
    - Strategy: `spread_aware_momentum`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -2155,7 +2736,7 @@ Runs scanned: 7
    - Profit factor: 1.075404
    - Max drawdown: +$284.78
    - Raw run: `runs/spread_aware_momentum/all-strategies-smallcap-spread_aware_momentum-1778995976`
-5. `live`
+6. `live`
    - Strategy: `spread_aware_momentum`
    - Exchange: unknown
    - Datafeed: unknown
@@ -2168,7 +2749,20 @@ Runs scanned: 7
    - Profit factor: 0
    - Max drawdown: +$0.00
    - Raw run: `runs/live/spread_aware_momentum`
-6. `improved-20260516T055637Z`
+7. `venue-strategy-matrix-20260520T003002Z-kalshi-spread_aware_momentum`
+   - Strategy: `spread_aware_momentum`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 941
+   - Notional: +$23,525.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/spread_aware_momentum/venue-strategy-matrix-20260520T003002Z-kalshi-spread_aware_momentum`
+8. `improved-20260516T055637Z`
    - Strategy: `spread_aware_momentum`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -2181,7 +2775,7 @@ Runs scanned: 7
    - Profit factor: 0.058442
    - Max drawdown: +$350.00
    - Raw run: `runs/spread_aware_momentum/improved-20260516T055637Z`
-7. `all-strategies-20260517T033359Z-spread_aware_momentum`
+9. `all-strategies-20260517T033359Z-spread_aware_momentum`
    - Strategy: `spread_aware_momentum`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -2194,34 +2788,623 @@ Runs scanned: 7
    - Profit factor: 0.940547
    - Max drawdown: +$5,536.96
    - Raw run: `runs/spread_aware_momentum/all-strategies-20260517T033359Z-spread_aware_momentum`
+10. `venue-strategy-matrix-20260520T005455Z-kalshi-spread_aware_momentum`
+   - Strategy: `spread_aware_momentum`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: -$12,210.55
+   - Fills: 7,367
+   - Notional: +$184,175.00
+   - Completed-pair PnL: -$2,325.80
+   - Unpaired-leftover PnL: -$9,884.75
+   - Profit factor: 0.866879
+   - Max drawdown: +$16,967.38
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/spread_aware_momentum/venue-strategy-matrix-20260520T005455Z-kalshi-spread_aware_momentum`
 
 ## strategy_probability_mm_v0
 
-Runs scanned: 1
+Runs scanned: 328
 
 ### Best by realized PnL
 
-1. `probability-mm-v0-smoke`
+1. `kalshi-prob-mm-opt-20260520T021230Z-validation-020`
    - Strategy: `strategy_probability_mm_v0`
-   - Exchange: polymarket
-   - Datafeed: polymarket-btc-1s
-   - Feed DB: `feed/polymarket-btc-1s.sqlite3`
-   - Realized PnL: -$51.19
-   - Fills: 40
-   - Notional: +$394.91
-   - Completed-pair PnL: -$1.13
-   - Unpaired-leftover PnL: -$50.07
-   - Profit factor: 0.756226
-   - Max drawdown: +$80.15
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$4,012.59
+   - Fills: 4,694
+   - Notional: +$46,940.00
+   - Completed-pair PnL: +$9,547.89
+   - Unpaired-leftover PnL: -$5,535.30
+   - Profit factor: 1.160568
+   - Max drawdown: +$6,520.31
    - Params:
-     - base_notional = 10
+     - base_notional = 10.0
      - edge_threshold = 0.02
-     - max_net_ratio = 0.35
-   - Raw run: `runs/strategy_probability_mm_v0/probability-mm-v0-smoke`
+     - force_flatten_seconds = 30.0
+     - max_atr_slope = 0.75
+     - max_net_ratio = 0.5
+     - max_wickiness = 0.9
+     - min_seconds_to_close = 60.0
+     - min_volatility = 1.0
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T021230Z-validation-020`
+2. `kalshi-prob-mm-opt-20260520T014359Z-validation-009`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$1,483.01
+   - Fills: 4,149
+   - Notional: +$41,421.95
+   - Completed-pair PnL: +$9,132.29
+   - Unpaired-leftover PnL: -$7,649.28
+   - Profit factor: 1.072529
+   - Max drawdown: +$6,000.88
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.03
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.5
+     - max_wickiness = 0.75
+     - min_seconds_to_close = 30.0
+     - min_volatility = 1.0
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T014359Z-validation-009`
+3. `kalshi-prob-mm-opt-20260520T021230Z-validation-009`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$1,483.01
+   - Fills: 4,149
+   - Notional: +$41,421.95
+   - Completed-pair PnL: +$9,132.29
+   - Unpaired-leftover PnL: -$7,649.28
+   - Profit factor: 1.072529
+   - Max drawdown: +$6,000.88
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.03
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.5
+     - max_wickiness = 0.75
+     - min_seconds_to_close = 30.0
+     - min_volatility = 1.0
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T021230Z-validation-009`
+4. `kalshi-prob-mm-opt-20260520T061323Z-validation-024`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$516.26
+   - Fills: 55
+   - Notional: +$825.00
+   - Completed-pair PnL: +$75.00
+   - Unpaired-leftover PnL: +$441.26
+   - Profit factor: 1.956037
+   - Max drawdown: +$176.18
+   - Params:
+     - base_notional = 15.0
+     - edge_threshold = 0.08
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.1
+     - max_wickiness = 0.6
+     - min_seconds_to_close = 120.0
+     - min_volatility = 2.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T061323Z-validation-024`
+5. `kalshi-prob-mm-opt-20260520T061323Z-validation-006`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$328.64
+   - Fills: 142
+   - Notional: +$1,345.53
+   - Completed-pair PnL: +$526.73
+   - Unpaired-leftover PnL: -$198.09
+   - Profit factor: 1.666755
+   - Max drawdown: +$126.17
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.08
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.25
+     - max_wickiness = 0.75
+     - min_seconds_to_close = 30.0
+     - min_volatility = 1.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T061323Z-validation-006`
+6. `kalshi-prob-mm-opt-20260520T062931Z-validation-003`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$156.19
+   - Fills: 148
+   - Notional: +$1,392.65
+   - Completed-pair PnL: +$314.35
+   - Unpaired-leftover PnL: -$158.16
+   - Profit factor: 1.293912
+   - Max drawdown: +$74.43
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.055
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.25
+     - max_wickiness = 0.75
+     - min_seconds_to_close = 30.0
+     - min_volatility = 1.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T062931Z-validation-003`
+7. `kalshi-prob-mm-opt-20260520T063335Z-validation-003`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$156.19
+   - Fills: 148
+   - Notional: +$1,392.65
+   - Completed-pair PnL: +$314.35
+   - Unpaired-leftover PnL: -$158.16
+   - Profit factor: 1.293912
+   - Max drawdown: +$74.43
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.055
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.25
+     - max_wickiness = 0.75
+     - min_seconds_to_close = 30.0
+     - min_volatility = 1.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T063335Z-validation-003`
+8. `kalshi-prob-mm-opt-20260520T063847Z-validation-003`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$156.19
+   - Fills: 148
+   - Notional: +$1,392.65
+   - Completed-pair PnL: +$314.35
+   - Unpaired-leftover PnL: -$158.16
+   - Profit factor: 1.293912
+   - Max drawdown: +$74.43
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.055
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.25
+     - max_wickiness = 0.75
+     - min_seconds_to_close = 30.0
+     - min_volatility = 1.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T063847Z-validation-003`
+9. `kalshi-prob-mm-opt-20260520T071704Z-validation-003`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$156.19
+   - Fills: 148
+   - Notional: +$1,392.65
+   - Completed-pair PnL: +$314.35
+   - Unpaired-leftover PnL: -$158.16
+   - Profit factor: 1.293912
+   - Max drawdown: +$74.43
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.055
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.25
+     - max_probability_mid_band = 0.0
+     - max_wickiness = 0.75
+     - min_abs_edge = 0.0
+     - min_probability_confidence = 0.0
+     - min_seconds_to_close = 30.0
+     - min_volatility = 1.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T071704Z-validation-003`
+10. `kalshi-prob-mm-opt-20260520T063847Z-validation-014`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$148.56
+   - Fills: 82
+   - Notional: +$820.00
+   - Completed-pair PnL: +$302.30
+   - Unpaired-leftover PnL: -$153.74
+   - Profit factor: 1.309508
+   - Max drawdown: +$80.00
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.05
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.25
+     - max_wickiness = 0.75
+     - min_seconds_to_close = 90.0
+     - min_volatility = 1.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T063847Z-validation-014`
+11. `kalshi-prob-mm-opt-20260520T071704Z-validation-014`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$148.56
+   - Fills: 82
+   - Notional: +$820.00
+   - Completed-pair PnL: +$302.30
+   - Unpaired-leftover PnL: -$153.74
+   - Profit factor: 1.309508
+   - Max drawdown: +$80.00
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.05
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.25
+     - max_probability_mid_band = 0.0
+     - max_wickiness = 0.75
+     - min_abs_edge = 0.0
+     - min_probability_confidence = 0.0
+     - min_seconds_to_close = 90.0
+     - min_volatility = 1.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T071704Z-validation-014`
+12. `kalshi-prob-mm-opt-20260520T063847Z-validation-013`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$144.02
+   - Fills: 99
+   - Notional: +$974.45
+   - Completed-pair PnL: +$300.85
+   - Unpaired-leftover PnL: -$156.83
+   - Profit factor: 1.288046
+   - Max drawdown: +$79.33
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.05
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.25
+     - max_wickiness = 0.75
+     - min_seconds_to_close = 60.0
+     - min_volatility = 1.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T063847Z-validation-013`
+13. `kalshi-prob-mm-opt-20260520T071704Z-validation-013`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$144.02
+   - Fills: 99
+   - Notional: +$974.45
+   - Completed-pair PnL: +$300.85
+   - Unpaired-leftover PnL: -$156.83
+   - Profit factor: 1.288046
+   - Max drawdown: +$79.33
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.05
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.25
+     - max_probability_mid_band = 0.0
+     - max_wickiness = 0.75
+     - min_abs_edge = 0.0
+     - min_probability_confidence = 0.0
+     - min_seconds_to_close = 60.0
+     - min_volatility = 1.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T071704Z-validation-013`
+14. `kalshi-prob-mm-opt-20260520T062931Z-validation-008`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$139.71
+   - Fills: 150
+   - Notional: +$1,383.97
+   - Completed-pair PnL: +$299.63
+   - Unpaired-leftover PnL: -$159.92
+   - Profit factor: 1.286572
+   - Max drawdown: +$63.97
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.05
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.15
+     - max_wickiness = 0.75
+     - min_seconds_to_close = 30.0
+     - min_volatility = 1.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T062931Z-validation-008`
+15. `kalshi-prob-mm-opt-20260520T063335Z-validation-008`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$139.71
+   - Fills: 150
+   - Notional: +$1,383.97
+   - Completed-pair PnL: +$299.63
+   - Unpaired-leftover PnL: -$159.92
+   - Profit factor: 1.286572
+   - Max drawdown: +$63.97
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.05
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.15
+     - max_wickiness = 0.75
+     - min_seconds_to_close = 30.0
+     - min_volatility = 1.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T063335Z-validation-008`
+16. `kalshi-prob-mm-opt-20260520T063847Z-validation-008`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$139.71
+   - Fills: 150
+   - Notional: +$1,383.97
+   - Completed-pair PnL: +$299.63
+   - Unpaired-leftover PnL: -$159.92
+   - Profit factor: 1.286572
+   - Max drawdown: +$63.97
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.05
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.15
+     - max_wickiness = 0.75
+     - min_seconds_to_close = 30.0
+     - min_volatility = 1.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T063847Z-validation-008`
+17. `kalshi-prob-mm-opt-20260520T071704Z-validation-008`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$139.71
+   - Fills: 150
+   - Notional: +$1,383.97
+   - Completed-pair PnL: +$299.63
+   - Unpaired-leftover PnL: -$159.92
+   - Profit factor: 1.286572
+   - Max drawdown: +$63.97
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.05
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.15
+     - max_probability_mid_band = 0.0
+     - max_wickiness = 0.75
+     - min_abs_edge = 0.0
+     - min_probability_confidence = 0.0
+     - min_seconds_to_close = 30.0
+     - min_volatility = 1.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T071704Z-validation-008`
+18. `kalshi-prob-mm-opt-20260520T063847Z-validation-011`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$131.28
+   - Fills: 130
+   - Notional: +$1,226.94
+   - Completed-pair PnL: +$309.15
+   - Unpaired-leftover PnL: -$177.87
+   - Profit factor: 1.247229
+   - Max drawdown: +$77.77
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.05
+     - force_flatten_seconds = 45.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.25
+     - max_wickiness = 0.75
+     - min_seconds_to_close = 30.0
+     - min_volatility = 1.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T063847Z-validation-011`
+19. `kalshi-prob-mm-opt-20260520T071704Z-validation-011`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$131.28
+   - Fills: 130
+   - Notional: +$1,226.94
+   - Completed-pair PnL: +$309.15
+   - Unpaired-leftover PnL: -$177.87
+   - Profit factor: 1.247229
+   - Max drawdown: +$77.77
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.05
+     - force_flatten_seconds = 45.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.25
+     - max_probability_mid_band = 0.0
+     - max_wickiness = 0.75
+     - min_abs_edge = 0.0
+     - min_probability_confidence = 0.0
+     - min_seconds_to_close = 30.0
+     - min_volatility = 1.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T071704Z-validation-011`
+20. `kalshi-prob-mm-opt-20260520T062931Z-validation-005`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$131.03
+   - Fills: 143
+   - Notional: +$1,366.95
+   - Completed-pair PnL: +$364.63
+   - Unpaired-leftover PnL: -$233.60
+   - Profit factor: 1.26686
+   - Max drawdown: +$76.20
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.07
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.25
+     - max_wickiness = 0.75
+     - min_seconds_to_close = 30.0
+     - min_volatility = 1.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T062931Z-validation-005`
+21. `kalshi-prob-mm-opt-20260520T063335Z-validation-005`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$131.03
+   - Fills: 143
+   - Notional: +$1,366.95
+   - Completed-pair PnL: +$364.63
+   - Unpaired-leftover PnL: -$233.60
+   - Profit factor: 1.26686
+   - Max drawdown: +$76.20
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.07
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.25
+     - max_wickiness = 0.75
+     - min_seconds_to_close = 30.0
+     - min_volatility = 1.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T063335Z-validation-005`
+22. `kalshi-prob-mm-opt-20260520T063847Z-validation-005`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$131.03
+   - Fills: 143
+   - Notional: +$1,366.95
+   - Completed-pair PnL: +$364.63
+   - Unpaired-leftover PnL: -$233.60
+   - Profit factor: 1.26686
+   - Max drawdown: +$76.20
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.07
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.25
+     - max_wickiness = 0.75
+     - min_seconds_to_close = 30.0
+     - min_volatility = 1.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T063847Z-validation-005`
+23. `kalshi-prob-mm-opt-20260520T071704Z-validation-005`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$131.03
+   - Fills: 143
+   - Notional: +$1,366.95
+   - Completed-pair PnL: +$364.63
+   - Unpaired-leftover PnL: -$233.60
+   - Profit factor: 1.26686
+   - Max drawdown: +$76.20
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.07
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.25
+     - max_probability_mid_band = 0.0
+     - max_wickiness = 0.75
+     - min_abs_edge = 0.0
+     - min_probability_confidence = 0.0
+     - min_seconds_to_close = 30.0
+     - min_volatility = 1.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T071704Z-validation-005`
+24. `kalshi-prob-mm-opt-20260520T071704Z-validation-023`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$130.54
+   - Fills: 151
+   - Notional: +$1,399.83
+   - Completed-pair PnL: +$296.16
+   - Unpaired-leftover PnL: -$165.62
+   - Profit factor: 1.246637
+   - Max drawdown: +$74.41
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.05
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.25
+     - max_probability_mid_band = 0.05
+     - max_wickiness = 0.75
+     - min_abs_edge = 0.0
+     - min_probability_confidence = 0.0
+     - min_seconds_to_close = 30.0
+     - min_volatility = 1.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T071704Z-validation-023`
+25. `kalshi-prob-mm-opt-20260520T061323Z-validation-005`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$129.83
+   - Fills: 151
+   - Notional: +$1,399.83
+   - Completed-pair PnL: +$295.82
+   - Unpaired-leftover PnL: -$165.99
+   - Profit factor: 1.245292
+   - Max drawdown: +$74.41
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.05
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.25
+     - max_wickiness = 0.75
+     - min_seconds_to_close = 30.0
+     - min_volatility = 1.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T061323Z-validation-005`
 
 ## volatility_hedge
 
-Runs scanned: 2
+Runs scanned: 5
 
 ### Best by realized PnL
 
@@ -2251,10 +3434,49 @@ Runs scanned: 2
    - Profit factor: 0
    - Max drawdown: +$0.00
    - Raw run: `runs/live/volatility_hedge`
+3. `venue-strategy-matrix-20260520T003002Z-kalshi-volatility_hedge`
+   - Strategy: `volatility_hedge`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/volatility_hedge/venue-strategy-matrix-20260520T003002Z-kalshi-volatility_hedge`
+4. `venue-strategy-matrix-20260520T003002Z-polymarket-volatility_hedge`
+   - Strategy: `volatility_hedge`
+   - Exchange: polymarket
+   - Datafeed: polymarket-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/polymarket-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/volatility_hedge/venue-strategy-matrix-20260520T003002Z-polymarket-volatility_hedge`
+5. `venue-strategy-matrix-20260520T005455Z-kalshi-volatility_hedge`
+   - Strategy: `volatility_hedge`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 0
+   - Notional: +$0.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/volatility_hedge/venue-strategy-matrix-20260520T005455Z-kalshi-volatility_hedge`
 
 ## volatility_inventory
 
-Runs scanned: 7
+Runs scanned: 10
 
 ### Best by realized PnL
 
@@ -2271,7 +3493,20 @@ Runs scanned: 7
    - Profit factor: 1.007083
    - Max drawdown: +$265,704.67
    - Raw run: `runs/volatility_inventory/all-strategies-nexttick-volatility_inventory-1778995478`
-2. `bankroll200-allstats-volatility_inventory-1778996866`
+2. `venue-strategy-matrix-20260520T003002Z-kalshi-volatility_inventory`
+   - Strategy: `volatility_inventory`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$0.00
+   - Fills: 4,985
+   - Notional: +$144,267.58
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$0.00
+   - Profit factor: 0
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/volatility_inventory/venue-strategy-matrix-20260520T003002Z-kalshi-volatility_inventory`
+3. `bankroll200-allstats-volatility_inventory-1778996866`
    - Strategy: `volatility_inventory`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -2284,7 +3519,7 @@ Runs scanned: 7
    - Profit factor: 0.017385
    - Max drawdown: +$165.97
    - Raw run: `runs/volatility_inventory/bankroll200-allstats-volatility_inventory-1778996866`
-3. `all-strategies-smallcap-volatility_inventory-1778995976`
+4. `all-strategies-smallcap-volatility_inventory-1778995976`
    - Strategy: `volatility_inventory`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -2297,7 +3532,7 @@ Runs scanned: 7
    - Profit factor: 0.764194
    - Max drawdown: +$2,699.13
    - Raw run: `runs/volatility_inventory/all-strategies-smallcap-volatility_inventory-1778995976`
-4. `improved-imbalance-guard-20260517T023331Z`
+5. `improved-imbalance-guard-20260517T023331Z`
    - Strategy: `volatility_inventory`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -2310,7 +3545,7 @@ Runs scanned: 7
    - Profit factor: 0.858455
    - Max drawdown: +$293,873.13
    - Raw run: `runs/volatility_inventory/improved-imbalance-guard-20260517T023331Z`
-5. `improved-market-reset-20260517T023156Z`
+6. `improved-market-reset-20260517T023156Z`
    - Strategy: `volatility_inventory`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -2323,7 +3558,7 @@ Runs scanned: 7
    - Profit factor: 0.858455
    - Max drawdown: +$293,873.13
    - Raw run: `runs/volatility_inventory/improved-market-reset-20260517T023156Z`
-6. `baseline-20260517T023024Z`
+7. `baseline-20260517T023024Z`
    - Strategy: `volatility_inventory`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -2336,7 +3571,7 @@ Runs scanned: 7
    - Profit factor: 0.857051
    - Max drawdown: +$294,276.69
    - Raw run: `runs/volatility_inventory/baseline-20260517T023024Z`
-7. `all-strategies-20260517T033359Z-volatility_inventory`
+8. `all-strategies-20260517T033359Z-volatility_inventory`
    - Strategy: `volatility_inventory`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -2349,3 +3584,29 @@ Runs scanned: 7
    - Profit factor: 0.848399
    - Max drawdown: +$293,873.13
    - Raw run: `runs/volatility_inventory/all-strategies-20260517T033359Z-volatility_inventory`
+9. `venue-strategy-matrix-20260520T005455Z-kalshi-volatility_inventory`
+   - Strategy: `volatility_inventory`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: -$61,629.39
+   - Fills: 4,732
+   - Notional: +$113,953.91
+   - Completed-pair PnL: +$520.68
+   - Unpaired-leftover PnL: -$62,150.07
+   - Profit factor: 0.441397
+   - Max drawdown: +$91,297.49
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/volatility_inventory/venue-strategy-matrix-20260520T005455Z-kalshi-volatility_inventory`
+10. `venue-strategy-matrix-20260520T003002Z-polymarket-volatility_inventory`
+   - Strategy: `volatility_inventory`
+   - Exchange: polymarket
+   - Datafeed: polymarket-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/polymarket-btc-1s.sqlite3`
+   - Realized PnL: -$78,538.13
+   - Fills: 4,533
+   - Notional: +$105,082.03
+   - Completed-pair PnL: +$3,541.54
+   - Unpaired-leftover PnL: -$82,079.67
+   - Profit factor: 0.22554
+   - Max drawdown: +$78,538.13
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/volatility_inventory/venue-strategy-matrix-20260520T003002Z-polymarket-volatility_inventory`

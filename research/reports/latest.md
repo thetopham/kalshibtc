@@ -1,10 +1,10 @@
 # Latest Strategy Replay Report
 
-Generated: 2026-05-19T01:36:48Z
+Generated: 2026-05-22T04:57:48Z
 
 Safety boundary: replay/research summaries only; no live orders.
 
-Runs scanned: 195
+Runs scanned: 578
 
 ## Top runs
 
@@ -86,7 +86,29 @@ Runs scanned: 195
    - Profit factor: 1.072751
    - Max drawdown: +$19,131.72
    - Raw run: `runs/simple_directional/audit-simple_directional-same-tick-1778989944`
-7. `all-strategies-nexttick-volatility_inventory-1778995478`
+7. `kalshi-prob-mm-opt-20260520T021230Z-validation-020`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$4,012.59
+   - Fills: 4,694
+   - Notional: +$46,940.00
+   - Completed-pair PnL: +$9,547.89
+   - Unpaired-leftover PnL: -$5,535.30
+   - Profit factor: 1.160568
+   - Max drawdown: +$6,520.31
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.02
+     - force_flatten_seconds = 30.0
+     - max_atr_slope = 0.75
+     - max_net_ratio = 0.5
+     - max_wickiness = 0.9
+     - min_seconds_to_close = 60.0
+     - min_volatility = 1.0
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T021230Z-validation-020`
+8. `all-strategies-nexttick-volatility_inventory-1778995478`
    - Strategy: `volatility_inventory`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -99,7 +121,7 @@ Runs scanned: 195
    - Profit factor: 1.007083
    - Max drawdown: +$265,704.67
    - Raw run: `runs/volatility_inventory/all-strategies-nexttick-volatility_inventory-1778995478`
-8. `improved-20260516T055637Z`
+9. `improved-20260516T055637Z`
    - Strategy: `simple_directional`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -112,7 +134,51 @@ Runs scanned: 195
    - Profit factor: 7.064662
    - Max drawdown: +$250.00
    - Raw run: `runs/simple_directional/improved-20260516T055637Z`
-9. `all-strategies-smallcap-simple_directional-1778995976`
+10. `kalshi-prob-mm-opt-20260520T014359Z-validation-009`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$1,483.01
+   - Fills: 4,149
+   - Notional: +$41,421.95
+   - Completed-pair PnL: +$9,132.29
+   - Unpaired-leftover PnL: -$7,649.28
+   - Profit factor: 1.072529
+   - Max drawdown: +$6,000.88
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.03
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.5
+     - max_wickiness = 0.75
+     - min_seconds_to_close = 30.0
+     - min_volatility = 1.0
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T014359Z-validation-009`
+11. `kalshi-prob-mm-opt-20260520T021230Z-validation-009`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$1,483.01
+   - Fills: 4,149
+   - Notional: +$41,421.95
+   - Completed-pair PnL: +$9,132.29
+   - Unpaired-leftover PnL: -$7,649.28
+   - Profit factor: 1.072529
+   - Max drawdown: +$6,000.88
+   - Params:
+     - base_notional = 10.0
+     - edge_threshold = 0.03
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.5
+     - max_wickiness = 0.75
+     - min_seconds_to_close = 30.0
+     - min_volatility = 1.0
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T021230Z-validation-009`
+12. `all-strategies-smallcap-simple_directional-1778995976`
    - Strategy: `simple_directional`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -125,7 +191,20 @@ Runs scanned: 195
    - Profit factor: 1.532135
    - Max drawdown: +$260.73
    - Raw run: `runs/simple_directional/all-strategies-smallcap-simple_directional-1778995976`
-10. `seed200_90_30_r360_net0.45-20260518T063124Z`
+13. `venue-strategy-matrix-20260520T003002Z-polymarket-late_window_only`
+   - Strategy: `late_window_only`
+   - Exchange: polymarket
+   - Datafeed: polymarket-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/polymarket-btc-1s.sqlite3`
+   - Realized PnL: +$768.63
+   - Fills: 118
+   - Notional: +$2,950.00
+   - Completed-pair PnL: +$0.00
+   - Unpaired-leftover PnL: +$768.63
+   - Profit factor: inf
+   - Max drawdown: +$0.00
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/late_window_only/venue-strategy-matrix-20260520T003002Z-polymarket-late_window_only`
+14. `seed200_90_30_r360_net0.45-20260518T063124Z`
    - Strategy: `seed_cheap_accumulate_repair_v1`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -150,7 +229,7 @@ Runs scanned: 195
      - very_cheap_price = 0.08
      - very_cheap_spend = 2
    - Raw run: `runs/seed_cheap_accumulate_repair_v1/seed200_90_30_r360_net0.45-20260518T063124Z`
-11. `kalshi-20260516-17-seed-repair-v1-90-30`
+15. `kalshi-20260516-17-seed-repair-v1-90-30`
    - Strategy: `seed_cheap_accumulate_repair_v1`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -170,7 +249,7 @@ Runs scanned: 195
      - seed_hedge_spend = 30
      - seed_primary_spend = 90
    - Raw run: `runs/seed_cheap_accumulate_repair_v1/kalshi-20260516-17-seed-repair-v1-90-30`
-12. `seed200_90_30_r360_net0.35-20260518T063048Z`
+16. `seed200_90_30_r360_net0.35-20260518T063048Z`
    - Strategy: `seed_cheap_accumulate_repair_v1`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -195,7 +274,7 @@ Runs scanned: 195
      - very_cheap_price = 0.08
      - very_cheap_spend = 2
    - Raw run: `runs/seed_cheap_accumulate_repair_v1/seed200_90_30_r360_net0.35-20260518T063048Z`
-13. `tune_90_30_r360_net0.45-20260518T065339Z`
+17. `tune_90_30_r360_net0.45-20260518T065339Z`
    - Strategy: `seed_cheap_accumulate_repair_v1`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -221,7 +300,7 @@ Runs scanned: 195
      - very_cheap_price = 0.08
      - very_cheap_spend = 2
    - Raw run: `runs/seed_cheap_accumulate_repair_v1/tune_90_30_r360_net0.45-20260518T065339Z`
-14. `tune_100_33p333333_r360_net0.45-20260518T065902Z`
+18. `tune_100_33p333333_r360_net0.45-20260518T065902Z`
    - Strategy: `seed_cheap_accumulate_repair_v1`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -247,7 +326,7 @@ Runs scanned: 195
      - very_cheap_price = 0.08
      - very_cheap_spend = 2
    - Raw run: `runs/seed_cheap_accumulate_repair_v1/tune_100_33p333333_r360_net0.45-20260518T065902Z`
-15. `tune_90_30_r360_net0.40-20260518T065302Z`
+19. `tune_90_30_r360_net0.40-20260518T065302Z`
    - Strategy: `seed_cheap_accumulate_repair_v1`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -273,7 +352,7 @@ Runs scanned: 195
      - very_cheap_price = 0.08
      - very_cheap_spend = 2
    - Raw run: `runs/seed_cheap_accumulate_repair_v1/tune_90_30_r360_net0.40-20260518T065302Z`
-16. `tune_90_30_r360_net0.35-20260518T065226Z`
+20. `tune_90_30_r360_net0.35-20260518T065226Z`
    - Strategy: `seed_cheap_accumulate_repair_v1`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -299,7 +378,7 @@ Runs scanned: 195
      - very_cheap_price = 0.08
      - very_cheap_spend = 2
    - Raw run: `runs/seed_cheap_accumulate_repair_v1/tune_90_30_r360_net0.35-20260518T065226Z`
-17. `tune_100_33p333333_r360_net0.40-20260518T065827Z`
+21. `tune_100_33p333333_r360_net0.40-20260518T065827Z`
    - Strategy: `seed_cheap_accumulate_repair_v1`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -325,7 +404,7 @@ Runs scanned: 195
      - very_cheap_price = 0.08
      - very_cheap_spend = 2
    - Raw run: `runs/seed_cheap_accumulate_repair_v1/tune_100_33p333333_r360_net0.40-20260518T065827Z`
-18. `tune_80_26p666667_r360_net0.45-20260518T064835Z`
+22. `tune_80_26p666667_r360_net0.45-20260518T064835Z`
    - Strategy: `seed_cheap_accumulate_repair_v1`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -351,7 +430,30 @@ Runs scanned: 195
      - very_cheap_price = 0.08
      - very_cheap_spend = 2
    - Raw run: `runs/seed_cheap_accumulate_repair_v1/tune_80_26p666667_r360_net0.45-20260518T064835Z`
-19. `tune_80_26p666667_r360_net0.40-20260518T064759Z`
+23. `kalshi-prob-mm-opt-20260520T061323Z-validation-024`
+   - Strategy: `strategy_probability_mm_v0`
+   - Exchange: kalshi
+   - Datafeed: kalshi-btc-1s
+   - Feed DB: `/home/matt/workspace/kalshi-btc-15m-bot/feed/kalshi-btc-1s.sqlite3`
+   - Realized PnL: +$516.26
+   - Fills: 55
+   - Notional: +$825.00
+   - Completed-pair PnL: +$75.00
+   - Unpaired-leftover PnL: +$441.26
+   - Profit factor: 1.956037
+   - Max drawdown: +$176.18
+   - Params:
+     - base_notional = 15.0
+     - edge_threshold = 0.08
+     - force_flatten_seconds = 60.0
+     - max_atr_slope = 1.5
+     - max_net_ratio = 0.1
+     - max_wickiness = 0.6
+     - min_seconds_to_close = 120.0
+     - min_volatility = 2.0
+     - probability_model = bayesian_markov
+   - Raw run: `/home/matt/workspace/kalshi-btc-15m-bot/runs/strategy_probability_mm_v0/kalshi-prob-mm-opt-20260520T061323Z-validation-024`
+24. `tune_80_26p666667_r360_net0.40-20260518T064759Z`
    - Strategy: `seed_cheap_accumulate_repair_v1`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -377,7 +479,7 @@ Runs scanned: 195
      - very_cheap_price = 0.08
      - very_cheap_spend = 2
    - Raw run: `runs/seed_cheap_accumulate_repair_v1/tune_80_26p666667_r360_net0.40-20260518T064759Z`
-20. `seed200_90_30_r360_net0.25-20260518T063013Z`
+25. `seed200_90_30_r360_net0.25-20260518T063013Z`
    - Strategy: `seed_cheap_accumulate_repair_v1`
    - Exchange: kalshi
    - Datafeed: kalshi-btc-1s
@@ -402,132 +504,3 @@ Runs scanned: 195
      - very_cheap_price = 0.08
      - very_cheap_spend = 2
    - Raw run: `runs/seed_cheap_accumulate_repair_v1/seed200_90_30_r360_net0.25-20260518T063013Z`
-21. `tune_100_33p333333_r360_net0.35-20260518T065751Z`
-   - Strategy: `seed_cheap_accumulate_repair_v1`
-   - Exchange: kalshi
-   - Datafeed: kalshi-btc-1s
-   - Feed DB: `feed/kalshi-btc-1s.sqlite3`
-   - Realized PnL: +$503.02
-   - Fills: 1,304
-   - Notional: +$35,043.25
-   - Completed-pair PnL: +$2,553.15
-   - Unpaired-leftover PnL: -$2,050.12
-   - Profit factor: 1.031782
-   - Max drawdown: +$572.95
-   - Params:
-     - cheap_price = 0.15
-     - max_net_ratio = 0.35
-     - max_total_cost = 200
-     - min_order_contracts = 5
-     - min_seconds_between_orders = 5
-     - normal_spend = 1
-     - one_fill_per_price_level = True
-     - repair_start_seconds = 360
-     - seed_hedge_spend = 33.333333
-     - seed_primary_spend = 100
-     - very_cheap_price = 0.08
-     - very_cheap_spend = 2
-   - Raw run: `runs/seed_cheap_accumulate_repair_v1/tune_100_33p333333_r360_net0.35-20260518T065751Z`
-22. `tune_80_26p666667_r360_net0.35-20260518T064723Z`
-   - Strategy: `seed_cheap_accumulate_repair_v1`
-   - Exchange: kalshi
-   - Datafeed: kalshi-btc-1s
-   - Feed DB: `feed/kalshi-btc-1s.sqlite3`
-   - Realized PnL: +$463.75
-   - Fills: 1,235
-   - Notional: +$29,689.47
-   - Completed-pair PnL: +$1,829.62
-   - Unpaired-leftover PnL: -$1,365.87
-   - Profit factor: 1.035427
-   - Max drawdown: +$419.94
-   - Params:
-     - cheap_price = 0.15
-     - max_net_ratio = 0.35
-     - max_total_cost = 200
-     - min_order_contracts = 5
-     - min_seconds_between_orders = 5
-     - normal_spend = 1
-     - one_fill_per_price_level = True
-     - repair_start_seconds = 360
-     - seed_hedge_spend = 26.666667
-     - seed_primary_spend = 80
-     - very_cheap_price = 0.08
-     - very_cheap_spend = 2
-   - Raw run: `runs/seed_cheap_accumulate_repair_v1/tune_80_26p666667_r360_net0.35-20260518T064723Z`
-23. `tune_70_23p333333_r360_net0.45-20260518T064313Z`
-   - Strategy: `seed_cheap_accumulate_repair_v1`
-   - Exchange: kalshi
-   - Datafeed: kalshi-btc-1s
-   - Feed DB: `feed/kalshi-btc-1s.sqlite3`
-   - Realized PnL: +$458.96
-   - Fills: 1,321
-   - Notional: +$26,617.89
-   - Completed-pair PnL: +$1,668.88
-   - Unpaired-leftover PnL: -$1,209.93
-   - Profit factor: 1.038888
-   - Max drawdown: +$391.98
-   - Params:
-     - cheap_price = 0.15
-     - max_net_ratio = 0.45
-     - max_total_cost = 200
-     - min_order_contracts = 5
-     - min_seconds_between_orders = 5
-     - normal_spend = 1
-     - one_fill_per_price_level = True
-     - repair_start_seconds = 360
-     - seed_hedge_spend = 23.333333
-     - seed_primary_spend = 70
-     - very_cheap_price = 0.08
-     - very_cheap_spend = 2
-   - Raw run: `runs/seed_cheap_accumulate_repair_v1/tune_70_23p333333_r360_net0.45-20260518T064313Z`
-24. `tune_70_23p333333_r360_net0.35-20260518T064202Z`
-   - Strategy: `seed_cheap_accumulate_repair_v1`
-   - Exchange: kalshi
-   - Datafeed: kalshi-btc-1s
-   - Feed DB: `feed/kalshi-btc-1s.sqlite3`
-   - Realized PnL: +$398.52
-   - Fills: 1,204
-   - Notional: +$26,281.11
-   - Completed-pair PnL: +$1,602.55
-   - Unpaired-leftover PnL: -$1,204.04
-   - Profit factor: 1.034421
-   - Max drawdown: +$369.80
-   - Params:
-     - cheap_price = 0.15
-     - max_net_ratio = 0.35
-     - max_total_cost = 200
-     - min_order_contracts = 5
-     - min_seconds_between_orders = 5
-     - normal_spend = 1
-     - one_fill_per_price_level = True
-     - repair_start_seconds = 360
-     - seed_hedge_spend = 23.333333
-     - seed_primary_spend = 70
-     - very_cheap_price = 0.08
-     - very_cheap_spend = 2
-   - Raw run: `runs/seed_cheap_accumulate_repair_v1/tune_70_23p333333_r360_net0.35-20260518T064202Z`
-25. `seed200_60_20_r360_net0.45-20260518T062753Z`
-   - Strategy: `seed_cheap_accumulate_repair_v1`
-   - Exchange: kalshi
-   - Datafeed: kalshi-btc-1s
-   - Feed DB: `feed/kalshi-btc-1s.sqlite3`
-   - Realized PnL: +$390.50
-   - Fills: 1,722
-   - Notional: +$24,216.00
-   - Completed-pair PnL: +$1,546.33
-   - Unpaired-leftover PnL: -$1,155.83
-   - Profit factor: 1.036115
-   - Max drawdown: +$413.47
-   - Params:
-     - cheap_price = 0.15
-     - max_net_ratio = 0.45
-     - max_total_cost = 200
-     - min_order_contracts = 5
-     - min_seconds_between_orders = 5
-     - normal_spend = 1
-     - repair_start_seconds = 360
-     - seed_hedge_spend = 20
-     - seed_primary_spend = 60
-     - very_cheap_price = 0.08
-     - very_cheap_spend = 2
-   - Raw run: `runs/seed_cheap_accumulate_repair_v1/seed200_60_20_r360_net0.45-20260518T062753Z`
