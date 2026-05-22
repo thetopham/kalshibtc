@@ -23,6 +23,7 @@ def test_console_scripts_are_feed_replay_paper_dashboard_validation_and_research
         "kbtc-probability-dataset": "kalshibtc.probability.dataset_cli:main",
         "kbtc-paper": "kalshibtc.paper_signal_executor:main",
         "kbtc-research-journal": "kalshibtc.research.journal:main",
+        "kbtc-auto-strategy-creator": "kalshibtc.research.auto_strategy_creator:main",
         "kbtc-poly-fill-validate": "kalshibtc.polymarket_fill_validation:main",
         "polymarket-btc-15m-recorder": "kalshibtc.polymarket_btc_15m_recorder:main",
     }
