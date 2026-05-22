@@ -122,9 +122,24 @@ def test_build_research_journal_writes_csv_and_markdown_sorted_by_date(tmp_path:
         strategy_params={"repair_start_seconds": 360},
     )
 
+    _write_run(
+        runs_dir,
+        strategy="seed_cheap_accumulate_repair_v1",
+        run_id="older-bigger-20260517T070000Z",
+        realized_pnl=1000.0,
+        profit_factor=2.0,
+    )
+    _write_run(
+        runs_dir,
+        strategy="another_strategy",
+        run_id="other-later-20260517T080000Z",
+        realized_pnl=-1.0,
+        profit_factor=0.9,
+    )
+
     result = build_research_journal(runs_dir=runs_dir, out_dir=out_dir, top=10)
 
-    assert result.run_count == 2
+    assert result.run_count == 4
     index_path = out_dir / "run_index.csv"
     history_path = out_dir / "strategy_history.md"
     latest_path = out_dir / "reports" / "latest.md"
@@ -133,18 +148,25 @@ def test_build_research_journal_writes_csv_and_markdown_sorted_by_date(tmp_path:
     assert result.latest_report_path == latest_path
 
     rows = list(csv.DictReader(index_path.read_text(encoding="utf-8").splitlines()))
-    assert [row["run_id"] for row in rows] == ["weak-20260518T060000Z", "winner-20260517T060000Z"]
+    assert [row["run_id"] for row in rows] == [
+        "weak-20260518T060000Z",
+        "other-later-20260517T080000Z",
+        "older-bigger-20260517T070000Z",
+        "winner-20260517T060000Z",
+    ]
+    assert list(rows[0].keys())[:3] == ["run_date", "strategy", "realized_pnl"]
+    assert rows[0]["run_date"] == "2026-05-18"
     assert rows[0]["run_timestamp"] == "2026-05-18T06:00:00Z"
     assert rows[0]["exchange"] == "kalshi"
     assert rows[0]["datafeed"] == "kalshi-btc-1s"
     assert rows[0]["feed_db"] == "feed/kalshi-btc-1s.sqlite3"
-    assert rows[1]["strategy_params"] == '{"repair_start_seconds": 360}'
-    assert rows[1]["realized_pnl"] == "25.0"
+    assert rows[3]["strategy_params"] == '{"repair_start_seconds": 360}'
+    assert rows[3]["realized_pnl"] == "25.0"
 
     history = history_path.read_text(encoding="utf-8")
     assert "# Strategy Research History" in history
     assert "## seed_cheap_accumulate_repair_v1" in history
-    assert "Runs by date/newest first" in history
+    assert "Runs by date, strategy, then realized PnL" in history
     assert "`winner-20260517T060000Z`" in history
     assert "Run timestamp: 2026-05-17T06:00:00Z" in history
     assert "Exchange: kalshi" in history
@@ -155,6 +177,8 @@ def test_build_research_journal_writes_csv_and_markdown_sorted_by_date(tmp_path:
 
     latest = latest_path.read_text(encoding="utf-8")
     assert "# Latest Strategy Replay Report" in latest
-    assert "## Latest runs" in latest
-    assert latest.index("weak-20260518T060000Z") < latest.index("winner-20260517T060000Z")
+    assert "## Runs by date, strategy, then realized PnL" in latest
+    assert latest.index("weak-20260518T060000Z") < latest.index("other-later-20260517T080000Z")
+    assert latest.index("other-later-20260517T080000Z") < latest.index("older-bigger-20260517T070000Z")
+    assert latest.index("older-bigger-20260517T070000Z") < latest.index("winner-20260517T060000Z")
     assert "Safety boundary: replay/research summaries only; no live orders." in latest

@@ -10,7 +10,9 @@ from pathlib import Path
 from typing import Any
 
 CSV_FIELDS = [
+    "run_date",
     "strategy",
+    "realized_pnl",
     "run_timestamp",
     "run_id",
     "exchange",
@@ -18,7 +20,6 @@ CSV_FIELDS = [
     "feed_db",
     "fills",
     "notional",
-    "realized_pnl",
     "completed_pair_pnl",
     "unpaired_leftover_pnl",
     "paired_locked_edge",
@@ -60,7 +61,9 @@ class RunSummary:
 
     def csv_row(self) -> dict[str, str]:
         return {
+            "run_date": _run_date(self.run_timestamp),
             "strategy": self.strategy,
+            "realized_pnl": _number_text(self.realized_pnl),
             "run_timestamp": self.run_timestamp,
             "run_id": self.run_id,
             "exchange": self.exchange,
@@ -68,7 +71,6 @@ class RunSummary:
             "feed_db": self.feed_db,
             "fills": str(self.fills),
             "notional": _number_text(self.notional),
-            "realized_pnl": _number_text(self.realized_pnl),
             "completed_pair_pnl": _number_text(self.completed_pair_pnl),
             "unpaired_leftover_pnl": _number_text(self.unpaired_leftover_pnl),
             "paired_locked_edge": _number_text(self.paired_locked_edge),
@@ -105,7 +107,7 @@ def collect_run_summaries(runs_dir: Path | str) -> list[RunSummary]:
         run_dir = metrics_path.parent
         config = _read_config(run_dir / "config.toml")
         summaries.append(_summary_from_metrics(metrics, config=config, run_dir=run_dir))
-    return sorted(summaries, key=lambda row: (row.run_timestamp, row.run_id), reverse=True)
+    return _sort_summaries(summaries)
 
 
 def build_research_journal(*, runs_dir: Path | str, out_dir: Path | str, top: int = 25) -> JournalResult:
@@ -139,7 +141,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--runs-dir", default="runs", help="Replay runs root. Default: runs")
     parser.add_argument("--out-dir", default="research", help="Research output directory. Default: research")
-    parser.add_argument("--top", type=int, default=25, help="Top runs per strategy/report. Default: 25")
+    parser.add_argument(
+        "--top",
+        type=int,
+        default=25,
+        help="Runs per strategy/report. Use 0 to include all runs. Default: 25",
+    )
     parser.add_argument("--json", action="store_true", help="Print machine-readable result summary")
     args = parser.parse_args(argv)
 
@@ -221,8 +228,16 @@ def _render_strategy_history(summaries: list[RunSummary], *, top: int) -> str:
 
     for strategy in sorted({summary.strategy for summary in summaries}):
         strategy_rows = [summary for summary in summaries if summary.strategy == strategy]
-        lines += [f"## {strategy}", "", f"Runs scanned: {len(strategy_rows)}", "", "### Runs by date/newest first", ""]
-        for idx, summary in enumerate(strategy_rows[:top], start=1):
+        rendered_rows = _limit_rows(strategy_rows, top)
+        lines += [
+            f"## {strategy}",
+            "",
+            f"Runs scanned: {len(strategy_rows)}",
+            "",
+            "### Runs by date, strategy, then realized PnL",
+            "",
+        ]
+        for idx, summary in enumerate(rendered_rows, start=1):
             lines += _render_run_bullets(summary, prefix=f"{idx}. ")
         lines.append("")
     return "\n".join(lines)
@@ -243,8 +258,8 @@ def _render_latest_report(summaries: list[RunSummary], *, top: int) -> str:
     if not summaries:
         lines += ["No replay runs found.", ""]
         return "\n".join(lines)
-    lines += ["## Latest runs", ""]
-    for idx, summary in enumerate(summaries[:top], start=1):
+    lines += ["## Runs by date, strategy, then realized PnL", ""]
+    for idx, summary in enumerate(_limit_rows(summaries, top), start=1):
         lines += _render_run_bullets(summary, prefix=f"{idx}. ")
     return "\n".join(lines)
 
@@ -273,7 +288,7 @@ def _render_run_bullets(summary: RunSummary, *, prefix: str = "- ") -> list[str]
     return lines
 
 
-_RUN_TIMESTAMP_PATTERN = re.compile(r"(20\d{6}T\d{6}Z|20\d{6}T\d{4}Z|20\d{6})")
+_RUN_TIMESTAMP_PATTERN = re.compile(r"(20\d{6}T\d{6}Z|20\d{6}T\d{4}Z|20\d{6}|(?<!\d)1[67]\d{8}(?!\d))")
 
 
 def _extract_run_timestamp(run_id: str) -> str:
@@ -281,6 +296,8 @@ def _extract_run_timestamp(run_id: str) -> str:
     if not match:
         return ""
     raw = match.group(1)
+    if raw.isdigit() and len(raw) == 10:
+        return datetime.fromtimestamp(int(raw), tz=UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     if len(raw) == 8:
         return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
     date = f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
@@ -290,6 +307,29 @@ def _extract_run_timestamp(run_id: str) -> str:
     else:
         time = f"{time[:2]}:{time[2:4]}:{time[4:6]}"
     return f"{date}T{time}Z"
+
+
+def _sort_summaries(summaries: list[RunSummary]) -> list[RunSummary]:
+    # Sort by research date first so old pre-settlement/proxy PnL does not
+    # dominate the journal. Within each day, group comparable strategy families
+    # together and keep a PnL leaderboard inside each strategy.
+    rows = list(summaries)
+    rows.sort(key=lambda summary: summary.run_id)
+    rows.sort(key=lambda summary: summary.run_timestamp, reverse=True)
+    rows.sort(key=lambda summary: summary.realized_pnl, reverse=True)
+    rows.sort(key=lambda summary: summary.strategy)
+    rows.sort(key=lambda summary: _run_date(summary.run_timestamp), reverse=True)
+    return rows
+
+
+def _run_date(run_timestamp: str) -> str:
+    return run_timestamp[:10] if run_timestamp else ""
+
+
+def _limit_rows(rows: list[RunSummary], top: int) -> list[RunSummary]:
+    if top <= 0:
+        return rows
+    return rows[:top]
 
 
 def _read_config(path: Path) -> dict[str, Any]:
