@@ -31,6 +31,13 @@ CSV_FIELDS = [
     "fill_timing",
     "settlements_from_feed_db",
     "strategy_params",
+    "candidate",
+    "hypothesis",
+    "mechanism",
+    "falsification",
+    "gate_passed",
+    "gate_reasons",
+    "report_path",
     "run_dir",
 ]
 
@@ -58,6 +65,13 @@ class RunSummary:
     fill_timing: str
     settlements_from_feed_db: bool
     strategy_params: dict[str, Any]
+    candidate: str = ""
+    hypothesis: str = ""
+    mechanism: str = ""
+    falsification: str = ""
+    gate_passed: str = ""
+    gate_reasons: list[str] | None = None
+    report_path: str = ""
 
     def csv_row(self) -> dict[str, str]:
         return {
@@ -82,6 +96,13 @@ class RunSummary:
             "fill_timing": self.fill_timing,
             "settlements_from_feed_db": str(self.settlements_from_feed_db).lower(),
             "strategy_params": json.dumps(self.strategy_params, sort_keys=True),
+            "candidate": self.candidate,
+            "hypothesis": self.hypothesis,
+            "mechanism": self.mechanism,
+            "falsification": self.falsification,
+            "gate_passed": self.gate_passed,
+            "gate_reasons": "; ".join(self.gate_reasons or []),
+            "report_path": self.report_path,
             "run_dir": self.run_dir,
         }
 
@@ -106,7 +127,8 @@ def collect_run_summaries(runs_dir: Path | str) -> list[RunSummary]:
             continue
         run_dir = metrics_path.parent
         config = _read_config(run_dir / "config.toml")
-        summaries.append(_summary_from_metrics(metrics, config=config, run_dir=run_dir))
+        research_summary = _read_research_summary(run_dir / "research_summary.json")
+        summaries.append(_summary_from_metrics(metrics, config=config, research_summary=research_summary, run_dir=run_dir))
     return _sort_summaries(summaries)
 
 
@@ -172,10 +194,14 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _summary_from_metrics(metrics: dict[str, Any], *, config: dict[str, Any], run_dir: Path) -> RunSummary:
+def _summary_from_metrics(
+    metrics: dict[str, Any], *, config: dict[str, Any], research_summary: dict[str, Any], run_dir: Path
+) -> RunSummary:
     portfolio = _mapping(metrics.get("portfolio_settlement"))
     pnl_split = _mapping(portfolio.get("pnl_split"))
     institutional = _mapping(metrics.get("institutional_metrics"))
+    candidate = _mapping(research_summary.get("candidate"))
+    gates = _mapping(research_summary.get("gates"))
     feed_db = str(metrics.get("feed_db") or config.get("feed_db") or "")
     exchange, datafeed = _classify_datafeed(feed_db)
     return RunSummary(
@@ -200,6 +226,13 @@ def _summary_from_metrics(metrics: dict[str, Any], *, config: dict[str, Any], ru
         fill_timing=str(config.get("fill_timing") or ""),
         settlements_from_feed_db=bool(config.get("settlements_from_feed_db") or False),
         strategy_params=_mapping(config.get("strategy_params")),
+        candidate=str(candidate.get("name") or config.get("candidate_name") or ""),
+        hypothesis=str(candidate.get("economic_story") or ""),
+        mechanism=str(candidate.get("mechanism") or ""),
+        falsification=str(candidate.get("falsification") or ""),
+        gate_passed=_gate_passed_text(gates.get("passed")),
+        gate_reasons=_string_list(gates.get("reasons")),
+        report_path=str(research_summary.get("report_path") or ""),
     )
 
 
@@ -284,6 +317,22 @@ def _render_run_bullets(summary: RunSummary, *, prefix: str = "- ") -> list[str]
         lines.append("   - Params:")
         for key, value in sorted(summary.strategy_params.items()):
             lines.append(f"     - {key} = {value}")
+    if summary.candidate:
+        lines.append(f"   - Candidate: `{summary.candidate}`")
+    if summary.hypothesis:
+        lines.append(f"   - Hypothesis: {summary.hypothesis}")
+    if summary.mechanism:
+        lines.append(f"   - Mechanism: {summary.mechanism}")
+    if summary.falsification:
+        lines.append(f"   - Falsification: {summary.falsification}")
+    if summary.gate_passed:
+        lines.append(f"   - Gate passed: {summary.gate_passed}")
+    if summary.gate_reasons:
+        lines.append("   - Gate reasons:")
+        for reason in summary.gate_reasons:
+            lines.append(f"     - {reason}")
+    if summary.report_path:
+        lines.append(f"   - Research report: `{summary.report_path}`")
     lines.append(f"   - Raw run: `{summary.run_dir}`")
     return lines
 
@@ -392,6 +441,28 @@ def _number_text(value: float) -> str:
     if float(value).is_integer():
         return f"{value:.1f}" if value else "0"
     return f"{value:.6f}".rstrip("0").rstrip(".")
+
+
+def _read_research_summary(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _gate_passed_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(bool(value)).lower()
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
 
 
 if __name__ == "__main__":

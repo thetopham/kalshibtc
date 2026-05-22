@@ -18,6 +18,7 @@ def _write_run(
     profit_factor: float = 1.0,
     max_drawdown: float = 0.0,
     strategy_params: dict[str, object] | None = None,
+    candidate_summary: dict[str, object] | None = None,
 ) -> Path:
     run_dir = runs_dir / strategy / run_id
     run_dir.mkdir(parents=True)
@@ -65,6 +66,8 @@ def _write_run(
         },
     }
     (run_dir / "metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
+    if candidate_summary is not None:
+        (run_dir / "research_summary.json").write_text(json.dumps(candidate_summary), encoding="utf-8")
     return run_dir
 
 
@@ -182,3 +185,43 @@ def test_build_research_journal_writes_csv_and_markdown_sorted_by_date(tmp_path:
     assert latest.index("other-later-20260517T080000Z") < latest.index("older-bigger-20260517T070000Z")
     assert latest.index("older-bigger-20260517T070000Z") < latest.index("winner-20260517T060000Z")
     assert "Safety boundary: replay/research summaries only; no live orders." in latest
+
+
+def test_research_journal_surfaces_manual_candidate_hypothesis_and_artifacts(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "runs"
+    out_dir = tmp_path / "research"
+    run_dir = _write_run(
+        runs_dir,
+        strategy="candidate_polymarket_late_window_only",
+        run_id="manual-poly-late-20260522T120000Z",
+        realized_pnl=17.5,
+        profit_factor=1.4,
+        strategy_params={"max_seconds_to_close": 65, "min_distance": 25},
+        candidate_summary={
+            "candidate": {
+                "name": "polymarket_late_window_only",
+                "economic_story": "Polymarket BTC 15m late-window distance from strike persists into resolution.",
+                "mechanism": "parameterized_late_window",
+                "falsification": "Reject if broad Polymarket replay loses after spread/fees.",
+            },
+            "gates": {"passed": True, "reasons": ["fills >= 10"]},
+            "report_path": "research/manual/poly-late-window.md",
+        },
+    )
+
+    build_research_journal(runs_dir=runs_dir, out_dir=out_dir, top=10)
+
+    rows = list(csv.DictReader((out_dir / "run_index.csv").read_text(encoding="utf-8").splitlines()))
+    assert rows[0]["candidate"] == "polymarket_late_window_only"
+    assert rows[0]["hypothesis"] == "Polymarket BTC 15m late-window distance from strike persists into resolution."
+    assert rows[0]["falsification"] == "Reject if broad Polymarket replay loses after spread/fees."
+    assert rows[0]["gate_passed"] == "true"
+    assert rows[0]["report_path"] == "research/manual/poly-late-window.md"
+
+    history = (out_dir / "strategy_history.md").read_text(encoding="utf-8")
+    assert "Candidate: `polymarket_late_window_only`" in history
+    assert "Hypothesis: Polymarket BTC 15m late-window distance from strike persists into resolution." in history
+    assert "Falsification: Reject if broad Polymarket replay loses after spread/fees." in history
+    assert "Gate passed: true" in history
+    assert "Research report: `research/manual/poly-late-window.md`" in history
+    assert f"Raw run: `{run_dir}`" in history

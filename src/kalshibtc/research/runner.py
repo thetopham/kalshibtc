@@ -134,6 +134,7 @@ def _run_candidate(args: argparse.Namespace) -> int:
     summary = {
         "candidate": spec.to_dict(),
         "run_dir": str(run_dir),
+        "report_path": str(run_dir / "research_summary.json"),
         "metrics": metrics,
         "gates": gates,
         "safety_boundary": "replay/research-only; no live orders",
